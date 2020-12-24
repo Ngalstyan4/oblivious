@@ -4,10 +4,14 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/vmalloc.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/sched.h>
 #include <linux/socket.h>
+
+#include <linux/fs.h>      // Needed by filp
+#include <asm/uaccess.h>   // Needed by segment descriptors
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Hasan Al Maruf");
@@ -33,9 +37,21 @@ void find_trend_1(void)
 	printk(KERN_INFO "in find trend");
 }
 EXPORT_SYMBOL(find_trend_1);
-
+/************************** TRACING LOG BEGIN ********************************/
+static unsigned long *trace = NULL;
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 2ULL
+#define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void*))
+unsigned long trace_idx = 0;
+void tracing_init() {
+	trace = vmalloc(sizeof(void*) * TRACE_ARRAY_SIZE);
+	if (trace == NULL) {
+		printk (KERN_ERR "Unable to allocate memory for tracing");
+		return;
+	}
+	printk (KERN_DEBUG "initialized trace %p", trace);
+}
 /*
- * Page fault error code bits:
+   * Page fault error code bits:
  *
  *   bit 0 ==	 0: no page found	1: protection fault
  *   bit 1 ==	 0: read access		1: write access
@@ -56,7 +72,14 @@ int i = 0;
 void do_page_fault_2(unsigned long error_code, unsigned long address,
 		     struct task_struct *tsk)
 {
-	if (process_pid == tsk->pid && i++ < 10000) {
+	if (unlikely(trace == NULL)) {
+		printk (KERN_ERR "trace not initialized");
+		return;
+	}
+
+	if (likely(trace_idx < TRACE_LEN)) trace[trace_idx++] = address;
+
+	if (process_pid == tsk->pid && i++ < 100) {
 		printk(KERN_INFO "%dth time in do page fault [%s | %s | %s | "
 				 "%s | %s]  %lx %d",
 		       i, error_code & PF_PROT ? "PROT" : "",
@@ -67,6 +90,8 @@ void do_page_fault_2(unsigned long error_code, unsigned long address,
 	}
 }
 EXPORT_SYMBOL(do_page_fault_2);
+
+/************************** TRACING LOG END ********************************/
 
 static int get_pid_for_process(void)
 {
@@ -100,10 +125,12 @@ static int process_find_init(void)
 	}
 	if (pid != -1) {
 		process_pid = pid;
+		tracing_init();
 		set_process_id(pid);
 		set_pointer(2, do_page_fault_2);
 		printk("PROCESS ID set for remote I/O -> %ld\n",
 		       get_process_id());
+		printk(KERN_INFO "started tracing");
 	} else {
 		printk(KERN_INFO "Failed to track process within %ld seconds\n",
 		       tried);
@@ -137,7 +164,6 @@ static int __init leap_functionality_init(void)
 	}
 	if (strcmp(cmd, "init") == 0) {
 		process_find_init();
-		swap_info_log();
 		return 0;
 	}
 	if (strcmp(cmd, "fini") == 0) {
@@ -164,6 +190,26 @@ static void __exit leap_functionality_exit(void)
 	int i;
 	for (i = 0; i < 100; i++)
 		set_pointer(i, kernel_noop);
+
+	if (trace != NULL) {
+		// Write trace to file
+		struct file *f;
+		mm_segment_t old_fs = get_fs();
+		set_fs(get_ds()); // KERNEL_DS
+
+		f = filp_open("/etc/trace_mmult_eigen.bin", O_CREAT | O_WRONLY, 0644);
+		if (f == NULL) {
+			printk(KERN_ERR "unable to create/open file");
+		} else {
+			if (f >= 0) {
+				f->f_op->write(f, (char*)trace, 4, &f->f_pos);
+			}
+			printk(KERN_DEBUG "Wrote to file");
+			filp_close(f,NULL);
+			set_fs(old_fs);
+		}
+	}
+
 	printk(KERN_INFO "Cleaning up leap functionality sample module.\n");
 }
 
