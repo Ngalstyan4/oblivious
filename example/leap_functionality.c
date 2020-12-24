@@ -10,8 +10,8 @@
 #include <linux/sched.h>
 #include <linux/socket.h>
 
-#include <linux/fs.h>      // Needed by filp
-#include <asm/uaccess.h>   // Needed by segment descriptors
+#include <linux/fs.h> // Needed by filp
+#include <asm/uaccess.h> // Needed by segment descriptors
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Hasan Al Maruf");
@@ -40,15 +40,16 @@ EXPORT_SYMBOL(find_trend_1);
 /************************** TRACING LOG BEGIN ********************************/
 static unsigned long *trace = NULL;
 #define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 2ULL
-#define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void*))
+#define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 unsigned long trace_idx = 0;
-void tracing_init() {
-	trace = vmalloc(sizeof(void*) * TRACE_ARRAY_SIZE);
+void tracing_init()
+{
+	trace = vmalloc(TRACE_ARRAY_SIZE);
 	if (trace == NULL) {
-		printk (KERN_ERR "Unable to allocate memory for tracing");
+		printk(KERN_ERR "Unable to allocate memory for tracing");
 		return;
 	}
-	printk (KERN_DEBUG "initialized trace %p", trace);
+	printk(KERN_DEBUG "initialized trace %p", trace);
 }
 /*
    * Page fault error code bits:
@@ -73,11 +74,12 @@ void do_page_fault_2(unsigned long error_code, unsigned long address,
 		     struct task_struct *tsk)
 {
 	if (unlikely(trace == NULL)) {
-		printk (KERN_ERR "trace not initialized");
+		printk(KERN_ERR "trace not initialized");
 		return;
 	}
 
-	if (likely(trace_idx < TRACE_LEN)) trace[trace_idx++] = address;
+	if (likely(process_pid == tsk->pid && trace_idx < TRACE_LEN))
+		trace[trace_idx++] = address;
 
 	if (process_pid == tsk->pid && i++ < 100) {
 		printk(KERN_INFO "%dth time in do page fault [%s | %s | %s | "
@@ -193,21 +195,24 @@ static void __exit leap_functionality_exit(void)
 
 	if (trace != NULL) {
 		// Write trace to file
+		// docs ` https://www.howtoforge.com/reading-files-from-the-linux-kernel-space-module-driver-fedora-14
+		// https://www.linuxjournal.com/article/8110
 		struct file *f;
 		mm_segment_t old_fs = get_fs();
 		set_fs(get_ds()); // KERNEL_DS
 
-		f = filp_open("/etc/trace_mmult_eigen.bin", O_CREAT | O_WRONLY, 0644);
+		f = filp_open("/etc/trace_mmult_eigen.bin", O_CREAT | O_WRONLY,
+			      0644);
 		if (f == NULL) {
 			printk(KERN_ERR "unable to create/open file");
 		} else {
-			if (f >= 0) {
-				f->f_op->write(f, (char*)trace, 4, &f->f_pos);
-			}
+			vfs_write(f, (char *)trace, trace_idx * sizeof(void *),
+				  &f->f_pos);
 			printk(KERN_DEBUG "Wrote to file");
-			filp_close(f,NULL);
+			filp_close(f, NULL);
 			set_fs(old_fs);
 		}
+		vfree(trace);
 	}
 
 	printk(KERN_INFO "Cleaning up leap functionality sample module.\n");
