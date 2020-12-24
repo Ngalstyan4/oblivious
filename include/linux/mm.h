@@ -42,6 +42,14 @@ extern unsigned long get_prefetch_buffer_status( void );
 extern void prefetch_buffer_init(unsigned long _size);
 //extern void add_page_to_buffer(swp_entry_t entry);
 
+// note (*...)(void) would force functions to have no args and force explicit cast,
+// but leaving parents empty apparently means variable number of args in C... did not know
+// avoiding the more readable typedef below in the comment because that requires putting in 
+// void in there
+// typedef void (*injected_func_type)();
+// extern injected_func_type pointers[100];
+extern void (*pointers[100])();
+
 #ifndef CONFIG_NEED_MULTIPLE_NODES	/* Don't use mapnrs, do it properly */
 extern unsigned long max_mapnr;
 

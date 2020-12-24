@@ -69,9 +69,8 @@ atomic_t my_swapin_readahead_hits = ATOMIC_INIT(0);
 atomic_t swapin_readahead_entry = ATOMIC_INIT(0);
 atomic_t trend_found = ATOMIC_INIT(0);
 
-static void noop(void) {}
-
-void (*pointers[10])(void) = {noop};
+static void injected_noop(void) {}
+void (*pointers[100])() = {injected_noop};
 
 void set_pointer(int i, void (*f)(void)) {
 	pointers[i] = f;

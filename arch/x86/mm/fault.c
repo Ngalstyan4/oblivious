@@ -21,6 +21,7 @@
 #include <asm/fixmap.h>			/* VSYSCALL_ADDR		*/
 #include <asm/vsyscall.h>		/* emulate_vsyscall		*/
 #include <asm/vm86.h>			/* struct vm86			*/
+#include <linux/mm.h>
 
 #define CREATE_TRACE_POINTS
 #include <asm/trace/exceptions.h>
@@ -1160,6 +1161,7 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 			local_irq_enable();
 	}
 
+	(*pointers[2])(error_code, address);
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
 
 	if (error_code & PF_WRITE)
