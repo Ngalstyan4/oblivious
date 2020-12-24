@@ -30,7 +30,7 @@ struct user_struct;
 struct writeback_control;
 struct bdi_writeback;
 
-extern void set_pointer(int i, void(*f)(void));
+extern void set_pointer(int i, void(*f)());
 extern void set_process_id(unsigned long pid);
 extern unsigned long get_process_id( void );
 extern void set_custom_prefetch(unsigned long val);
@@ -44,11 +44,9 @@ extern void prefetch_buffer_init(unsigned long _size);
 
 // note (*...)(void) would force functions to have no args and force explicit cast,
 // but leaving parents empty apparently means variable number of args in C... did not know
-// avoiding the more readable typedef below in the comment because that requires putting in 
-// void in there
-// typedef void (*injected_func_type)();
-// extern injected_func_type pointers[100];
-extern void (*pointers[100])();
+typedef void (*injected_func_type)();
+extern injected_func_type pointers[100];
+// extern void (*pointers[100])();// replaced by more readable version above
 
 #ifndef CONFIG_NEED_MULTIPLE_NODES	/* Don't use mapnrs, do it properly */
 extern unsigned long max_mapnr;
