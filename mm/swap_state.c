@@ -70,7 +70,7 @@ atomic_t swapin_readahead_entry = ATOMIC_INIT(0);
 atomic_t trend_found = ATOMIC_INIT(0);
 
 static void injected_noop(void) {}
-void (*pointers[100])() = {injected_noop};
+void (*pointers[100])() = {[0 ... 99] = injected_noop};
 
 void set_pointer(int i, void (*f)(void)) {
 	pointers[i] = f;
