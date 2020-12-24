@@ -1,4 +1,4 @@
-#include <linux/module.h>  
+#include <linux/module.h>
 #include <linux/kernel.h>   
 #include <linux/init.h>
 #include <linux/moduleparam.h>
@@ -16,6 +16,7 @@ extern void kernel_noop(void);
 char *cmd;
 unsigned long tried = 0;
 char *process_name;
+pid_t process_pid = 0;
 MODULE_PARM_DESC(cmd, "A string, for prefetch load/unload command");
 module_param(cmd, charp, 0000);
 MODULE_PARM_DESC(process_name, "A string, for process name");
@@ -31,16 +32,37 @@ void find_trend_1(void) {
 }
 EXPORT_SYMBOL(find_trend_1);
 
+
+
+/*
+ * Page fault error code bits:
+ *
+ *   bit 0 ==	 0: no page found	1: protection fault
+ *   bit 1 ==	 0: read access		1: write access
+ *   bit 2 ==	 0: kernel-mode access	1: user-mode access
+ *   bit 3 ==				1: use of reserved bit detected
+ *   bit 4 ==				1: fault was an instruction fetch
+ */
+enum x86_pf_error_code {
+
+	PF_PROT		=		1 << 0,
+	PF_WRITE	=		1 << 1,
+	PF_USER		=		1 << 2,
+	PF_RSVD		=		1 << 3,
+	PF_INSTR	=		1 << 4,
+};
+
 int i = 0;
 void do_page_fault_2(unsigned long error_code, unsigned long address, struct task_struct *tsk) {
-	if (i++ < 10)
+	if (process_pid == tsk->pid && i++ < 10000)
 	{
-		printk (KERN_INFO "in do page fault %lu %lx", error_code, address);
-	} else {
-		// crucial cleanup state necessary to allow for kernel module hot replacement
-		// otherwise, this function could still be called after rmmod and before reinsertion of
-		// the updated one, resulting in kenel panic	
-		set_pointer(2, kernel_noop);	
+		printk (KERN_INFO "%dth time in do page fault [%s | %s | %s | %s | %s]  %lx %d", 
+				i,
+				error_code & PF_PROT ? "PROT":"", 
+				error_code & PF_WRITE ? "WRITE": "READ", 
+				error_code & PF_USER ? "USER": "KERNEL", 
+				error_code & PF_RSVD ? "SPEC":"", 
+				error_code & PF_INSTR ? "INSTR": "", address, tsk->pid);
 	}
 }
 EXPORT_SYMBOL(do_page_fault_2);
@@ -76,7 +98,9 @@ static int process_find_init(void) {
 			msleep(1000); //milisecond sleep
 	}
 	if(pid != -1) {
+		process_pid = pid;
 		set_process_id(pid);
+		set_pointer(2, do_page_fault_2);
 		printk("PROCESS ID set for remote I/O -> %ld\n", get_process_id());
 	}
 	else {
@@ -96,7 +120,7 @@ static void usage(void) {
 static int __init leap_functionality_init(void) {	
 	set_pointer(0, haha);
 	set_pointer(1, find_trend_1);
-	set_pointer(2, do_page_fault_2);
+	// set_pointer(2, do_page_fault_2); // <-- set up in  proc attach init
 	if (!cmd) { usage(); return 0; }
 	if(strcmp(cmd, "init") == 0){
 		process_find_init();
@@ -125,7 +149,9 @@ static int __init leap_functionality_init(void) {
 	return 0;
 }
 
-static void __exit leap_functionality_exit(void){
+static void __exit leap_functionality_exit(void) {
+    int i;
+    for (i = 0; i < 100; i++) set_pointer(i, kernel_noop);
     printk(KERN_INFO "Cleaning up leap functionality sample module.\n");
 }
 
