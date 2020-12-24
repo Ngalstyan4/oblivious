@@ -12,7 +12,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Hasan Al Maruf");
 MODULE_DESCRIPTION("Kernel module to enable/disable Leap components");
-
+extern void kernel_noop(void);
 char *cmd;
 unsigned long tried = 0;
 char *process_name;
@@ -20,9 +20,34 @@ MODULE_PARM_DESC(cmd, "A string, for prefetch load/unload command");
 module_param(cmd, charp, 0000);
 MODULE_PARM_DESC(process_name, "A string, for process name");
 module_param(process_name, charp, 0000);
+
 void haha(void) {
 	printk (KERN_INFO "injected print statement- C Narek Galstyan");
 }
+EXPORT_SYMBOL(haha);
+
+void find_trend_1(void) {
+	printk (KERN_INFO "in find trend");
+}
+EXPORT_SYMBOL(find_trend_1);
+
+int i = 0;
+void do_page_fault_2(unsigned long error_code, unsigned long address, struct task_struct *tsk) {
+	if (i++ < 10)
+	{
+		printk (KERN_INFO "in do page fault %lu %lx", error_code, address);
+	} else {
+		// crucial cleanup state necessary to allow for kernel module hot replacement
+		// otherwise, this function could still be called after rmmod and before reinsertion of
+		// the updated one, resulting in kenel panic	
+		set_pointer(2, kernel_noop);	
+	}
+}
+EXPORT_SYMBOL(do_page_fault_2);
+
+
+
+
 static int get_pid_for_process(void) {
 	int pid = -1;
 	struct task_struct *task;
@@ -52,7 +77,6 @@ static int process_find_init(void) {
 	}
 	if(pid != -1) {
 		set_process_id(pid);
-		set_pointer(0, haha);
 		printk("PROCESS ID set for remote I/O -> %ld\n", get_process_id());
 	}
 	else {
@@ -70,6 +94,9 @@ static void usage(void) {
 }
 
 static int __init leap_functionality_init(void) {	
+	set_pointer(0, haha);
+	set_pointer(1, find_trend_1);
+	set_pointer(2, do_page_fault_2);
 	if (!cmd) { usage(); return 0; }
 	if(strcmp(cmd, "init") == 0){
 		process_find_init();
@@ -102,7 +129,6 @@ static void __exit leap_functionality_exit(void){
     printk(KERN_INFO "Cleaning up leap functionality sample module.\n");
 }
 
-EXPORT_SYMBOL(haha);
 module_init(leap_functionality_init);
 module_exit(leap_functionality_exit);
 
