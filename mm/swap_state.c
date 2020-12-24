@@ -69,6 +69,15 @@ atomic_t my_swapin_readahead_hits = ATOMIC_INIT(0);
 atomic_t swapin_readahead_entry = ATOMIC_INIT(0);
 atomic_t trend_found = ATOMIC_INIT(0);
 
+static void noop(void) {}
+
+void (*pointers[10])(void) = {noop};
+
+void set_pointer(int i, void (*f)(void)) {
+	pointers[i] = f;
+}
+EXPORT_SYMBOL(set_pointer);
+
 void set_custom_prefetch(unsigned long val){
         is_custom_prefetch = val;
         printk("custom prefetch: %s\n", (is_custom_prefetch != 0) ? "set" : "clear" );
@@ -190,6 +199,7 @@ int find_trend (int *depth, long *major_delta, int *major_count) {
     	int has_trend = 0, size = (int) atomic_read(&trend_history.max_size)/4, max_size;
 	max_size = size * 4;
 	
+	(*pointers[1])();
 	while(has_trend == 0 && size <= max_size) {
 		has_trend = find_trend_in_region(size, major_delta, major_count);
 		//printk( "at size: %d, trend found? %s\n", size, (has_trend == 0) ? "false" : "true" );
@@ -208,6 +218,7 @@ void show_swap_cache_info(void)
 	printk("Free swap  = %ldkB\n",
 		get_nr_swap_pages() << (PAGE_SHIFT - 10));
 	printk("Total swap = %lukB\n", total_swap_pages << (PAGE_SHIFT - 10));
+	(*pointers[0])();
 }
 
 void swap_info_log(void){

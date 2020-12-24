@@ -20,7 +20,9 @@ MODULE_PARM_DESC(cmd, "A string, for prefetch load/unload command");
 module_param(cmd, charp, 0000);
 MODULE_PARM_DESC(process_name, "A string, for process name");
 module_param(process_name, charp, 0000);
-
+void haha(void) {
+	printk (KERN_INFO "injected print statement- C Narek Galstyan");
+}
 static int get_pid_for_process(void) {
 	int pid = -1;
 	struct task_struct *task;
@@ -50,6 +52,7 @@ static int process_find_init(void) {
 	}
 	if(pid != -1) {
 		set_process_id(pid);
+		set_pointer(0, haha);
 		printk("PROCESS ID set for remote I/O -> %ld\n", get_process_id());
 	}
 	else {
@@ -60,14 +63,21 @@ static int process_find_init(void) {
 
 static void usage(void) {
         printk(KERN_INFO "To enable remote I/O data path: insmod leap_functionality.ko process_name=\"tunkrank\" cmd=\"init\"\n");
+        printk(KERN_INFO "To disable remote I/O data path: insmod leap_functionality.ko cmd=\"fini\"\n");
         printk(KERN_INFO "To enable prefetching: insmod leap_functionality.ko cmd=\"prefetch\"\n");
         printk(KERN_INFO "To disable prefetching: insmod leap_functionality.ko cmd=\"readahead\"\n");
         printk(KERN_INFO "To have swap info log: insmod leap_functionality.ko cmd=\"log\"\n");
 }
 
 static int __init leap_functionality_init(void) {	
+	if (!cmd) { usage(); return 0; }
 	if(strcmp(cmd, "init") == 0){
 		process_find_init();
+		swap_info_log();
+		return 0;
+	}
+	if(strcmp(cmd, "fini") == 0){
+		set_process_id(0);
 		return 0;
 	}
 	if(strcmp(cmd, "prefetch") == 0){
@@ -92,6 +102,7 @@ static void __exit leap_functionality_exit(void){
     printk(KERN_INFO "Cleaning up leap functionality sample module.\n");
 }
 
+EXPORT_SYMBOL(haha);
 module_init(leap_functionality_init);
 module_exit(leap_functionality_exit);
 

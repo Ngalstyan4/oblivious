@@ -30,6 +30,7 @@ struct user_struct;
 struct writeback_control;
 struct bdi_writeback;
 
+extern void set_pointer(int i, void(*f)(void));
 extern void set_process_id(unsigned long pid);
 extern unsigned long get_process_id( void );
 extern void set_custom_prefetch(unsigned long val);

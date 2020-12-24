@@ -152,3 +152,4 @@ x509.genkey
 .cache
 __pycache__
 *.pyc
+daemon/daemon

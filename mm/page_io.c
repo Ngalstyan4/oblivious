@@ -254,8 +254,10 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
                 unlock_page(page);
 		count_vm_event(PSWPOUT);
 		ret = sys_is_request(page, 1);
-		if (ret != 0)
+		if (ret != 0){
+        		printk("rdma writepage failed ret: %d", ret);
 			ret = __swap_writepage(page, wbc, end_swap_bio_write);
+		}
 	}
 	else 
 		ret = __swap_writepage(page, wbc, end_swap_bio_write);
@@ -351,8 +353,10 @@ int swap_readpage(struct page *page)
 
 	if (get_process_id() > 0) {// || get_process_id()  == current->pid) {
 		ret = sys_is_request(page, 0);
-		if(ret != 0)
+		if(ret != 0){
+        		printk("rdma readpage failed ret: %d", ret);
 			goto failed_rdma;
+		}
 		count_vm_event(PSWPIN);
 		return ret;
 	}
