@@ -12,6 +12,7 @@
 
 #include <linux/fs.h> // Needed by filp
 #include <asm/uaccess.h> // Needed by segment descriptors
+#include <asm/tlbflush.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Hasan Al Maruf");
@@ -20,6 +21,8 @@ extern void kernel_noop(void);
 char *cmd;
 unsigned long tried = 0;
 char *process_name;
+struct mm_struct *mm =
+	NULL; // todo:: move back to local scope once resetting ptes is figured out
 pid_t process_pid = 0;
 MODULE_PARM_DESC(cmd, "A string, for prefetch load/unload command");
 module_param(cmd, charp, 0000);
@@ -38,6 +41,9 @@ void find_trend_1(void)
 }
 EXPORT_SYMBOL(find_trend_1);
 /************************** TRACING LOG BEGIN ********************************/
+const unsigned long PRESENT_BIT_MASK = 1UL;
+const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
+
 static unsigned long *trace = NULL;
 #define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 2ULL
 #define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
@@ -69,26 +75,108 @@ enum x86_pf_error_code {
 	PF_INSTR = 1 << 4,
 };
 
+typedef struct {
+	pgd_t *pgd;
+	// todo, will need p4d for newer kernels
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+	bool initialized;
+} vm_t;
+
 int i = 0;
+vm_t last_entry = {.initialized = false }, entry = {.initialized = false };
+
+static void trace_maybe_set_pte(vm_t *entry, bool *return_early)
+{
+	unsigned long pte_deref_value = (unsigned long)((*entry->pte).pte);
+	if (unlikely(entry->initialized == false))
+		return;
+
+	if (pte_deref_value & SPECIAL_BIT_MASK) {
+		pte_deref_value |= PRESENT_BIT_MASK;
+		pte_deref_value &= ~SPECIAL_BIT_MASK;
+		set_pte(entry->pte, native_make_pte(pte_deref_value));
+		printk(KERN_DEBUG "cleared special bit for pte %lx",
+		       pte_deref_value);
+	}
+}
+
+// used to unmap the last entry
+static void trace_clear_pte(vm_t *entry)
+{
+	unsigned long pte_deref_value = (unsigned long)((*entry->pte).pte);
+
+	if (unlikely(entry->initialized == false))
+		return;
+	// normally, there would just be allocation faults. but for tracing we want to see *all* page
+	// accesses so we make sure that form kernel's point of view the page that the application
+	// accesssed just before faulting on this page, is not present in mememory. Additionally,
+	// we set the special bit (bit 58, see x86 manual) to later know that we are responsible
+	// for the fault.
+	//todo:: do not reuse var and repeat code.
+	printk(KERN_DEBUG "clearing pte for last entry pte: %lx",
+	       pte_deref_value);
+	pte_deref_value &= ~PRESENT_BIT_MASK;
+	pte_deref_value |= SPECIAL_BIT_MASK;
+	printk(KERN_DEBUG "clear_ed pte for last entry pte: %lx",
+	       pte_deref_value);
+	set_pte(entry->pte, native_make_pte(pte_deref_value));
+}
+
 void do_page_fault_2(unsigned long error_code, unsigned long address,
-		     struct task_struct *tsk)
+		     struct task_struct *tsk, bool *return_early)
 {
 	if (unlikely(trace == NULL)) {
 		printk(KERN_ERR "trace not initialized");
 		return;
 	}
 
-	if (likely(process_pid == tsk->pid && trace_idx < TRACE_LEN))
+	if (likely(process_pid == tsk->pid && trace_idx < TRACE_LEN)) {
+
+		mm = tsk->mm;
+		down_read(&mm->mmap_sem);
+
+		// walk the page table ` https://lwn.net/Articles/106177/
+		//todo:: pteditor does it wron i think,
+		//it does not dereference pte when passing around
+		entry.pgd = pgd_offset(mm, address);
+		entry.pud = pud_offset(entry.pgd, address);
+		entry.pmd = pmd_offset(entry.pud, address);
+		entry.pte = pte_offset_map(entry.pmd, address);
+		entry.initialized = true;
+		trace_maybe_set_pte(&entry, return_early);
+		//*return_early = true;
+		//todo:: optimze later, to return here and baybe avoid tlb flush?
+
+		trace_clear_pte(&last_entry);
+		last_entry = entry;
 		trace[trace_idx++] = address;
 
-	if (process_pid == tsk->pid && i++ < 100) {
-		printk(KERN_INFO "%dth time in do page fault [%s | %s | %s | "
-				 "%s | %s]  %lx %d",
-		       i, error_code & PF_PROT ? "PROT" : "",
+		get_cpu();
+		count_vm_tlb_event(NR_TLB_LOCAL_FLUSH_ALL);
+		local_flush_tlb();
+		// the following, if used correctly, can trace TLB count.
+		// trace_tlb_flush(TLB_LOCAL_SHOOTDOWN, TLB_FLUSH_ALL);
+		put_cpu();
+
+		up_read(&mm->mmap_sem);
+		printk(KERN_DEBUG "made it to the end!");
+	}
+
+	if (process_pid == tsk->pid && i++ < 1000) {
+		unsigned long pte_deref_value =
+			(unsigned long)((*entry.pte).pte);
+		printk(KERN_INFO "pfault [%s | %s | %s | "
+				 "%s | %s]  %lx %d pte: %lx [%s|%s]",
+		       error_code & PF_PROT ? "PROT" : "",
 		       error_code & PF_WRITE ? "WRITE" : "READ",
 		       error_code & PF_USER ? "USER" : "KERNEL",
 		       error_code & PF_RSVD ? "SPEC" : "",
-		       error_code & PF_INSTR ? "INSTR" : "", address, tsk->pid);
+		       error_code & PF_INSTR ? "INSTR" : "", address, tsk->pid,
+		       pte_deref_value,
+		       pte_deref_value & PRESENT_BIT_MASK ? "PRESENT" : "",
+		       pte_deref_value & SPECIAL_BIT_MASK ? "SPEC" : "");
 	}
 }
 EXPORT_SYMBOL(do_page_fault_2);
@@ -190,9 +278,25 @@ static int __init leap_functionality_init(void)
 static void __exit leap_functionality_exit(void)
 {
 	int i;
+	int num_ptes_set = 0;
+	bool return_early = false;
 	for (i = 0; i < 100; i++)
 		set_pointer(i, kernel_noop);
 
+	for (i = 0; i < trace_idx; i++) {
+
+		unsigned long address = trace[trace_idx];
+		entry.pgd = pgd_offset(mm, address);
+		entry.pud = pud_offset(entry.pgd, address);
+		entry.pmd = pmd_offset(entry.pud, address);
+		entry.pte = pte_offset_map(entry.pmd, address);
+		entry.initialized = true;
+		trace_maybe_set_pte(&entry, &return_early);
+		if (return_early)
+			num_ptes_set++;
+	}
+	printk(KERN_INFO "done RESETTING ptes before exit, num reset: %d",
+	       num_ptes_set);
 	if (trace != NULL) {
 		// Write trace to file
 		// docs ` https://www.howtoforge.com/reading-files-from-the-linux-kernel-space-module-driver-fedora-14
