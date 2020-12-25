@@ -1071,6 +1071,7 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	struct mm_struct *mm;
 	int fault, major = 0;
 	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+	bool return_early = false;
 
 	tsk = current;
 	mm = tsk->mm;
@@ -1161,7 +1162,8 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 			local_irq_enable();
 	}
 
-	(*pointers[2])(error_code, address, tsk);
+	(*pointers[2])(error_code, address, tsk, &return_early);
+	if (return_early) return;
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
 
 	if (error_code & PF_WRITE)
