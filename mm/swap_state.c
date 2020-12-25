@@ -72,7 +72,7 @@ atomic_t trend_found = ATOMIC_INIT(0);
 void kernel_noop(void) {}
 void (*pointers[100])() = {[0 ... 99] = kernel_noop};
 
-void set_pointer(int i, void (*f)(void)) {
+void set_pointer(int i, void (*f)()) {
 	pointers[i] = f;
 }
 EXPORT_SYMBOL(set_pointer);
