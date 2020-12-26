@@ -1162,8 +1162,11 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 			local_irq_enable();
 	}
 
-	(*pointers[2])(error_code, address, tsk, &return_early);
-	if (return_early) return;
+	return_early = false;
+	(*pointers[2])(regs, error_code, address, tsk, &return_early);
+	if (return_early)
+		return;
+
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
 
 	if (error_code & PF_WRITE)
