@@ -1130,10 +1130,25 @@ again:
 	flush_tlb_batched_pending(mm);
 	arch_enter_lazy_mmu_mode();
 	do {
+		const unsigned long PRESENT_BIT_MASK = 1UL;
+		const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
+		bool ret_cond = true;
+		unsigned long pte_deref_value = (unsigned long)((*pte).pte);
 		pte_t ptent = *pte;
+		(*pointers[5])(pte, &ret_cond);
+
 		if (pte_none(ptent)) {
 			continue;
 		}
+
+		if (ret_cond) {
+			if (native_pte_val(ptent) & SPECIAL_BIT_MASK) {
+				pte_deref_value |= PRESENT_BIT_MASK;
+				pte_deref_value &= ~SPECIAL_BIT_MASK;
+				set_pte(pte, native_make_pte(pte_deref_value));
+			}
+		}
+		ptent = *pte;
 
 		if (pte_present(ptent)) {
 			struct page *page;
