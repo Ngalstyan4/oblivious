@@ -14,9 +14,9 @@
 #include <asm/uaccess.h> // Needed by segment descriptors
 #include <asm/tlbflush.h>
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Hasan Al Maruf");
-MODULE_DESCRIPTION("Kernel module to enable/disable Leap components");
+MODULE_LICENSE("");
+MODULE_AUTHOR("");
+MODULE_DESCRIPTION("");
 extern void kernel_noop(void);
 char *cmd;
 unsigned long tried = 0;
@@ -40,11 +40,14 @@ void find_trend_1(void)
 	printk(KERN_INFO "in find trend");
 }
 EXPORT_SYMBOL(find_trend_1);
-/************************** TRACING LOG BEGIN ********************************/
+
+/************************** TRACING FOR MEMORY PREFETCHING BEGIN ********************************/
 const unsigned long PRESENT_BIT_MASK = 1UL;
 const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
 
 static unsigned long *trace = NULL;
+// const char *TRACE_FILE = "/etc/trace_mmult_eigen.bin";
+const char *TRACE_FILE = "/data/trace_mmult_eigen4.bin";
 #define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 10ULL
 #define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 unsigned long trace_idx = 0;
@@ -79,7 +82,6 @@ typedef struct {
 
 int i = 0;
 vm_t last_entry = {.initialized = false }, entry = {.initialized = false };
-unsigned long track_addr = -1;
 
 // Pattern-detection variables
 static vm_t recent_accesses[3];
@@ -128,7 +130,6 @@ static void trace_clear_pte(vm_t *entry)
 	// accesssed just before faulting on this page, is not present in mememory. Additionally,
 	// we set the special bit (bit 58, see x86 manual) to later know that we are responsible
 	// for the fault.
-	//todo:: do not reuse var and repeat code.
 	pte_deref_value &= ~PRESENT_BIT_MASK;
 	pte_deref_value |= SPECIAL_BIT_MASK;
 	set_pte(entry->pte, native_make_pte(pte_deref_value));
@@ -163,9 +164,23 @@ static void push_to_fifos(vm_t *entry, unsigned long faulting_ip)
 	recent_ips[1] = recent_ips[2];
 	recent_ips[2] = faulting_ip;
 
-	//printk (KERN_WARNING "last 4 from last: %lx %lx %lx ", r[2].address, r[1].address, r[0].address);
+	// printk(KERN_DEBUG "last 4 from last: %lx %lx %lx ", r[2].address,
+	//        r[1].address, r[0].address);
 }
 /************************** ALT PATTERN CHECK END  ********************************/
+static void log_pfault(struct pt_regs *regs, unsigned long error_code,
+		       unsigned long address, unsigned long pte_val)
+{
+	printk(KERN_DEBUG "pfault [%s | %s | %s | "
+			  "%s | %s]  %lx pte: %lx [%s|%s]",
+	       error_code & PF_PROT ? "PROT" : "",
+	       error_code & PF_WRITE ? "WRITE" : "READ",
+	       error_code & PF_USER ? "USER" : "KERNEL",
+	       error_code & PF_RSVD ? "SPEC" : "",
+	       error_code & PF_INSTR ? "INSTR" : "", address, pte_val,
+	       pte_val & PRESENT_BIT_MASK ? "PRESENT" : "",
+	       pte_val & SPECIAL_BIT_MASK ? "SPEC" : "");
+}
 
 void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		     unsigned long address, struct task_struct *tsk,
@@ -183,14 +198,14 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		down_read(&mm->mmap_sem);
 
 		// walk the page table ` https://lwn.net/Articles/106177/
-		//todo:: pteditor does it wron i think,
+		//todo:: pteditor does it wrong i think,
 		//it does not dereference pte when passing around
 		entry.address = address;
 		entry.pgd = pgd_offset(mm, address);
 		entry.pud = pud_offset(entry.pgd, address);
+		// todo:: to support thp, do some error checking here and see if a huge page is being allocated
 		entry.pmd = pmd_offset(entry.pud, address);
 		if (pmd_none(*(entry.pmd)) || pud_large(*(entry.pud))) {
-			track_addr = address;
 			if (pmd_none(*(entry.pmd)))
 				printk(KERN_ERR "pmd is noone %lx", address);
 			else
@@ -216,7 +231,7 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 			trace_clear_pte(&recent_accesses[1]);
 			exited_alt_pattern = false;
 		}
-	//if (*return_early) goto skip_tlb_flush;
+
 	error_out:
 		get_cpu();
 		count_vm_tlb_event(NR_TLB_LOCAL_FLUSH_ALL);
@@ -224,9 +239,11 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		// the following, if used correctly, can trace TLB count.
 		// trace_tlb_flush(TLB_LOCAL_SHOOTDOWN, TLB_FLUSH_ALL);
 		put_cpu();
-	skip_tlb_flush:
+
 		up_read(&mm->mmap_sem);
 
+		//todo:: change to
+		//last_entry = entry;
 		last_entry.pte = entry.pte;
 		last_entry.address = entry.address;
 		last_entry.initialized = entry.initialized;
@@ -242,24 +259,6 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 			patterns_encountered++;
 			exited_alt_pattern = true;
 		}
-		// printk(KERN_DEBUG "made it to the end!");
-	}
-
-	if (process_pid == tsk->pid &&
-	    (track_addr == address ||
-	     i++ < 3 /* || (error_code & PF_INSTR)*/)) {
-		unsigned long pte_deref_value = 0;
-		// (unsigned long)((*entry.pte).pte);
-		printk(KERN_INFO "pfault [%s | %s | %s | "
-				 "%s | %s]  %lx %d pte: %lx [%s|%s]",
-		       error_code & PF_PROT ? "PROT" : "",
-		       error_code & PF_WRITE ? "WRITE" : "READ",
-		       error_code & PF_USER ? "USER" : "KERNEL",
-		       error_code & PF_RSVD ? "SPEC" : "",
-		       error_code & PF_INSTR ? "INSTR" : "", address, tsk->pid,
-		       pte_deref_value,
-		       pte_deref_value & PRESENT_BIT_MASK ? "PRESENT" : "",
-		       pte_deref_value & SPECIAL_BIT_MASK ? "SPEC" : "");
 	}
 }
 EXPORT_SYMBOL(do_page_fault_2);
@@ -275,6 +274,9 @@ void mem_pattern_trace_end_4(void)
 	int i;
 	int num_ptes_set = 0;
 	printk(KERN_INFO "trace end syscall, clean up special bits");
+	// it seems there is no need for this after modifying do_unmap kernel path
+	// todo:: turned back on as saw some rss-counter and memory free errors that might
+	// be related to this, investigate later.
 	if (mm != NULL) {
 		printk(KERN_DEBUG "resetting ptes first 5 addrs of trace:[%lx, "
 				  "%lx, %lx, %lx, %lx]",
@@ -293,12 +295,7 @@ void mem_pattern_trace_end_4(void)
 				continue;
 			entry.pmd = pmd_offset(entry.pud, address);
 			if (pmd_none(*(entry.pmd)) || pud_large(*(entry.pud))) {
-				track_addr = address;
-				// if (pmd_none(*(entry.pmd)))
-				// 	printk(KERN_ERR "pmd is noone %lx",
-				// 	       address);
-				// else
-				// 	printk(KERN_ERR "pud is a large page");
+				// probably because the region has been cleaned up?
 				entry.pmd = NULL;
 				entry.pte = NULL;
 				continue;
@@ -315,18 +312,16 @@ void mem_pattern_trace_end_4(void)
 		       "done RESETTING ptes before exit, num successful reset: "
 		       "%d out of %ld",
 		       num_ptes_set, trace_idx);
-		msleep(1000);
 	}
 }
 EXPORT_SYMBOL(mem_pattern_trace_end_4);
-/************************** TRACING LOG END ********************************/
+/************************** TRACING FOR MEMORY PREFETCHING BEND ********************************/
 
+// debug-injecting in mm/memory.c:1138 (in function zap_pte_range)
 void do_unmap_5(pte_t *pte)
 {
 	unsigned long pte_deref_value = (unsigned long)((*pte).pte);
 	if (pte_deref_value & SPECIAL_BIT_MASK) {
-		// printk(KERN_DEBUG "pte is: %lx removing special bi!t",
-		//        (unsigned long)((*pte).pte));
 		pte_deref_value |= PRESENT_BIT_MASK;
 		pte_deref_value &= ~SPECIAL_BIT_MASK;
 		set_pte(pte, native_make_pte(pte_deref_value));
@@ -380,13 +375,19 @@ static int process_find_init(void)
 
 static void usage(void)
 {
+	printk(KERN_INFO "To initialize tracing for a process by name insmod "
+			 "leap_functionality.ko process_name=\"mmult_eigen\" "
+			 "cmd=\"trace_init\"\n");
 	printk(KERN_INFO "To enable remote I/O data path: insmod "
-			 "leap_functionality.ko process_name=\"tunkrank\" "
-			 "cmd=\"init\"\n");
+			 "leap_functionality.ko cmd=\"remote_on\"\n");
 	printk(KERN_INFO "To disable remote I/O data path: insmod "
-			 "leap_functionality.ko cmd=\"fini\"\n");
-	printk(KERN_INFO "To enable prefetching: insmod leap_functionality.ko "
-			 "cmd=\"prefetch\"\n");
+			 "leap_functionality.ko cmd=\"remote_off\"\n");
+	printk(KERN_INFO
+	       "To enable tape prefetching: insmod leap_functionality.ko "
+	       "cmd=\"tape\"\n");
+	printk(KERN_INFO
+	       "To enable leap prefetching: insmod leap_functionality.ko "
+	       "cmd=\"leap\"\n");
 	printk(KERN_INFO "To disable prefetching: insmod leap_functionality.ko "
 			 "cmd=\"readahead\"\n");
 	printk(KERN_INFO "To have swap info log: insmod leap_functionality.ko "
@@ -400,20 +401,32 @@ static int __init leap_functionality_init(void)
 	// 2 is done in the switch below
 	set_pointer(3, mem_pattern_trace_start_3);
 	set_pointer(4, mem_pattern_trace_end_4);
-	set_pointer(5, do_unmap_5);
+	//set_pointer(5, do_unmap_5);
 	if (!cmd) {
 		usage();
 		return 0;
 	}
-	if (strcmp(cmd, "init") == 0) {
+	if (strcmp(cmd, "trace_init") == 0) {
 		process_find_init();
 		return 0;
 	}
-	if (strcmp(cmd, "fini") == 0) {
+	if (strcmp(cmd, "remote_on") == 0) {
+		printk(KERN_INFO "Leap remote memory is on\n");
+		set_process_id(1);
+		return 0;
+	}
+	if (strcmp(cmd, "remote_off") == 0) {
+		printk(KERN_INFO "Leap remote memory is off\n");
 		set_process_id(0);
 		return 0;
 	}
-	if (strcmp(cmd, "prefetch") == 0) {
+	if (strcmp(cmd, "tape") == 0) {
+		printk(KERN_INFO "prefetching set to TAPE\n");
+		set_custom_prefetch(2);
+		return 0;
+	}
+	if (strcmp(cmd, "leap") == 0) {
+		printk(KERN_INFO "prefetching set to LEAP\n");
 		init_swap_trend(32);
 		set_custom_prefetch(1);
 		return 0;
@@ -421,6 +434,7 @@ static int __init leap_functionality_init(void)
 		swap_info_log();
 		return 0;
 	} else if (strcmp(cmd, "readahead") == 0) {
+		printk(KERN_INFO "prefetching set to LINUX READAHEAD\n");
 		set_custom_prefetch(0);
 		return 0;
 	} else
@@ -435,7 +449,6 @@ static void __exit leap_functionality_exit(void)
 	printk(KERN_INFO "resetting injection points to noop");
 	for (i = 0; i < 100; i++)
 		set_pointer(i, kernel_noop);
-	printk(KERN_INFO "done reseting injection points");
 
 	if (trace != NULL) {
 		// Write trace to file
@@ -445,19 +458,39 @@ static void __exit leap_functionality_exit(void)
 		mm_segment_t old_fs = get_fs();
 		set_fs(get_ds()); // KERNEL_DS
 
-		f = filp_open("/etc/trace_mmult_eigen.bin", O_CREAT | O_WRONLY,
-			      0644);
+		f = filp_open(TRACE_FILE, O_CREAT | O_WRONLY, 0644);
 		if (f == NULL) {
 			printk(KERN_ERR "unable to create/open file");
 		} else {
-			vfs_write(f, (char *)trace, trace_idx * sizeof(void *),
-				  &f->f_pos);
-			printk(KERN_DEBUG "Wrote to file");
+
+			long left_to_write = trace_idx * sizeof(void *);
+			char *buf = (char *)trace;
+			printk(KERN_INFO "num accesses:  %ld", trace_idx);
+			while (left_to_write > 0) {
+				// todo:: cannot write to larger than 2g from kernel
+				// fixed in newer kernels, I guess just upgrade?
+				size_t count = vfs_write(f, buf, left_to_write,
+							 &f->f_pos);
+				if (count < 0)
+					break;
+				printk(KERN_INFO
+				       "size_t can not be smaller than zero");
+				if (((long)(count)) < 0)
+					break;
+				printk(KERN_DEBUG "write %ld bytes out of %ld "
+						  "left to writ and %ld total",
+				       count, left_to_write,
+				       trace_idx * sizeof(void *));
+				left_to_write -= count;
+				buf += count;
+				printk("Wrote buffer size %ld bytes", count);
+			}
+			printk(KERN_DEBUG "wrote to file, left to write %ld",
+			       left_to_write);
 			filp_close(f, NULL);
 			set_fs(old_fs);
 		}
 		vfree(trace);
-		printk(KERN_INFO "done writing trace to file");
 	}
 	printk(KERN_INFO "Cleaning up leap functionality sample module.\n");
 }
