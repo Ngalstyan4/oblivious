@@ -81,30 +81,39 @@ typedef struct {
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;
+	unsigned long address;
 	bool initialized;
 } vm_t;
 
 int i = 0;
 vm_t last_entry = {.initialized = false }, entry = {.initialized = false };
-
-static void trace_maybe_set_pte(vm_t *entry, bool *return_early)
+unsigned long track_addr = -1;
+__always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
 {
 	unsigned long pte_deref_value = (unsigned long)((*entry->pte).pte);
+	*return_early = false;
+
 	if (unlikely(entry->initialized == false))
 		return;
 
 	if (pte_deref_value & SPECIAL_BIT_MASK) {
+		printk(KERN_DEBUG "clearing special bit for pte %lx",
+		       pte_deref_value);
 		pte_deref_value |= PRESENT_BIT_MASK;
 		pte_deref_value &= ~SPECIAL_BIT_MASK;
 		set_pte(entry->pte, native_make_pte(pte_deref_value));
 		printk(KERN_DEBUG "cleared special bit for pte %lx",
 		       pte_deref_value);
+		*return_early = true;
 	}
 }
 
 // used to unmap the last entry
 static void trace_clear_pte(vm_t *entry)
 {
+	// if previous fault was a pmd allocation fault, we will not have pte
+	if (!entry->pte)
+		return;
 	unsigned long pte_deref_value = (unsigned long)((*entry->pte).pte);
 
 	if (unlikely(entry->initialized == false))
@@ -124,8 +133,9 @@ static void trace_clear_pte(vm_t *entry)
 	set_pte(entry->pte, native_make_pte(pte_deref_value));
 }
 
-void do_page_fault_2(unsigned long error_code, unsigned long address,
-		     struct task_struct *tsk, bool *return_early)
+void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
+		     unsigned long address, struct task_struct *tsk,
+		     bool *return_early, int magic)
 {
 	if (unlikely(trace == NULL)) {
 		printk(KERN_ERR "trace not initialized");
@@ -140,16 +150,32 @@ void do_page_fault_2(unsigned long error_code, unsigned long address,
 		// walk the page table ` https://lwn.net/Articles/106177/
 		//todo:: pteditor does it wron i think,
 		//it does not dereference pte when passing around
+		entry.address = address;
 		entry.pgd = pgd_offset(mm, address);
 		entry.pud = pud_offset(entry.pgd, address);
 		entry.pmd = pmd_offset(entry.pud, address);
+		if (pmd_none(*(entry.pmd)) || pud_large(*(entry.pud))) {
+			track_addr = address;
+			if (pmd_none(*(entry.pmd)))
+				printk(KERN_ERR "pmd is noone %lx", address);
+			else
+				printk(KERN_ERR "pud is a large page");
+			entry.pmd = NULL;
+			entry.pte = NULL;
+			goto error_out;
+		}
 		entry.pte = pte_offset_map(entry.pmd, address);
 		entry.initialized = true;
+		//todo:: optimze later, to return here and baybe avoid tlb flush?
 		trace_maybe_set_pte(&entry, return_early);
-		//*return_early = true;
+		if (entry.address != last_entry.address //CoW?
+		    ) {
+			trace_clear_pte(&last_entry);
+		}
+	error_out:
+		up_read(&mm->mmap_sem);
 		//todo:: optimze later, to return here and baybe avoid tlb flush?
 
-		trace_clear_pte(&last_entry);
 		last_entry = entry;
 		trace[trace_idx++] = address;
 
@@ -160,13 +186,13 @@ void do_page_fault_2(unsigned long error_code, unsigned long address,
 		// trace_tlb_flush(TLB_LOCAL_SHOOTDOWN, TLB_FLUSH_ALL);
 		put_cpu();
 
-		up_read(&mm->mmap_sem);
-		printk(KERN_DEBUG "made it to the end!");
+		// printk(KERN_DEBUG "made it to the end!");
 	}
 
-	if (process_pid == tsk->pid && i++ < 1000) {
-		unsigned long pte_deref_value =
-			(unsigned long)((*entry.pte).pte);
+	if (process_pid == tsk->pid &&
+	    (track_addr == address || i++ < 3 || (error_code & PF_INSTR))) {
+		unsigned long pte_deref_value = 0;
+		// (unsigned long)((*entry.pte).pte);
 		printk(KERN_INFO "pfault [%s | %s | %s | "
 				 "%s | %s]  %lx %d pte: %lx [%s|%s]",
 		       error_code & PF_PROT ? "PROT" : "",
@@ -181,6 +207,60 @@ void do_page_fault_2(unsigned long error_code, unsigned long address,
 }
 EXPORT_SYMBOL(do_page_fault_2);
 
+void mem_pattern_trace_start_3(void)
+{
+}
+EXPORT_SYMBOL(mem_pattern_trace_start_3);
+
+void mem_pattern_trace_end_4(void)
+{
+
+	int i;
+	int num_ptes_set = 0;
+	printk(KERN_INFO "trace end syscall, clean up special bits");
+	if (mm != NULL) {
+		printk(KERN_INFO "resetting ptes [%lx, %lx, %lx, %lx, %lx]",
+		       trace[0], trace[1], trace[2], trace[3], trace[4]);
+		down_read(&mm->mmap_sem);
+		for (i = 0; i < trace_idx; i++) {
+
+			unsigned long address = trace[i];
+			bool my_ret_early = false;
+			printk(KERN_INFO "addr %lx", address);
+			entry.address = address;
+			entry.pgd = pgd_offset(mm, address);
+			if (pgd_none(*entry.pgd) || pgd_bad(*entry.pgd))
+				continue;
+			entry.pud = pud_offset(entry.pgd, address);
+			if (pud_none(*entry.pud) || pud_bad(*entry.pud))
+				continue;
+			entry.pmd = pmd_offset(entry.pud, address);
+			if (pmd_none(*(entry.pmd)) || pud_large(*(entry.pud))) {
+				track_addr = address;
+				if (pmd_none(*(entry.pmd)))
+					printk(KERN_ERR "pmd is noone %lx",
+					       address);
+				else
+					printk(KERN_ERR "pud is a large page");
+				entry.pmd = NULL;
+				entry.pte = NULL;
+				continue;
+			}
+			entry.pte = pte_offset_map(entry.pmd, address);
+			entry.initialized = true;
+			trace_maybe_set_pte(&entry, &my_ret_early);
+			if (my_ret_early)
+				num_ptes_set++;
+		}
+		up_read(&mm->mmap_sem);
+
+		printk(KERN_INFO "done RESETTING ptes before exit, num reset: "
+				 "%d out of %ld",
+		       num_ptes_set, trace_idx);
+		msleep(1000);
+	}
+}
+EXPORT_SYMBOL(mem_pattern_trace_end_4);
 /************************** TRACING LOG END ********************************/
 
 static int get_pid_for_process(void)
@@ -247,6 +327,9 @@ static int __init leap_functionality_init(void)
 {
 	set_pointer(0, haha);
 	set_pointer(1, find_trend_1);
+	// 2 is done in the switch below
+	set_pointer(3, mem_pattern_trace_start_3);
+	set_pointer(4, mem_pattern_trace_end_4);
 	// set_pointer(2, do_page_fault_2); // <-- set up in  proc attach init
 	if (!cmd) {
 		usage();
@@ -278,25 +361,12 @@ static int __init leap_functionality_init(void)
 static void __exit leap_functionality_exit(void)
 {
 	int i;
-	int num_ptes_set = 0;
-	bool return_early = false;
+
+	printk(KERN_INFO "resetting injection points to noop");
 	for (i = 0; i < 100; i++)
 		set_pointer(i, kernel_noop);
+	printk(KERN_INFO "done reseting injection points");
 
-	for (i = 0; i < trace_idx; i++) {
-
-		unsigned long address = trace[trace_idx];
-		entry.pgd = pgd_offset(mm, address);
-		entry.pud = pud_offset(entry.pgd, address);
-		entry.pmd = pmd_offset(entry.pud, address);
-		entry.pte = pte_offset_map(entry.pmd, address);
-		entry.initialized = true;
-		trace_maybe_set_pte(&entry, &return_early);
-		if (return_early)
-			num_ptes_set++;
-	}
-	printk(KERN_INFO "done RESETTING ptes before exit, num reset: %d",
-	       num_ptes_set);
 	if (trace != NULL) {
 		// Write trace to file
 		// docs ` https://www.howtoforge.com/reading-files-from-the-linux-kernel-space-module-driver-fedora-14
@@ -317,8 +387,8 @@ static void __exit leap_functionality_exit(void)
 			set_fs(old_fs);
 		}
 		vfree(trace);
+		printk(KERN_INFO "done writing trace to file");
 	}
-
 	printk(KERN_INFO "Cleaning up leap functionality sample module.\n");
 }
 
