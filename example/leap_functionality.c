@@ -45,18 +45,10 @@ const unsigned long PRESENT_BIT_MASK = 1UL;
 const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
 
 static unsigned long *trace = NULL;
-#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 2ULL
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 10ULL
 #define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 unsigned long trace_idx = 0;
-void tracing_init()
-{
-	trace = vmalloc(TRACE_ARRAY_SIZE);
-	if (trace == NULL) {
-		printk(KERN_ERR "Unable to allocate memory for tracing");
-		return;
-	}
-	printk(KERN_DEBUG "initialized trace %p", trace);
-}
+
 /*
    * Page fault error code bits:
  *
@@ -88,6 +80,22 @@ typedef struct {
 int i = 0;
 vm_t last_entry = {.initialized = false }, entry = {.initialized = false };
 unsigned long track_addr = -1;
+
+// Pattern-detection variables
+static vm_t recent_accesses[3];
+static unsigned long recent_ips[3];
+static unsigned long patterns_encountered = 0;
+static bool exited_alt_pattern = false;
+
+void tracing_init()
+{
+	trace = vmalloc(TRACE_ARRAY_SIZE);
+	if (trace == NULL) {
+		printk(KERN_ERR "Unable to allocate memory for tracing");
+		return;
+	}
+	printk(KERN_DEBUG "initialized trace %p", trace);
+}
 __always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
 {
 	unsigned long pte_deref_value = (unsigned long)((*entry->pte).pte);
@@ -97,13 +105,9 @@ __always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
 		return;
 
 	if (pte_deref_value & SPECIAL_BIT_MASK) {
-		printk(KERN_DEBUG "clearing special bit for pte %lx",
-		       pte_deref_value);
 		pte_deref_value |= PRESENT_BIT_MASK;
 		pte_deref_value &= ~SPECIAL_BIT_MASK;
 		set_pte(entry->pte, native_make_pte(pte_deref_value));
-		printk(KERN_DEBUG "cleared special bit for pte %lx",
-		       pte_deref_value);
 		*return_early = true;
 	}
 }
@@ -111,10 +115,11 @@ __always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
 // used to unmap the last entry
 static void trace_clear_pte(vm_t *entry)
 {
+	unsigned long pte_deref_value;
 	// if previous fault was a pmd allocation fault, we will not have pte
 	if (!entry->pte)
 		return;
-	unsigned long pte_deref_value = (unsigned long)((*entry->pte).pte);
+	pte_deref_value = (unsigned long)((*entry->pte).pte);
 
 	if (unlikely(entry->initialized == false))
 		return;
@@ -124,25 +129,55 @@ static void trace_clear_pte(vm_t *entry)
 	// we set the special bit (bit 58, see x86 manual) to later know that we are responsible
 	// for the fault.
 	//todo:: do not reuse var and repeat code.
-	printk(KERN_DEBUG "clearing pte for last entry pte: %lx",
-	       pte_deref_value);
 	pte_deref_value &= ~PRESENT_BIT_MASK;
 	pte_deref_value |= SPECIAL_BIT_MASK;
-	printk(KERN_DEBUG "clear_ed pte for last entry pte: %lx",
-	       pte_deref_value);
 	set_pte(entry->pte, native_make_pte(pte_deref_value));
 }
+
+/************************** ALT PATTERN CHECK BEGIN ********************************/
+
+// Returns true if we're stuck in the ABAB pattern that causes programs to hang
+static bool check_alt_pattern(unsigned long faulting_addr,
+			      unsigned long faulting_ip)
+{
+	// Check for the alternating pattern in faulting addresses
+	bool alt_pattern_addr =
+		recent_accesses[0].address == recent_accesses[2].address &&
+		recent_accesses[1].address == faulting_addr;
+
+	// The last 4 instructions were identical
+	bool all_same_inst = recent_ips[0] == recent_ips[1] &&
+			     recent_ips[1] == recent_ips[2] &&
+			     recent_ips[2] == faulting_ip;
+
+	// Both conditions need to be true for us to be in the pattern
+	return alt_pattern_addr && all_same_inst;
+}
+
+static void push_to_fifos(vm_t *entry, unsigned long faulting_ip)
+{
+	recent_accesses[0] = recent_accesses[1];
+	recent_accesses[1] = recent_accesses[2];
+	recent_accesses[2] = *entry;
+	recent_ips[0] = recent_ips[1];
+	recent_ips[1] = recent_ips[2];
+	recent_ips[2] = faulting_ip;
+
+	//printk (KERN_WARNING "last 4 from last: %lx %lx %lx ", r[2].address, r[1].address, r[0].address);
+}
+/************************** ALT PATTERN CHECK END  ********************************/
 
 void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		     unsigned long address, struct task_struct *tsk,
 		     bool *return_early, int magic)
 {
+	bool in_alt_pattern;
 	if (unlikely(trace == NULL)) {
 		printk(KERN_ERR "trace not initialized");
 		return;
 	}
 
-	if (likely(process_pid == tsk->pid && trace_idx < TRACE_LEN)) {
+	if (process_pid == tsk->pid && trace_idx < TRACE_LEN) {
 
 		mm = tsk->mm;
 		down_read(&mm->mmap_sem);
@@ -168,29 +203,51 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		entry.initialized = true;
 		//todo:: optimze later, to return here and baybe avoid tlb flush?
 		trace_maybe_set_pte(&entry, return_early);
-		if (entry.address != last_entry.address //CoW?
-		    ) {
+
+		in_alt_pattern = check_alt_pattern(address, regs->ip);
+		if (in_alt_pattern)
+			printk(KERN_WARNING "IN ALT PATTERN %ld", trace_idx);
+		if (entry.address != last_entry.address && //CoW?
+		    !in_alt_pattern) {
 			trace_clear_pte(&last_entry);
 		}
+
+		if (!in_alt_pattern && exited_alt_pattern) {
+			trace_clear_pte(&recent_accesses[1]);
+			exited_alt_pattern = false;
+		}
+	//if (*return_early) goto skip_tlb_flush;
 	error_out:
-		up_read(&mm->mmap_sem);
-		//todo:: optimze later, to return here and baybe avoid tlb flush?
-
-		last_entry = entry;
-		trace[trace_idx++] = address;
-
 		get_cpu();
 		count_vm_tlb_event(NR_TLB_LOCAL_FLUSH_ALL);
 		local_flush_tlb();
 		// the following, if used correctly, can trace TLB count.
 		// trace_tlb_flush(TLB_LOCAL_SHOOTDOWN, TLB_FLUSH_ALL);
 		put_cpu();
+	skip_tlb_flush:
+		up_read(&mm->mmap_sem);
 
+		last_entry.pte = entry.pte;
+		last_entry.address = entry.address;
+		last_entry.initialized = entry.initialized;
+		trace[trace_idx++] = address;
+
+		// Push to the data structures that help us determine
+		// whether we've encountered an alternating pattern
+		push_to_fifos(&entry, regs->ip);
+
+		// If we're in an alt pattern we need to know
+		// the next time we're in the signal handler
+		if (in_alt_pattern) {
+			patterns_encountered++;
+			exited_alt_pattern = true;
+		}
 		// printk(KERN_DEBUG "made it to the end!");
 	}
 
 	if (process_pid == tsk->pid &&
-	    (track_addr == address || i++ < 3 || (error_code & PF_INSTR))) {
+	    (track_addr == address ||
+	     i++ < 3 /* || (error_code & PF_INSTR)*/)) {
 		unsigned long pte_deref_value = 0;
 		// (unsigned long)((*entry.pte).pte);
 		printk(KERN_INFO "pfault [%s | %s | %s | "
@@ -219,14 +276,14 @@ void mem_pattern_trace_end_4(void)
 	int num_ptes_set = 0;
 	printk(KERN_INFO "trace end syscall, clean up special bits");
 	if (mm != NULL) {
-		printk(KERN_INFO "resetting ptes [%lx, %lx, %lx, %lx, %lx]",
+		printk(KERN_DEBUG "resetting ptes first 5 addrs of trace:[%lx, "
+				  "%lx, %lx, %lx, %lx]",
 		       trace[0], trace[1], trace[2], trace[3], trace[4]);
 		down_read(&mm->mmap_sem);
 		for (i = 0; i < trace_idx; i++) {
 
 			unsigned long address = trace[i];
 			bool my_ret_early = false;
-			printk(KERN_INFO "addr %lx", address);
 			entry.address = address;
 			entry.pgd = pgd_offset(mm, address);
 			if (pgd_none(*entry.pgd) || pgd_bad(*entry.pgd))
@@ -237,11 +294,11 @@ void mem_pattern_trace_end_4(void)
 			entry.pmd = pmd_offset(entry.pud, address);
 			if (pmd_none(*(entry.pmd)) || pud_large(*(entry.pud))) {
 				track_addr = address;
-				if (pmd_none(*(entry.pmd)))
-					printk(KERN_ERR "pmd is noone %lx",
-					       address);
-				else
-					printk(KERN_ERR "pud is a large page");
+				// if (pmd_none(*(entry.pmd)))
+				// 	printk(KERN_ERR "pmd is noone %lx",
+				// 	       address);
+				// else
+				// 	printk(KERN_ERR "pud is a large page");
 				entry.pmd = NULL;
 				entry.pte = NULL;
 				continue;
@@ -254,14 +311,27 @@ void mem_pattern_trace_end_4(void)
 		}
 		up_read(&mm->mmap_sem);
 
-		printk(KERN_INFO "done RESETTING ptes before exit, num reset: "
-				 "%d out of %ld",
+		printk(KERN_INFO
+		       "done RESETTING ptes before exit, num successful reset: "
+		       "%d out of %ld",
 		       num_ptes_set, trace_idx);
 		msleep(1000);
 	}
 }
 EXPORT_SYMBOL(mem_pattern_trace_end_4);
 /************************** TRACING LOG END ********************************/
+
+void do_unmap_5(pte_t *pte)
+{
+	unsigned long pte_deref_value = (unsigned long)((*pte).pte);
+	if (pte_deref_value & SPECIAL_BIT_MASK) {
+		// printk(KERN_DEBUG "pte is: %lx removing special bi!t",
+		//        (unsigned long)((*pte).pte));
+		pte_deref_value |= PRESENT_BIT_MASK;
+		pte_deref_value &= ~SPECIAL_BIT_MASK;
+		set_pte(pte, native_make_pte(pte_deref_value));
+	}
+}
 
 static int get_pid_for_process(void)
 {
@@ -330,7 +400,7 @@ static int __init leap_functionality_init(void)
 	// 2 is done in the switch below
 	set_pointer(3, mem_pattern_trace_start_3);
 	set_pointer(4, mem_pattern_trace_end_4);
-	// set_pointer(2, do_page_fault_2); // <-- set up in  proc attach init
+	set_pointer(5, do_unmap_5);
 	if (!cmd) {
 		usage();
 		return 0;
