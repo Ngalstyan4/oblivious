@@ -894,4 +894,8 @@ asmlinkage int sys_is_session_create(const char *portal);
 
 asmlinkage int sys_is_request(struct page *page, int is_write);
 
+asmlinkage int sys_mem_pattern_trace_start(void);
+
+asmlinkage int sys_mem_pattern_trace_end(void);
+
 #endif

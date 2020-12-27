@@ -335,6 +335,8 @@
 
 326 	common	is_session_create	sys_is_session_create
 327	common	is_request		sys_is_request
+328	common	mem_pattern_trace_start	sys_mem_pattern_trace_start
+329	common	mem_pattern_trace_end	sys_mem_pattern_trace_end
 
 #
 # x32-specific system call numbers start at 512 to avoid cache impact
