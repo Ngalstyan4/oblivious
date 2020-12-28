@@ -781,7 +781,7 @@ struct page *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	mask = swapin_nr_pages(offset) - 1;
 	atomic_inc(&swapin_readahead_entry);
 
-	if( get_custom_prefetch() != 0 ) {
+	if (get_custom_prefetch() == 1) {
 		int has_trend = 0, depth, major_count;
 		long major_delta;
 //		log_swap_trend(offset);
@@ -807,6 +807,15 @@ struct page *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask,
 			lru_add_drain();
 			goto skip; 
 		}
+		else
+			goto usual;
+	}
+
+	if (get_custom_prefetch() == 2) { /* TAPE prefetching*/
+		bool goto_skip = false;
+		(*pointers[10])(&entry, &gfp_mask, vma, addr, &goto_skip);
+		if (goto_skip)
+			goto skip;
 		else
 			goto usual;
 	}
