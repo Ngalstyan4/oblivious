@@ -5,6 +5,8 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/vmalloc.h>
+#include <linux/swap.h> //todo:: q:: reqired for swapops import because of SWP_MIGRATION_READ. is it ok?
+#include <linux/swapops.h> // for tape prefetching injection
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/sched.h>
@@ -34,10 +36,10 @@ void haha(void)
 	printk(KERN_INFO "injected print statement- C Narek Galstyan");
 }
 EXPORT_SYMBOL(haha);
-
+int leap_swapin_counter = 0;
 void find_trend_1(void)
 {
-	printk(KERN_INFO "in find trend");
+	printk(KERN_INFO "in find trend %d ", ++leap_swapin_counter);
 }
 EXPORT_SYMBOL(find_trend_1);
 
@@ -48,7 +50,7 @@ const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
 static unsigned long *trace = NULL;
 // const char *TRACE_FILE = "/etc/trace_mmult_eigen.bin";
 const char *TRACE_FILE = "/data/trace_mmult_eigen4.bin";
-#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 10ULL
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 2ULL
 #define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 unsigned long trace_idx = 0;
 
@@ -328,6 +330,139 @@ void do_unmap_5(pte_t *pte)
 	}
 }
 
+/* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE BEGIN ++++++++++++++++++++*/
+// declarations copied from swap_state for injections BEGIN
+struct pref_buffer {
+	atomic_t head;
+	atomic_t tail;
+	atomic_t size;
+	swp_entry_t *offset_list;
+	struct page **page_data;
+	spinlock_t buffer_lock;
+};
+
+extern struct pref_buffer prefetch_buffer;
+// declarations copied from swap_state for injections END
+
+int counter = 0;
+int found_counter = 0;
+static unsigned long *prefetch_trace = NULL;
+unsigned long num_accesses = -1;
+unsigned long current_pos = 0;
+unsigned long PAGE_ADDR_MASK = ~0xfff;
+unsigned long MAX_SEARCH_DIST = 10000;
+void tape_prefetch_init()
+{
+	struct file *f;
+	mm_segment_t old_fs = get_fs();
+
+	prefetch_trace = vmalloc(TRACE_ARRAY_SIZE);
+	if (prefetch_trace == NULL) {
+		printk(KERN_ERR "unable to allocate memory for trace");
+		return;
+	}
+	set_fs(get_ds()); // KERNEL_DS
+
+	f = filp_open(TRACE_FILE, O_RDONLY, 0);
+	if (f == NULL) {
+		printk(KERN_ERR "unable to read/open file");
+	} else {
+		size_t count = vfs_read(f, (char *)prefetch_trace,
+					TRACE_ARRAY_SIZE, &f->f_pos);
+		num_accesses = count / sizeof(void *);
+		printk(KERN_DEBUG "read %ld bytes which means %ld accesses",
+		       count, num_accesses);
+		filp_close(f, NULL);
+		set_fs(old_fs);
+		printk(KERN_DEBUG "read trace: %lx %lx %lx", prefetch_trace[0],
+		       prefetch_trace[1], prefetch_trace[2]);
+	}
+}
+void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
+			 struct vm_area_struct *vma, const unsigned long addr,
+			 bool *goto_skip)
+{
+	int dist = 0;
+	pte_t pte_val;
+	swp_entry_t prefetch_entry; //todo naming!!?!
+	vm_t vm_entry;
+	struct mm_struct *mm = vma->vm_mm;
+	struct page *page;
+
+	counter++;
+	if (unlikely(prefetch_trace == NULL))
+		return;
+	// printk(KERN_DEBUG "swaping readahead count: %d addr: %lx\n",
+	//        counter++, addr);
+
+	while (dist < MAX_SEARCH_DIST &&
+	       (prefetch_trace[current_pos + dist] & PAGE_ADDR_MASK) !=
+		       (addr & PAGE_ADDR_MASK))
+		dist++;
+	if ((prefetch_trace[current_pos + dist] & PAGE_ADDR_MASK) ==
+	    (addr & PAGE_ADDR_MASK)) {
+		int num_prefetch = 0;
+		found_counter++;
+		// walk the page table for addr START
+		down_read(&mm->mmap_sem);
+		for (i = 0; i < 100 && num_prefetch < 32; i++) {
+			unsigned long paddr = prefetch_trace[current_pos + i];
+			vm_entry.address = paddr;
+			vm_entry.pgd = pgd_offset(mm, paddr);
+			if (pgd_none(*vm_entry.pgd) || pgd_bad(*vm_entry.pgd))
+				return;
+			vm_entry.pud = pud_offset(vm_entry.pgd, paddr);
+			if (pud_none(*vm_entry.pud) || pud_bad(*vm_entry.pud))
+				return;
+			vm_entry.pmd = pmd_offset(vm_entry.pud, paddr);
+			if (pmd_none(*(vm_entry.pmd)) ||
+			    pud_large(*(vm_entry.pud))) {
+				// probably because the region has been cleaned up?
+				vm_entry.pmd = NULL;
+				vm_entry.pte = NULL;
+				return;
+			}
+			vm_entry.pte = pte_offset_map(vm_entry.pmd, paddr);
+			vm_entry.initialized = true;
+
+			// prefetch the page if needed
+			pte_val = *vm_entry.pte;
+			if (pte_none(pte_val))
+				continue;
+			if (pte_present(pte_val))
+				continue;
+			prefetch_entry = pte_to_swp_entry(pte_val);
+			if (unlikely(non_swap_entry(prefetch_entry)))
+				continue;
+			page = read_swap_cache_async(prefetch_entry, *gfp_mask,
+						     vma, addr);
+			if (!page)
+				continue;
+			num_prefetch++;
+			SetPageReadahead(page);
+
+			put_page(page); //= page_cache_release
+
+			// printk(KERN_WARNING "page walk ahead %d %s %lx", i,
+			//        !pte_none(*vm_entry.pte) &&
+			// 		       pte_present(*vm_entry.pte) ?
+			// 	       "PRESENT" :
+			// 	       "GONE",
+			//        addr & PAGE_ADDR_MASK);
+		}
+		printk(KERN_INFO "num prefetch %d", num_prefetch);
+		lru_add_drain();
+		if (num_prefetch > 10)
+			*goto_skip = true;
+
+		up_read(&mm->mmap_sem);
+		// walk the page table for addr END
+		current_pos += dist;
+	} else {
+		// printk(KERN_WARNING " lost in trace %d/%d \n", found_counter, counter);
+	}
+}
+/* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE END ++++++++++++++++++++++*/
 static int get_pid_for_process(void)
 {
 	int pid = -1;
@@ -402,6 +537,7 @@ static int __init leap_functionality_init(void)
 	set_pointer(3, mem_pattern_trace_start_3);
 	set_pointer(4, mem_pattern_trace_end_4);
 	//set_pointer(5, do_unmap_5);
+	set_pointer(10, swapin_readahead_10);
 	if (!cmd) {
 		usage();
 		return 0;
@@ -421,7 +557,13 @@ static int __init leap_functionality_init(void)
 		return 0;
 	}
 	if (strcmp(cmd, "tape") == 0) {
-		printk(KERN_INFO "prefetching set to TAPE\n");
+		printk(KERN_INFO "prefetching set to TAPE");
+
+		// !IMPORTANT TODO:: see why the line below is necessary and
+		// what from leap swap system we are depending on
+		// faults on ? swap_state:166 (log_swap_trend)
+		init_swap_trend(32);
+		tape_prefetch_init();
 		set_custom_prefetch(2);
 		return 0;
 	}
@@ -447,8 +589,13 @@ static void __exit leap_functionality_exit(void)
 	int i;
 
 	printk(KERN_INFO "resetting injection points to noop");
+	printk(KERN_INFO "found %d/%d", found_counter, counter);
 	for (i = 0; i < 100; i++)
 		set_pointer(i, kernel_noop);
+
+	if (prefetch_trace != NULL) {
+		vfree(prefetch_trace);
+	}
 
 	if (trace != NULL) {
 		// Write trace to file

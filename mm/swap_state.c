@@ -477,43 +477,52 @@ struct pref_buffer {
 	spinlock_t buffer_lock;
 };
 
-static struct pref_buffer prefetch_buffer;
+struct pref_buffer prefetch_buffer;
+EXPORT_SYMBOL(prefetch_buffer);
 
 static int get_buffer_head(void){
 	return atomic_read(&prefetch_buffer.head);
 }
+EXPORT_SYMBOL(get_buffer_head);
 
-static int get_buffer_tail(void){
+int get_buffer_tail(void){
 	return atomic_read(&prefetch_buffer.tail);
 }
+EXPORT_SYMBOL(get_buffer_tail);
 
-static int get_buffer_size(void){
+int get_buffer_size(void){
     return atomic_read(&prefetch_buffer.size);
 }
+EXPORT_SYMBOL(get_buffer_size);
 
-static void inc_buffer_head(void){
+void inc_buffer_head(void){
 	atomic_set(&prefetch_buffer.head, (atomic_read(&prefetch_buffer.head) + 1) % buffer_size);
 //	atomic_dec(&prefetch_buffer.size);
 	return;
 }
+EXPORT_SYMBOL(inc_buffer_head);
 
-static void inc_buffer_tail(void){
+void inc_buffer_tail(void){
 	atomic_set(&prefetch_buffer.tail, (atomic_read(&prefetch_buffer.tail) + 1) % buffer_size);
 //	atomic_inc(&prefetch_buffer.size);
     	return;
 }
+EXPORT_SYMBOL(inc_buffer_tail);
 
-static void inc_buffer_size(void) {
+void inc_buffer_size(void) {
 	atomic_inc(&prefetch_buffer.size);
 }
+EXPORT_SYMBOL(inc_buffer_size);
 
-static void dec_buffer_size(void) {
+void dec_buffer_size(void) {
         atomic_dec(&prefetch_buffer.size);
 }
+EXPORT_SYMBOL(dec_buffer_size);
 
-static int is_buffer_full(void){
+int is_buffer_full(void){
 	return (buffer_size <= atomic_read(&prefetch_buffer.size));
 }
+EXPORT_SYMBOL(is_buffer_full);
 
 void add_page_to_buffer(swp_entry_t entry, struct page* page){
 	int tail, head, error=0;
@@ -681,6 +690,7 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		page_cache_release(new_page);
 	return found_page;
 }
+EXPORT_SYMBOL(__read_swap_cache_async);
 
 /*
  * Locate a page of swap in physical memory, reserving swap cache space
@@ -704,6 +714,7 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 
 	return retpage;
 }
+EXPORT_SYMBOL(read_swap_cache_async);
 
 static unsigned long swapin_nr_pages(unsigned long offset)
 {
