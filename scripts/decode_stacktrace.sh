@@ -38,6 +38,7 @@ declare -A modcache
 
 find_module() {
 	if [[ "$modpath" != "" ]] ; then
+		module="${module%]*}"
 		for fn in $(find "$modpath" -name "${module//_/[-_]}.ko*") ; do
 			if readelf -WS "$fn" | grep -qwF .debug_line ; then
 				echo $fn
