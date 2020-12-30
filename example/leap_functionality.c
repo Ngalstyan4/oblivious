@@ -21,53 +21,17 @@
 MODULE_LICENSE("");
 MODULE_AUTHOR("");
 MODULE_DESCRIPTION("");
-extern void kernel_noop(void);
-char *cmd;
-unsigned long tried = 0;
-char *process_name;
-struct mm_struct *mm =
-	NULL; // todo:: move back to local scope once resetting ptes is figured out
-pid_t process_pid = 0;
+static char *cmd;
+//todo: remove
+static char *process_name;
 MODULE_PARM_DESC(cmd, "A string, for prefetch load/unload command");
 module_param(cmd, charp, 0000);
 MODULE_PARM_DESC(process_name, "A string, for process name");
 module_param(process_name, charp, 0000);
 
-/*****PREFETCHING VARS***/
-int counter = 0;
-int found_counter = 0;
-static unsigned long *prefetch_trace = NULL;
-unsigned long num_accesses = -1;
-unsigned long current_pos = 0;
-unsigned long PAGE_ADDR_MASK = ~0xfff;
-unsigned long MAX_SEARCH_DIST = 10000;
-void tape_prefetch_init();
-void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
-			 struct vm_area_struct *vma, const unsigned long addr,
-			 bool *goto_skip);
-
-void haha(void)
-{
-	printk(KERN_INFO "injected print statement- C Narek Galstyan");
-}
-EXPORT_SYMBOL(haha);
-int leap_swapin_counter = 0;
-void find_trend_1(void)
-{
-	printk(KERN_INFO "in find trend %d ", ++leap_swapin_counter);
-}
-EXPORT_SYMBOL(find_trend_1);
-
-/************************** TRACING FOR MEMORY PREFETCHING BEGIN ********************************/
-const unsigned long PRESENT_BIT_MASK = 1UL;
-const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
-
-static unsigned long *trace = NULL;
-#define TRACE_FILEPATH_LEN 256
-char trace_filepath[TRACE_FILEPATH_LEN];
-#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 1ULL
-#define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
-unsigned long trace_idx = 0;
+extern void kernel_noop(void);
+struct mm_struct *mm =
+	NULL; // todo:: move back to local scope once resetting ptes is figured out
 
 /*
    * Page fault error code bits:
@@ -87,6 +51,12 @@ enum x86_pf_error_code {
 	PF_INSTR = 1 << 4,
 };
 
+unsigned long PAGE_ADDR_MASK = ~0xfff;
+unsigned long MAX_SEARCH_DIST = 10000;
+const unsigned long PRESENT_BIT_MASK = 1UL;
+const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
+#define TRACE_FILEPATH_LEN 256
+
 typedef struct {
 	pgd_t *pgd;
 	// todo, will need p4d for newer kernels
@@ -97,25 +67,67 @@ typedef struct {
 	bool initialized;
 } vm_t;
 
-int i = 0;
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 1ULL
+#define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
+static char trace_filepath[TRACE_FILEPATH_LEN];
+typedef struct {
+	pid_t process_pid;
+	unsigned long *accesses;
+	unsigned long pos;
+	unsigned long alt_pattern_counter;
+
+} tracing_state;
+
+typedef struct {
+	int counter;
+	int found_counter;
+	unsigned long *accesses;
+	unsigned long num_accesses;
+	unsigned long pos;
+	// controlls whether swapin_readahead will use tape to prefetch or not
+	bool prefetch_start;
+} prefetching_state;
+
+static tracing_state trace;
+static prefetching_state fetch;
+
 vm_t last_entry = {.initialized = false }, entry = {.initialized = false };
 
-// Pattern-detection variables
+// Pattern-detection variables todo:: elliminate these!
 static vm_t recent_accesses[3];
 static unsigned long recent_ips[3];
 static unsigned long patterns_encountered = 0;
 static bool exited_alt_pattern = false;
-// controlls whether swapin_readahead will use tape to prefetch or not
-static bool prefetch_start = false;
 
-void tracing_init()
+void fetch_init();
+void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
+			 struct vm_area_struct *vma, const unsigned long addr,
+			 bool *goto_skip);
+
+void haha(void)
 {
-	trace = vmalloc(TRACE_ARRAY_SIZE);
-	if (trace == NULL) {
+	printk(KERN_INFO "injected print statement- C Narek Galstyan");
+}
+EXPORT_SYMBOL(haha);
+void find_trend_1(void)
+{
+	static int leap_swapin_counter = 0;
+	printk(KERN_INFO "in find trend %d ", ++leap_swapin_counter);
+}
+EXPORT_SYMBOL(find_trend_1);
+
+/************************** TRACING FOR MEMORY PREFETCHING BEGIN ********************************/
+void trace_init(pid_t pid)
+{
+	memset(&trace, 0, sizeof(trace));
+	trace.process_pid = pid;
+	//todo:: put everything on tracing
+	trace.accesses = vmalloc(TRACE_ARRAY_SIZE);
+	if (trace.accesses == NULL) {
 		printk(KERN_ERR "Unable to allocate memory for tracing");
 		return;
 	}
-	printk(KERN_DEBUG "initialized trace %p", trace);
+	printk(KERN_DEBUG "initialized trace %p", trace.accesses);
 }
 __always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
 {
@@ -200,18 +212,17 @@ static void log_pfault(struct pt_regs *regs, unsigned long error_code,
 	       pte_val & PRESENT_BIT_MASK ? "PRESENT" : "",
 	       pte_val & SPECIAL_BIT_MASK ? "SPEC" : "");
 }
-
 void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		     unsigned long address, struct task_struct *tsk,
 		     bool *return_early, int magic)
 {
 	bool in_alt_pattern;
-	if (unlikely(trace == NULL)) {
+	if (unlikely(trace.accesses == NULL)) {
 		printk(KERN_ERR "trace not initialized");
 		return;
 	}
 
-	if (process_pid == tsk->pid && trace_idx < TRACE_LEN) {
+	if (trace.process_pid == tsk->pid && trace.pos < TRACE_LEN) {
 
 		mm = tsk->mm;
 		down_read(&mm->mmap_sem);
@@ -226,13 +237,15 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		entry.pmd = pmd_offset(entry.pud, address);
 		if (pmd_none(*(entry.pmd)) || pud_large(*(entry.pud))) {
 			if (pmd_none(*(entry.pmd)))
-				printk(KERN_ERR "pmd is noone %lx", address);
+				printk(KERN_WARNING "pmd is noone %lx",
+				       address);
 			else
 				printk(KERN_ERR "pud is a large page");
 			entry.pmd = NULL;
 			entry.pte = NULL;
 			goto error_out;
 		}
+		//todo:: pte_offset_map_lock<-- what is this? when whould I need to take a lock?
 		entry.pte = pte_offset_map(entry.pmd, address);
 		entry.initialized = true;
 		//todo:: optimze later, to return here and baybe avoid tlb flush?
@@ -244,7 +257,8 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		// maybe happening only after a fresh reboot. probably
 		// osmething to do with faulting on INSTR addresses
 		if (in_alt_pattern)
-			printk(KERN_WARNING "IN ALT PATTERN %ld", trace_idx);
+			trace.alt_pattern_counter++;
+
 		if (entry.address != last_entry.address && //CoW?
 		    !in_alt_pattern) {
 			trace_clear_pte(&last_entry);
@@ -270,7 +284,7 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		last_entry.pte = entry.pte;
 		last_entry.address = entry.address;
 		last_entry.initialized = entry.initialized;
-		trace[trace_idx++] = address;
+		trace.accesses[trace.pos++] = address;
 
 		// Push to the data structures that help us determine
 		// whether we've encountered an alternating pattern
@@ -290,10 +304,12 @@ void mem_pattern_trace_start(int flags)
 {
 	struct kstat trace_stat;
 	int trace_missing;
+	pid_t pid = current->pid;
+	const char *proc_name = current->comm;
 	mm_segment_t old_fs = get_fs();
 	//todo:: current task_sruct has min_flt, maj_flt members, maybe use?
 	snprintf(trace_filepath, TRACE_FILEPATH_LEN, "/data/traces/%s.bin",
-		 current->comm);
+		 proc_name);
 	// in case path is too long, truncate;
 	trace_filepath[TRACE_FILEPATH_LEN - 1] = '\0';
 	set_fs(get_ds()); // KERNEL_DS
@@ -307,45 +323,40 @@ void mem_pattern_trace_start(int flags)
 			flags |= PREFETCH;
 	}
 
-	//todo:: used only in recording, do_page fault, maybe eliminate?
-	process_pid = current->pid;
 	printk(KERN_INFO "%s%s%s for PROCESS with pid %d\n",
 	       flags & AUTO ? "AUTO-" : "", flags & RECORD ? "RECORDING" : "",
-	       flags & PREFETCH ? "PREFETCHING" : "", process_pid);
+	       flags & PREFETCH ? "PREFETCHING" : "", pid);
 
 	if (flags & RECORD) {
-		tracing_init();
-		if (trace == NULL)
+		trace_init(pid);
+		if (trace.accesses == NULL)
 			return;
 
 		// todo:: is use of current->pid directly safe?
-		set_process_id(current->pid);
 		set_pointer(2, do_page_fault_2);
 	} else if (flags & PREFETCH) {
 		init_swap_trend(32);
-		tape_prefetch_init();
+		fetch_init();
 		set_custom_prefetch(2);
 		set_pointer(10, swapin_readahead_10);
-		prefetch_start = true; // can be used to pause and resume
 	}
 }
 
 void mem_pattern_trace_end(int flags)
 {
 
-	int i;
 	int num_ptes_set = 0;
 
 	set_pointer(2, kernel_noop); // clean do page fault injection
 	set_pointer(10, kernel_noop); // clean swapin_readahead injection
 	// the easy case, if we were prefetching, just free the tape we read into memory
 
-	if (prefetch_trace != NULL) {
-		vfree(prefetch_trace);
-		prefetch_trace = NULL; // todo:: should not need once in kernel
+	if (fetch.accesses != NULL) {
+		vfree(fetch.accesses);
+		fetch.accesses = NULL; // todo:: should not need once in kernel
 	}
 
-	if (trace != NULL) {
+	if (trace.accesses != NULL) {
 		// Write trace to file
 		// docs ` https://www.howtoforge.com/reading-files-from-the-linux-kernel-space-module-driver-fedora-14
 		// https://www.linuxjournal.com/article/8110
@@ -360,9 +371,9 @@ void mem_pattern_trace_end(int flags)
 			printk(KERN_ERR "unable to create/open file ERR: %ld\n",
 			       PTR_ERR(f));
 		} else {
-			long left_to_write = trace_idx * sizeof(void *);
-			char *buf = (char *)trace;
-			printk(KERN_INFO "num accesses:  %ld", trace_idx);
+			long left_to_write = trace.pos * sizeof(void *);
+			char *buf = (char *)trace.accesses;
+			printk(KERN_INFO "num accesses:  %ld", trace.pos);
 			while (left_to_write > 0) {
 				// todo:: cannot write to larger than 2g from kernel
 				// fixed in newer kernels, I guess just upgrade?
@@ -376,7 +387,7 @@ void mem_pattern_trace_end(int flags)
 				       "wrote %ld bytes out of %ld "
 				       "left to write and %ld total\n",
 				       count, left_to_write,
-				       trace_idx * sizeof(void *));
+				       trace.pos * sizeof(void *));
 				left_to_write -= count;
 				buf += count;
 			}
@@ -391,14 +402,16 @@ void mem_pattern_trace_end(int flags)
 	// it seems there is no need for this after modifying do_unmap kernel path
 	// todo:: turned back on as saw some rss-counter and memory free errors that might
 	// be related to this, investigate later.
-	if (mm != NULL) {
+	if (mm != NULL && false) {
+		int i;
+		unsigned long *buf = trace.accesses;
 		printk(KERN_DEBUG "resetting ptes first 5 addrs of trace:"
 				  "[%lx, %lx, %lx, %lx, %lx]",
-		       trace[0], trace[1], trace[2], trace[3], trace[4]);
+		       buf[0], buf[1], buf[2], buf[3], buf[4]);
 		down_read(&mm->mmap_sem);
-		for (i = 0; i < trace_idx; i++) {
+		for (i = 0; i < trace.pos; i++) {
 
-			unsigned long address = trace[i];
+			unsigned long address = trace.accesses[i];
 			bool my_ret_early = false;
 			entry.address = address;
 			entry.pgd = pgd_offset(mm, address);
@@ -414,6 +427,7 @@ void mem_pattern_trace_end(int flags)
 				entry.pte = NULL;
 				continue;
 			}
+			//todo:: pte_offset_map_lock<-- what is this? when whould I need to take a lock?
 			entry.pte = pte_offset_map(entry.pmd, address);
 			entry.initialized = true;
 			trace_maybe_set_pte(&entry, &my_ret_early);
@@ -425,11 +439,14 @@ void mem_pattern_trace_end(int flags)
 		printk(KERN_INFO
 		       "done RESETTING ptes before exit, num successful reset: "
 		       "%d out of %ld",
-		       num_ptes_set, trace_idx);
+		       num_ptes_set, trace.pos);
 	}
+	if (trace.alt_pattern_counter)
+		printk(KERN_ERR "alt pattern: encountered %ld/%ld times\n",
+		       trace.alt_pattern_counter, trace.pos);
 	mm = NULL; // todo:: should not need once in kernel
-	vfree(trace);
-	trace = NULL; // todo:: should not need once moved to kernel
+	vfree(trace.accesses);
+	trace.accesses = NULL; // todo:: should not need once moved to kernel
 }
 
 static void mem_pattern_trace_3(int flags)
@@ -480,63 +497,68 @@ struct pref_buffer {
 extern struct pref_buffer prefetch_buffer;
 // declarations copied from swap_state for injections END
 
-void tape_prefetch_init()
+void fetch_init()
 {
 	struct file *f;
 	mm_segment_t old_fs = get_fs();
-
-	prefetch_trace = vmalloc(TRACE_ARRAY_SIZE);
-	if (prefetch_trace == NULL) {
-		printk(KERN_ERR "unable to allocate memory for trace");
+	unsigned long *buf = vmalloc(TRACE_ARRAY_SIZE);
+	size_t count;
+	if (buf == NULL) {
+		printk(KERN_ERR
+		       "unable to allocate memory for reading the trace");
 		return;
 	}
-	set_fs(get_ds()); // KERNEL_DS
 
+	memset(&fetch, 0, sizeof(fetch));
+
+	set_fs(get_ds()); // KERNEL_DS
 	f = filp_open(trace_filepath, O_RDONLY | O_LARGEFILE, 0);
 	if (f == NULL) {
 		printk(KERN_ERR "unable to read/open file");
+		vfree(buf);
+		return;
 	} else {
-		size_t count = vfs_read(f, (char *)prefetch_trace,
-					TRACE_ARRAY_SIZE, &f->f_pos);
-		num_accesses = count / sizeof(void *);
+		count = vfs_read(f, (char *)buf, TRACE_ARRAY_SIZE, &f->f_pos);
 		printk(KERN_DEBUG "read %ld bytes which means %ld accesses",
-		       count, num_accesses);
+		       count, fetch.num_accesses);
 		filp_close(f, NULL);
 		set_fs(old_fs);
-		printk(KERN_DEBUG "read trace: %lx %lx %lx", prefetch_trace[0],
-		       prefetch_trace[1], prefetch_trace[2]);
 	}
+
+	fetch.accesses = buf;
+	fetch.num_accesses = count / sizeof(void *);
+	fetch.prefetch_start = true; // can be used to pause and resume
 }
+
 void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
 			 struct vm_area_struct *vma, const unsigned long addr,
 			 bool *goto_skip)
 {
+	int i;
 	int dist = 0;
 	pte_t pte_val;
 	swp_entry_t prefetch_entry; //todo naming!!?!
 	vm_t vm_entry;
 	struct mm_struct *mm = vma->vm_mm;
 	struct page *page;
-	if (!prefetch_start)
+	if (!fetch.prefetch_start)
 		return;
-	counter++;
-	if (unlikely(prefetch_trace == NULL))
+	fetch.counter++;
+	if (unlikely(fetch.accesses == NULL))
 		return;
-	// printk(KERN_DEBUG "swaping readahead count: %d addr: %lx\n",
-	//        counter++, addr);
 
 	while (dist < MAX_SEARCH_DIST &&
-	       (prefetch_trace[current_pos + dist] & PAGE_ADDR_MASK) !=
+	       (fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) !=
 		       (addr & PAGE_ADDR_MASK))
 		dist++;
-	if ((prefetch_trace[current_pos + dist] & PAGE_ADDR_MASK) ==
+	if ((fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) ==
 	    (addr & PAGE_ADDR_MASK)) {
 		int num_prefetch = 0;
-		found_counter++;
+		fetch.found_counter++;
 		// walk the page table for addr START
 		down_read(&mm->mmap_sem);
 		for (i = 0; i < 100 && num_prefetch < 32; i++) {
-			unsigned long paddr = prefetch_trace[current_pos + i];
+			unsigned long paddr = fetch.accesses[fetch.pos + i];
 			vm_entry.address = paddr;
 			vm_entry.pgd = pgd_offset(mm, paddr);
 			if (pgd_none(*vm_entry.pgd) || pgd_bad(*vm_entry.pgd))
@@ -587,9 +609,9 @@ void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
 
 		up_read(&mm->mmap_sem);
 		// walk the page table for addr END
-		current_pos += dist;
+		fetch.pos += dist;
 	} else {
-		// printk(KERN_WARNING " lost in trace %d/%d \n", found_counter, counter);
+		// printk(KERN_WARNING " lost in trace %d/%d \n", fetch.found_counter, fetch.counter);
 	}
 }
 /* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE END ++++++++++++++++++++++*/
@@ -643,7 +665,7 @@ static int __init leap_functionality_init(void)
 		// what from leap swap system we are depending on
 		// faults on ? swap_state:166 (log_swap_trend)
 		init_swap_trend(32);
-		tape_prefetch_init();
+		fetch_init();
 		set_custom_prefetch(2);
 		return 0;
 	}
@@ -669,15 +691,15 @@ static void __exit leap_functionality_exit(void)
 	int i;
 
 	printk(KERN_INFO "resetting injection points to noop");
-	printk(KERN_INFO "found %d/%d", found_counter, counter);
+	printk(KERN_INFO "found %d/%d", fetch.found_counter, fetch.counter);
 	for (i = 0; i < 100; i++)
 		set_pointer(i, kernel_noop);
 
 	// free vmallocs, in case the process crashed or used syscalls incorerclty
-	if (trace)
-		vfree(trace);
-	if (prefetch_trace)
-		vfree(prefetch_trace);
+	if (trace.accesses)
+		vfree(trace.accesses);
+	if (fetch.accesses)
+		vfree(fetch.accesses);
 	printk(KERN_INFO "Cleaning up leap functionality sample module.\n");
 }
 
