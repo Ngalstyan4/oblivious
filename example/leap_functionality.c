@@ -30,8 +30,6 @@ MODULE_PARM_DESC(process_name, "A string, for process name");
 module_param(process_name, charp, 0000);
 
 extern void kernel_noop(void);
-struct mm_struct *mm =
-	NULL; // todo:: move back to local scope once resetting ptes is figured out
 
 /*
    * Page fault error code bits:
@@ -51,11 +49,10 @@ enum x86_pf_error_code {
 	PF_INSTR = 1 << 4,
 };
 
-unsigned long PAGE_ADDR_MASK = ~0xfff;
-unsigned long MAX_SEARCH_DIST = 10000;
+const unsigned long PAGE_ADDR_MASK = ~0xfff;
+const unsigned long MAX_SEARCH_DIST = 10000;
 const unsigned long PRESENT_BIT_MASK = 1UL;
 const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
-#define TRACE_FILEPATH_LEN 256
 
 typedef struct {
 	pgd_t *pgd;
@@ -67,13 +64,17 @@ typedef struct {
 	bool initialized;
 } vm_t;
 
-#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 1ULL
+#define TRACE_FILEPATH_LEN 256
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 40ULL
 #define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 static char trace_filepath[TRACE_FILEPATH_LEN];
 typedef struct {
 	pid_t process_pid;
 	unsigned long *accesses;
 	unsigned long pos;
+
+	vm_t last_entry;
+	vm_t entry;
 	unsigned long alt_pattern_counter;
 
 } tracing_state;
@@ -90,8 +91,6 @@ typedef struct {
 
 static tracing_state trace;
 static prefetching_state fetch;
-
-vm_t last_entry = {.initialized = false }, entry = {.initialized = false };
 
 // Pattern-detection variables todo:: elliminate these!
 static vm_t recent_accesses[3];
@@ -129,6 +128,7 @@ void trace_init(pid_t pid)
 	}
 	printk(KERN_DEBUG "initialized trace %p", trace.accesses);
 }
+
 __always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
 {
 	unsigned long pte_deref_value = (unsigned long)((*entry->pte).pte);
@@ -224,32 +224,33 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 
 	if (trace.process_pid == tsk->pid && trace.pos < TRACE_LEN) {
 
-		mm = tsk->mm;
+		struct mm_struct *mm = tsk->mm;
 		down_read(&mm->mmap_sem);
 
 		// walk the page table ` https://lwn.net/Articles/106177/
 		//todo:: pteditor does it wrong i think,
 		//it does not dereference pte when passing around
-		entry.address = address;
-		entry.pgd = pgd_offset(mm, address);
-		entry.pud = pud_offset(entry.pgd, address);
+		trace.entry.address = address;
+		trace.entry.pgd = pgd_offset(mm, address);
+		trace.entry.pud = pud_offset(trace.entry.pgd, address);
 		// todo:: to support thp, do some error checking here and see if a huge page is being allocated
-		entry.pmd = pmd_offset(entry.pud, address);
-		if (pmd_none(*(entry.pmd)) || pud_large(*(entry.pud))) {
-			if (pmd_none(*(entry.pmd)))
+		trace.entry.pmd = pmd_offset(trace.entry.pud, address);
+		if (pmd_none(*(trace.entry.pmd)) ||
+		    pud_large(*(trace.entry.pud))) {
+			if (pmd_none(*(trace.entry.pmd)))
 				printk(KERN_WARNING "pmd is noone %lx",
 				       address);
 			else
 				printk(KERN_ERR "pud is a large page");
-			entry.pmd = NULL;
-			entry.pte = NULL;
+			trace.entry.pmd = NULL;
+			trace.entry.pte = NULL;
 			goto error_out;
 		}
 		//todo:: pte_offset_map_lock<-- what is this? when whould I need to take a lock?
-		entry.pte = pte_offset_map(entry.pmd, address);
-		entry.initialized = true;
+		trace.entry.pte = pte_offset_map(trace.entry.pmd, address);
+		trace.entry.initialized = true;
 		//todo:: optimze later, to return here and baybe avoid tlb flush?
-		trace_maybe_set_pte(&entry, return_early);
+		trace_maybe_set_pte(&trace.entry, return_early);
 
 		in_alt_pattern = check_alt_pattern(address, regs->ip);
 		// todo:: investigate:: sometimes running the same tracing
@@ -259,9 +260,9 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		if (in_alt_pattern)
 			trace.alt_pattern_counter++;
 
-		if (entry.address != last_entry.address && //CoW?
+		if (trace.entry.address != trace.last_entry.address && //CoW?
 		    !in_alt_pattern) {
-			trace_clear_pte(&last_entry);
+			trace_clear_pte(&trace.last_entry);
 		}
 
 		if (!in_alt_pattern && exited_alt_pattern) {
@@ -279,16 +280,12 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 
 		up_read(&mm->mmap_sem);
 
-		//todo:: change to
-		//last_entry = entry;
-		last_entry.pte = entry.pte;
-		last_entry.address = entry.address;
-		last_entry.initialized = entry.initialized;
+		trace.last_entry = trace.entry;
 		trace.accesses[trace.pos++] = address;
 
 		// Push to the data structures that help us determine
 		// whether we've encountered an alternating pattern
-		push_to_fifos(&entry, regs->ip);
+		push_to_fifos(&trace.entry, regs->ip);
 
 		// If we're in an alt pattern we need to know
 		// the next time we're in the signal handler
@@ -344,9 +341,6 @@ void mem_pattern_trace_start(int flags)
 
 void mem_pattern_trace_end(int flags)
 {
-
-	int num_ptes_set = 0;
-
 	set_pointer(2, kernel_noop); // clean do page fault injection
 	set_pointer(10, kernel_noop); // clean swapin_readahead injection
 	// the easy case, if we were prefetching, just free the tape we read into memory
@@ -399,52 +393,11 @@ void mem_pattern_trace_end(int flags)
 			set_fs(old_fs);
 		}
 	}
-	// it seems there is no need for this after modifying do_unmap kernel path
-	// todo:: turned back on as saw some rss-counter and memory free errors that might
-	// be related to this, investigate later.
-	if (mm != NULL && false) {
-		int i;
-		unsigned long *buf = trace.accesses;
-		printk(KERN_DEBUG "resetting ptes first 5 addrs of trace:"
-				  "[%lx, %lx, %lx, %lx, %lx]",
-		       buf[0], buf[1], buf[2], buf[3], buf[4]);
-		down_read(&mm->mmap_sem);
-		for (i = 0; i < trace.pos; i++) {
 
-			unsigned long address = trace.accesses[i];
-			bool my_ret_early = false;
-			entry.address = address;
-			entry.pgd = pgd_offset(mm, address);
-			if (pgd_none(*entry.pgd) || pgd_bad(*entry.pgd))
-				continue;
-			entry.pud = pud_offset(entry.pgd, address);
-			if (pud_none(*entry.pud) || pud_bad(*entry.pud))
-				continue;
-			entry.pmd = pmd_offset(entry.pud, address);
-			if (pmd_none(*(entry.pmd)) || pud_large(*(entry.pud))) {
-				// probably because the region has been cleaned up?
-				entry.pmd = NULL;
-				entry.pte = NULL;
-				continue;
-			}
-			//todo:: pte_offset_map_lock<-- what is this? when whould I need to take a lock?
-			entry.pte = pte_offset_map(entry.pmd, address);
-			entry.initialized = true;
-			trace_maybe_set_pte(&entry, &my_ret_early);
-			if (my_ret_early)
-				num_ptes_set++;
-		}
-		up_read(&mm->mmap_sem);
-
-		printk(KERN_INFO
-		       "done RESETTING ptes before exit, num successful reset: "
-		       "%d out of %ld",
-		       num_ptes_set, trace.pos);
-	}
 	if (trace.alt_pattern_counter)
 		printk(KERN_ERR "alt pattern: encountered %ld/%ld times\n",
 		       trace.alt_pattern_counter, trace.pos);
-	mm = NULL; // todo:: should not need once in kernel
+
 	vfree(trace.accesses);
 	trace.accesses = NULL; // todo:: should not need once moved to kernel
 }
