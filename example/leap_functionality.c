@@ -18,6 +18,10 @@
 
 #include "tracing.h"
 
+// controlls whether data structures are maintained for in alt pattern
+// or it is assumed that this never happens
+#define IN_ALT_PATTERN_CHECKS 1
+
 MODULE_LICENSE("");
 MODULE_AUTHOR("");
 MODULE_DESCRIPTION("");
@@ -97,6 +101,7 @@ static vm_t recent_accesses[3];
 static unsigned long recent_ips[3];
 static unsigned long patterns_encountered = 0;
 static bool exited_alt_pattern = false;
+static bool in_alt_pattern = false;
 
 void fetch_init();
 void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
@@ -123,10 +128,9 @@ void trace_init(pid_t pid)
 	//todo:: put everything on tracing
 	trace.accesses = vmalloc(TRACE_ARRAY_SIZE);
 	if (trace.accesses == NULL) {
-		printk(KERN_ERR "Unable to allocate memory for tracing");
+		printk(KERN_ERR "Unable to allocate memory for tracing\n");
 		return;
 	}
-	printk(KERN_DEBUG "initialized trace %p", trace.accesses);
 }
 
 __always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
@@ -166,6 +170,7 @@ static void trace_clear_pte(vm_t *entry)
 	set_pte(entry->pte, native_make_pte(pte_deref_value));
 }
 
+#ifdef IN_ALT_PATTERN_CHECKS
 /************************** ALT PATTERN CHECK BEGIN ********************************/
 
 // Returns true if we're stuck in the ABAB pattern that causes programs to hang
@@ -199,11 +204,13 @@ static void push_to_fifos(vm_t *entry, unsigned long faulting_ip)
 	//        r[1].address, r[0].address);
 }
 /************************** ALT PATTERN CHECK END  ********************************/
+#endif // IN_ALT_PATTERN_CHECKS
+
 static void log_pfault(struct pt_regs *regs, unsigned long error_code,
 		       unsigned long address, unsigned long pte_val)
 {
 	printk(KERN_DEBUG "pfault [%s | %s | %s | "
-			  "%s | %s]  %lx pte: %lx [%s|%s]",
+			  "%s | %s]  %lx pte: %lx [%s|%s]\n",
 	       error_code & PF_PROT ? "PROT" : "",
 	       error_code & PF_WRITE ? "WRITE" : "READ",
 	       error_code & PF_USER ? "USER" : "KERNEL",
@@ -216,9 +223,8 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		     unsigned long address, struct task_struct *tsk,
 		     bool *return_early, int magic)
 {
-	bool in_alt_pattern;
 	if (unlikely(trace.accesses == NULL)) {
-		printk(KERN_ERR "trace not initialized");
+		printk(KERN_ERR "trace not initialized\n");
 		return;
 	}
 
@@ -249,9 +255,9 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		//todo:: pte_offset_map_lock<-- what is this? when whould I need to take a lock?
 		trace.entry.pte = pte_offset_map(trace.entry.pmd, address);
 		trace.entry.initialized = true;
-		//todo:: optimze later, to return here and baybe avoid tlb flush?
+		//todo:: optimze later, to return here and maybe avoid tlb flush?
 		trace_maybe_set_pte(&trace.entry, return_early);
-
+#ifdef IN_ALT_PATTERN_CHECKS
 		in_alt_pattern = check_alt_pattern(address, regs->ip);
 		// todo:: investigate:: sometimes running the same tracing
 		// second time gets rid of all alt pattern issues
@@ -260,14 +266,15 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		if (in_alt_pattern)
 			trace.alt_pattern_counter++;
 
-		if (trace.entry.address != trace.last_entry.address && //CoW?
-		    !in_alt_pattern) {
-			trace_clear_pte(&trace.last_entry);
-		}
-
 		if (!in_alt_pattern && exited_alt_pattern) {
 			trace_clear_pte(&recent_accesses[1]);
 			exited_alt_pattern = false;
+		}
+#endif // IN_ALT_PATTERN_CHECKS
+		if (likely(trace.entry.address !=
+				   trace.last_entry.address && //CoW?
+			   !in_alt_pattern)) {
+			trace_clear_pte(&trace.last_entry);
 		}
 
 	error_out:
@@ -281,8 +288,8 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		up_read(&mm->mmap_sem);
 
 		trace.last_entry = trace.entry;
-		trace.accesses[trace.pos++] = address;
-
+		trace.accesses[trace.pos++] = address & PAGE_ADDR_MASK;
+#ifdef IN_ALT_PATTERN_CHECKS
 		// Push to the data structures that help us determine
 		// whether we've encountered an alternating pattern
 		push_to_fifos(&trace.entry, regs->ip);
@@ -293,6 +300,7 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 			patterns_encountered++;
 			exited_alt_pattern = true;
 		}
+#endif // IN_ALT_PATTERN_CHECKS
 	}
 }
 EXPORT_SYMBOL(do_page_fault_2);
@@ -367,7 +375,9 @@ void mem_pattern_trace_end(int flags)
 		} else {
 			long left_to_write = trace.pos * sizeof(void *);
 			char *buf = (char *)trace.accesses;
-			printk(KERN_INFO "num accesses:  %ld", trace.pos);
+			printk(KERN_DEBUG
+			       "Writing recorded trace (num accesses=%ld)",
+			       trace.pos);
 			while (left_to_write > 0) {
 				// todo:: cannot write to larger than 2g from kernel
 				// fixed in newer kernels, I guess just upgrade?
@@ -375,8 +385,13 @@ void mem_pattern_trace_end(int flags)
 							 &f->f_pos);
 
 				//size_t can not be smaller than zero
-				if (((long)(count)) < 0)
+				if (((long)(count)) < 0) {
+					printk(KERN_ERR "Failed writing. "
+							"errno=%ld, left to "
+							"write %ld\n",
+					       count, left_to_write);
 					break;
+				}
 				printk(KERN_DEBUG
 				       "wrote %ld bytes out of %ld "
 				       "left to write and %ld total\n",
@@ -385,21 +400,19 @@ void mem_pattern_trace_end(int flags)
 				left_to_write -= count;
 				buf += count;
 			}
-			if (left_to_write > 0)
-				printk(KERN_WARNING
-				       "Done writing, left to write %ld\n",
-				       left_to_write);
+
 			filp_close(f, NULL);
 			set_fs(old_fs);
 		}
+		if (trace.alt_pattern_counter)
+			printk(KERN_ERR
+			       "ALT PATTERN encountered %ld/%ld times\n",
+			       trace.alt_pattern_counter, trace.pos);
+
+		vfree(trace.accesses);
+		// todo:: should not need once moved to kernel
+		trace.accesses = NULL;
 	}
-
-	if (trace.alt_pattern_counter)
-		printk(KERN_ERR "alt pattern: encountered %ld/%ld times\n",
-		       trace.alt_pattern_counter, trace.pos);
-
-	vfree(trace.accesses);
-	trace.accesses = NULL; // todo:: should not need once moved to kernel
 }
 
 static void mem_pattern_trace_3(int flags)
@@ -458,7 +471,7 @@ void fetch_init()
 	size_t count;
 	if (buf == NULL) {
 		printk(KERN_ERR
-		       "unable to allocate memory for reading the trace");
+		       "unable to allocate memory for reading the trace\n");
 		return;
 	}
 
@@ -467,12 +480,12 @@ void fetch_init()
 	set_fs(get_ds()); // KERNEL_DS
 	f = filp_open(trace_filepath, O_RDONLY | O_LARGEFILE, 0);
 	if (f == NULL) {
-		printk(KERN_ERR "unable to read/open file");
+		printk(KERN_ERR "unable to read/open file\n");
 		vfree(buf);
 		return;
 	} else {
 		count = vfs_read(f, (char *)buf, TRACE_ARRAY_SIZE, &f->f_pos);
-		printk(KERN_DEBUG "read %ld bytes which means %ld accesses",
+		printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n",
 		       count, fetch.num_accesses);
 		filp_close(f, NULL);
 		set_fs(old_fs);
@@ -555,7 +568,7 @@ void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
 			// 	       "GONE",
 			//        addr & PAGE_ADDR_MASK);
 		}
-		printk(KERN_INFO "num prefetch %d", num_prefetch);
+		printk(KERN_INFO "num prefetch %d\n", num_prefetch);
 		lru_add_drain();
 		if (num_prefetch > 10)
 			*goto_skip = true;
@@ -571,16 +584,10 @@ void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
 
 static void usage(void)
 {
-	printk(KERN_INFO "To initialize tracing for a process by name insmod "
-			 "leap_functionality.ko process_name=\"mmult_eigen\" "
-			 "cmd=\"trace_init\"\n");
 	printk(KERN_INFO "To enable remote I/O data path: insmod "
 			 "leap_functionality.ko cmd=\"remote_on\"\n");
 	printk(KERN_INFO "To disable remote I/O data path: insmod "
 			 "leap_functionality.ko cmd=\"remote_off\"\n");
-	printk(KERN_INFO
-	       "To enable tape prefetching: insmod leap_functionality.ko "
-	       "cmd=\"tape\"\n");
 	printk(KERN_INFO
 	       "To enable leap prefetching: insmod leap_functionality.ko "
 	       "cmd=\"leap\"\n");
@@ -595,6 +602,8 @@ static int __init leap_functionality_init(void)
 	set_pointer(0, haha);
 	set_pointer(1, find_trend_1);
 	// 2 is done in the switch below
+	// sets up syscall interface injection which sets up
+	// rest of necessary function links
 	set_pointer(3, mem_pattern_trace_3);
 	//set_pointer(5, do_unmap_5);
 	if (!cmd) {
@@ -609,17 +618,6 @@ static int __init leap_functionality_init(void)
 	if (strcmp(cmd, "remote_off") == 0) {
 		printk(KERN_INFO "Leap remote memory is off\n");
 		set_process_id(0);
-		return 0;
-	}
-	if (strcmp(cmd, "tape") == 0) {
-		printk(KERN_INFO "prefetching set to TAPE");
-
-		// !IMPORTANT TODO:: see why the line below is necessary and
-		// what from leap swap system we are depending on
-		// faults on ? swap_state:166 (log_swap_trend)
-		init_swap_trend(32);
-		fetch_init();
-		set_custom_prefetch(2);
 		return 0;
 	}
 	if (strcmp(cmd, "leap") == 0) {
