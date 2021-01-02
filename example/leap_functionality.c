@@ -70,7 +70,7 @@ typedef struct {
 } vm_t;
 
 #define TRACE_FILEPATH_LEN 256
-#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 40ULL
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 1ULL
 #define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 static char trace_filepath[TRACE_FILEPATH_LEN];
 typedef struct {
@@ -322,28 +322,32 @@ void mem_pattern_trace_start(int flags)
 	trace_missing = 0 != vfs_stat(trace_filepath, &trace_stat);
 	set_fs(old_fs);
 
-	if (flags & AUTO) {
+	if (flags & TRACE_AUTO) {
 		if (trace_missing)
-			flags |= RECORD;
+			flags |= TRACE_RECORD;
 		else
-			flags |= PREFETCH;
+			flags |= TRACE_PREFETCH;
 	}
 
 	printk(KERN_INFO "%s%s%s for PROCESS with pid %d\n",
-	       flags & AUTO ? "AUTO-" : "", flags & RECORD ? "RECORDING" : "",
-	       flags & PREFETCH ? "PREFETCHING" : "", pid);
+	       flags & TRACE_AUTO ? "AUTO-" : "",
+	       flags & TRACE_RECORD ? "RECORDING" : "",
+	       flags & TRACE_PREFETCH ? "PREFETCHING" : "", pid);
 
-	if (flags & RECORD) {
+	if (flags & TRACE_RECORD) {
 		trace_init(pid);
 		if (trace.accesses == NULL)
 			return;
 
 		// todo:: is use of current->pid directly safe?
 		set_pointer(2, do_page_fault_2);
-	} else if (flags & PREFETCH) {
+	} else if (flags & TRACE_PREFETCH) {
 		init_swap_trend(32);
-		fetch_init();
+		kevictd_init();
+		prefetch_buffer_init(8000);
+		//activate_prefetch_buffer(1);
 		set_custom_prefetch(2);
+		fetch_init();
 		set_pointer(10, swapin_readahead_10);
 	}
 }
@@ -352,10 +356,13 @@ void mem_pattern_trace_end(int flags)
 {
 	set_pointer(2, kernel_noop); // clean do page fault injection
 	set_pointer(10, kernel_noop); // clean swapin_readahead injection
-	// the easy case, if we were prefetching, just free the tape we read into memory
 
+	// the easy case, if we were prefetching, just free the tape we read into memory
 	if (fetch.accesses != NULL) {
+		printk(KERN_INFO "found %d/%d\n", fetch.found_counter,
+		       fetch.counter);
 		vfree(fetch.accesses);
+		kevictd_fini();
 		fetch.accesses = NULL; // todo:: should not need once in kernel
 	}
 
@@ -420,18 +427,21 @@ static void mem_pattern_trace_3(int flags)
 {
 	printk(KERN_INFO "mem_pattern_trace called from pid %d with flags: "
 			 "[%s%s%s%s|%s%s%s]\n",
-	       current->pid, flags & START ? "START" : "",
-	       flags & PAUSE ? "PAUSE" : "", flags & RESUME ? "RESUME" : "",
-	       flags & END ? "END" : "", flags & RECORD ? "RECORD" : "",
-	       flags & PREFETCH ? "PREFETCH" : "", flags & AUTO ? "AUTO" : ""
+	       current->pid, flags & TRACE_START ? "TRACE_START" : "",
+	       flags & TRACE_PAUSE ? "TRACE_PAUSE" : "",
+	       flags & TRACE_RESUME ? "TRACE_RESUME" : "",
+	       flags & TRACE_END ? "TRACE_END" : "",
+	       flags & TRACE_RECORD ? "TRACE_RECORD" : "",
+	       flags & TRACE_PREFETCH ? "TRACE_PREFETCH" : "",
+	       flags & TRACE_AUTO ? "TRACE_AUTO" : ""
 
 	       );
-	if (flags & START) {
+	if (flags & TRACE_START) {
 		mem_pattern_trace_start(flags);
 		return;
 	}
 
-	if (flags & END) {
+	if (flags & TRACE_END) {
 		mem_pattern_trace_end(flags);
 		return;
 	}
@@ -470,8 +480,36 @@ struct pref_buffer {
 };
 
 extern struct pref_buffer prefetch_buffer;
+static int get_buffer_head(void);
+
+extern int get_buffer_tail(void);
+extern int get_buffer_size(void);
+extern void inc_buffer_head(void);
+extern void inc_buffer_tail(void);
+extern void inc_buffer_size(void);
+extern void dec_buffer_size(void);
+extern int is_buffer_full(void);
+
 // declarations copied from swap_state for injections END
 
+void my_add_page_to_buffer(swp_entry_t entry, struct page *page)
+{
+	int tail, head, error = 0;
+	swp_entry_t head_entry;
+	struct page *head_page;
+
+	if (is_buffer_full())
+		return;
+	spin_lock_irq(&prefetch_buffer.buffer_lock);
+	inc_buffer_tail();
+	tail = get_buffer_tail();
+
+	prefetch_buffer.offset_list[tail] = entry;
+	msleep(1);
+	prefetch_buffer.page_data[tail] = page;
+	inc_buffer_size();
+	spin_unlock_irq(&prefetch_buffer.buffer_lock);
+}
 void fetch_init()
 {
 	struct file *f;
@@ -485,6 +523,7 @@ void fetch_init()
 	}
 
 	memset(&fetch, 0, sizeof(fetch));
+	fetch.accesses = buf;
 
 	set_fs(get_ds()); // KERNEL_DS
 	f = filp_open(trace_filepath, O_RDONLY | O_LARGEFILE, 0);
@@ -494,14 +533,13 @@ void fetch_init()
 		return;
 	} else {
 		count = vfs_read(f, (char *)buf, TRACE_ARRAY_SIZE, &f->f_pos);
+		fetch.num_accesses = count / sizeof(void *);
 		printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n",
 		       count, fetch.num_accesses);
 		filp_close(f, NULL);
 		set_fs(old_fs);
 	}
 
-	fetch.accesses = buf;
-	fetch.num_accesses = count / sizeof(void *);
 	fetch.prefetch_start = true; // can be used to pause and resume
 }
 
@@ -563,6 +601,8 @@ void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
 				continue;
 			page = read_swap_cache_async(prefetch_entry, *gfp_mask,
 						     vma, addr);
+
+			my_add_page_to_buffer(prefetch_entry, page);
 			if (!page)
 				continue;
 			num_prefetch++;
@@ -577,7 +617,7 @@ void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
 			// 	       "GONE",
 			//        addr & PAGE_ADDR_MASK);
 		}
-		printk(KERN_INFO "num prefetch %d\n", num_prefetch);
+		// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
 		lru_add_drain();
 		if (num_prefetch > 10)
 			*goto_skip = true;
@@ -651,7 +691,7 @@ static void __exit leap_functionality_exit(void)
 	int i;
 
 	printk(KERN_INFO "resetting injection points to noop");
-	printk(KERN_INFO "found %d/%d", fetch.found_counter, fetch.counter);
+	printk(KERN_INFO "found %d/%d\n", fetch.found_counter, fetch.counter);
 	for (i = 0; i < 100; i++)
 		set_pointer(i, kernel_noop);
 
