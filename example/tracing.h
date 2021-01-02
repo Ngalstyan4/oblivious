@@ -10,6 +10,9 @@ enum trace_flags {
 	RECORD = 1 << 4,
 	PREFETCH = 1 << 5,
 	AUTO = 1 << 6,
+
+	KEVICTD_INIT = 1<<7,
+	KEVICTD_FINI = 1<<8,
 };
 
 #define mem_pattern_trace 328

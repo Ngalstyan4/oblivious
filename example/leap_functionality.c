@@ -17,6 +17,7 @@
 #include <asm/tlbflush.h>
 
 #include "tracing.h"
+#include "kevictd.h"
 
 // controlls whether data structures are maintained for in alt pattern
 // or it is assumed that this never happens
@@ -432,6 +433,14 @@ static void mem_pattern_trace_3(int flags)
 
 	if (flags & END) {
 		mem_pattern_trace_end(flags);
+		return;
+	}
+	if (flags & KEVICTD_INIT) {
+		kevictd_init();
+		return;
+	}
+	if (flags & KEVICTD_FINI) {
+		kevictd_fini();
 		return;
 	}
 }
