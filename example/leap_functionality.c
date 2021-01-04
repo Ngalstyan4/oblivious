@@ -16,8 +16,11 @@
 #include <asm/uaccess.h> // Needed by segment descriptors
 #include <asm/tlbflush.h>
 
+#include "utils.h"
 #include "tracing.h"
 #include "kevictd.h"
+
+#include "page_buffer.h"
 
 // controlls whether data structures are maintained for in alt pattern
 // or it is assumed that this never happens
@@ -55,7 +58,7 @@ enum x86_pf_error_code {
 };
 
 const unsigned long PAGE_ADDR_MASK = ~0xfff;
-const unsigned long MAX_SEARCH_DIST = 10000;
+const unsigned long MAX_SEARCH_DIST = 2;
 const unsigned long PRESENT_BIT_MASK = 1UL;
 const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
 
@@ -85,17 +88,22 @@ typedef struct {
 } tracing_state;
 
 typedef struct {
+	pid_t process_pid;
 	int counter;
 	int found_counter;
+	int num_fault;
+	struct mm_struct *mm;
 	unsigned long *accesses;
 	unsigned long num_accesses;
 	unsigned long pos;
+	unsigned long next_fetch;
 	// controlls whether swapin_readahead will use tape to prefetch or not
 	bool prefetch_start;
 } prefetching_state;
 
 static tracing_state trace;
-static prefetching_state fetch;
+//todo:: switch back to static
+prefetching_state fetch;
 
 // Pattern-detection variables todo:: elliminate these!
 static vm_t recent_accesses[3];
@@ -105,10 +113,12 @@ static bool exited_alt_pattern = false;
 static bool in_alt_pattern = false;
 
 void fetch_init();
-void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
-			 struct vm_area_struct *vma, const unsigned long addr,
-			 bool *goto_skip);
-
+void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
+		     unsigned long address, struct task_struct *tsk,
+		     bool *return_early, int magic);
+void do_page_fault_fetch_2(struct pt_regs *regs, unsigned long error_code,
+		     unsigned long address, struct task_struct *tsk,
+		     bool *return_early, int magic);
 void haha(void)
 {
 	printk(KERN_INFO "injected print statement- C Narek Galstyan");
@@ -132,6 +142,8 @@ void trace_init(pid_t pid)
 		printk(KERN_ERR "Unable to allocate memory for tracing\n");
 		return;
 	}
+	
+	set_pointer(2, do_page_fault_2);
 }
 
 __always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
@@ -220,6 +232,7 @@ static void log_pfault(struct pt_regs *regs, unsigned long error_code,
 	       pte_val & PRESENT_BIT_MASK ? "PRESENT" : "",
 	       pte_val & SPECIAL_BIT_MASK ? "SPEC" : "");
 }
+
 void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		     unsigned long address, struct task_struct *tsk,
 		     bool *return_early, int magic)
@@ -336,19 +349,14 @@ void mem_pattern_trace_start(int flags)
 
 	if (flags & TRACE_RECORD) {
 		trace_init(pid);
-		if (trace.accesses == NULL)
-			return;
 
-		// todo:: is use of current->pid directly safe?
-		set_pointer(2, do_page_fault_2);
 	} else if (flags & TRACE_PREFETCH) {
 		init_swap_trend(32);
-		kevictd_init();
-		prefetch_buffer_init(8000);
+		//kevictd_init();
+		//prefetch_buffer_init(8000);
 		//activate_prefetch_buffer(1);
 		set_custom_prefetch(2);
-		fetch_init();
-		set_pointer(10, swapin_readahead_10);
+		fetch_init(pid, current->mm);
 	}
 }
 
@@ -359,10 +367,11 @@ void mem_pattern_trace_end(int flags)
 
 	// the easy case, if we were prefetching, just free the tape we read into memory
 	if (fetch.accesses != NULL) {
-		printk(KERN_INFO "found %d/%d\n", fetch.found_counter,
-		       fetch.counter);
+		//kevictd_fini();
+		fetch.mm = NULL;
+		printk(KERN_INFO "found %d/%d page faults: min:%ld, maj: %ld\n", fetch.found_counter,
+		       fetch.counter, current->min_flt, current->maj_flt);
 		vfree(fetch.accesses);
-		kevictd_fini();
 		fetch.accesses = NULL; // todo:: should not need once in kernel
 	}
 
@@ -457,60 +466,53 @@ static void mem_pattern_trace_3(int flags)
 
 /************************** TRACING FOR MEMORY PREFETCHING BEND ********************************/
 
-// debug-injecting in mm/memory.c:1138 (in function zap_pte_range)
-void do_unmap_5(pte_t *pte)
+/* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE BEGIN ++++++++++++++++++++*/
+void do_page_fault_fetch_2(struct pt_regs *regs, unsigned long error_code,
+			   unsigned long address, struct task_struct *tsk,
+			   bool *return_early, int magic)
 {
-	unsigned long pte_deref_value = (unsigned long)((*pte).pte);
-	if (pte_deref_value & SPECIAL_BIT_MASK) {
-		pte_deref_value |= PRESENT_BIT_MASK;
-		pte_deref_value &= ~SPECIAL_BIT_MASK;
-		set_pte(pte, native_make_pte(pte_deref_value));
+	if (unlikely(fetch.accesses == NULL)) {
+		printk(KERN_ERR "fetch trace not initialized\n");
+		return;
+	}
+
+	if (fetch.process_pid == tsk->pid) {
+
+		int i;
+		int dist = 0;
+		int num_prefetch = 0;
+		fetch.num_fault++;
+		while (dist < MAX_SEARCH_DIST &&
+		       (fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) !=
+			       (address & PAGE_ADDR_MASK))
+			dist++;
+		if ((fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) ==
+			       (address & PAGE_ADDR_MASK)) {
+			fetch.pos += dist;
+			// printk("fault num:%d %lx fetch pos:%ld\n",
+			//        fetch.num_fault, address & PAGE_ADDR_MASK,
+			//        fetch.pos);
+		}
+
+
+		if (fetch.pos >= fetch.next_fetch){
+			down_read(&fetch.mm->mmap_sem);
+			for (i = 0; i < 100 && num_prefetch < 32; i++) {
+				unsigned long paddr = fetch.accesses[fetch.pos + i];
+
+				if (prefetch_addr(paddr, fetch.mm) == true)
+					num_prefetch++;
+			}
+			fetch.found_counter++;
+			fetch.next_fetch = fetch.pos + i;
+			// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
+			lru_add_drain();
+			up_read(&fetch.mm->mmap_sem);
+		}
 	}
 }
 
-/* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE BEGIN ++++++++++++++++++++*/
-// declarations copied from swap_state for injections BEGIN
-struct pref_buffer {
-	atomic_t head;
-	atomic_t tail;
-	atomic_t size;
-	swp_entry_t *offset_list;
-	struct page **page_data;
-	spinlock_t buffer_lock;
-};
-
-extern struct pref_buffer prefetch_buffer;
-static int get_buffer_head(void);
-
-extern int get_buffer_tail(void);
-extern int get_buffer_size(void);
-extern void inc_buffer_head(void);
-extern void inc_buffer_tail(void);
-extern void inc_buffer_size(void);
-extern void dec_buffer_size(void);
-extern int is_buffer_full(void);
-
-// declarations copied from swap_state for injections END
-
-void my_add_page_to_buffer(swp_entry_t entry, struct page *page)
-{
-	int tail, head, error = 0;
-	swp_entry_t head_entry;
-	struct page *head_page;
-
-	if (is_buffer_full())
-		return;
-	spin_lock_irq(&prefetch_buffer.buffer_lock);
-	inc_buffer_tail();
-	tail = get_buffer_tail();
-
-	prefetch_buffer.offset_list[tail] = entry;
-	msleep(1);
-	prefetch_buffer.page_data[tail] = page;
-	inc_buffer_size();
-	spin_unlock_irq(&prefetch_buffer.buffer_lock);
-}
-void fetch_init()
+void fetch_init(pid_t pid, struct mm_struct *mm)
 {
 	struct file *f;
 	mm_segment_t old_fs = get_fs();
@@ -523,7 +525,6 @@ void fetch_init()
 	}
 
 	memset(&fetch, 0, sizeof(fetch));
-	fetch.accesses = buf;
 
 	set_fs(get_ds()); // KERNEL_DS
 	f = filp_open(trace_filepath, O_RDONLY | O_LARGEFILE, 0);
@@ -540,95 +541,57 @@ void fetch_init()
 		set_fs(old_fs);
 	}
 
+	fetch.accesses = buf;
+	fetch.process_pid = pid;
+	fetch.mm = mm;
 	fetch.prefetch_start = true; // can be used to pause and resume
+	set_pointer(2, do_page_fault_fetch_2);
 }
 
-void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
-			 struct vm_area_struct *vma, const unsigned long addr,
-			 bool *goto_skip)
-{
-	int i;
-	int dist = 0;
-	pte_t pte_val;
-	swp_entry_t prefetch_entry; //todo naming!!?!
-	vm_t vm_entry;
-	struct mm_struct *mm = vma->vm_mm;
-	struct page *page;
-	if (!fetch.prefetch_start)
-		return;
-	fetch.counter++;
-	if (unlikely(fetch.accesses == NULL))
-		return;
-
-	while (dist < MAX_SEARCH_DIST &&
-	       (fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) !=
-		       (addr & PAGE_ADDR_MASK))
-		dist++;
-	if ((fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) ==
-	    (addr & PAGE_ADDR_MASK)) {
-		int num_prefetch = 0;
-		fetch.found_counter++;
-		// walk the page table for addr START
-		down_read(&mm->mmap_sem);
-		for (i = 0; i < 100 && num_prefetch < 32; i++) {
-			unsigned long paddr = fetch.accesses[fetch.pos + i];
-			vm_entry.address = paddr;
-			vm_entry.pgd = pgd_offset(mm, paddr);
-			if (pgd_none(*vm_entry.pgd) || pgd_bad(*vm_entry.pgd))
-				return;
-			vm_entry.pud = pud_offset(vm_entry.pgd, paddr);
-			if (pud_none(*vm_entry.pud) || pud_bad(*vm_entry.pud))
-				return;
-			vm_entry.pmd = pmd_offset(vm_entry.pud, paddr);
-			if (pmd_none(*(vm_entry.pmd)) ||
-			    pud_large(*(vm_entry.pud))) {
-				// probably because the region has been cleaned up?
-				vm_entry.pmd = NULL;
-				vm_entry.pte = NULL;
-				return;
-			}
-			vm_entry.pte = pte_offset_map(vm_entry.pmd, paddr);
-			vm_entry.initialized = true;
-
-			// prefetch the page if needed
-			pte_val = *vm_entry.pte;
-			if (pte_none(pte_val))
-				continue;
-			if (pte_present(pte_val))
-				continue;
-			prefetch_entry = pte_to_swp_entry(pte_val);
-			if (unlikely(non_swap_entry(prefetch_entry)))
-				continue;
-			page = read_swap_cache_async(prefetch_entry, *gfp_mask,
-						     vma, addr);
-
-			my_add_page_to_buffer(prefetch_entry, page);
-			if (!page)
-				continue;
-			num_prefetch++;
-			SetPageReadahead(page);
-
-			put_page(page); //= page_cache_release
-
-			// printk(KERN_WARNING "page walk ahead %d %s %lx", i,
-			//        !pte_none(*vm_entry.pte) &&
-			// 		       pte_present(*vm_entry.pte) ?
-			// 	       "PRESENT" :
-			// 	       "GONE",
-			//        addr & PAGE_ADDR_MASK);
-		}
-		// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
-		lru_add_drain();
-		if (num_prefetch > 10)
-			*goto_skip = true;
-
-		up_read(&mm->mmap_sem);
-		// walk the page table for addr END
-		fetch.pos += dist;
-	} else {
-		// printk(KERN_WARNING " lost in trace %d/%d \n", fetch.found_counter, fetch.counter);
-	}
-}
+//  void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
+//  			 struct vm_area_struct *vma, const unsigned long addr,
+//  			 bool *goto_skip)
+//  {
+//  	int i;
+//  	int dist = 0;
+//  	struct mm_struct *mm = vma->vm_mm;
+//  
+//  	if (!fetch.prefetch_start)
+//  		return;
+//  	fetch.counter++;
+//  	return;
+//  	if (unlikely(fetch.accesses == NULL))
+//  		return;
+//  
+//  	while (dist < MAX_SEARCH_DIST &&
+//  	       (fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) !=
+//  		       (addr & PAGE_ADDR_MASK))
+//  		dist++;
+//  	if ((fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) ==
+//  	    (addr & PAGE_ADDR_MASK)) {
+//  		int num_prefetch = 0;
+//  		fetch.found_counter++;
+//  		// walk the page table for addr START
+//  
+//  		down_read(&mm->mmap_sem);
+//  		for (i = 0; i < 100 && num_prefetch < 32; i++) {
+//  			unsigned long paddr = fetch.accesses[fetch.pos + i];
+//  
+//  			if (prefetch_addr(paddr, mm) == true)
+//  				num_prefetch++;
+//  		}
+//  		// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
+//  		lru_add_drain();
+//  		if (num_prefetch > 10)
+//  			*goto_skip = true;
+//  
+//  		up_read(&mm->mmap_sem);
+//  		// walk the page table for addr END
+//  		fetch.pos += dist;
+//  	} else {
+//  		// printk(KERN_WARNING " lost in trace %d/%d \n", fetch.found_counter, fetch.counter);
+//  	}
+//  }
 /* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE END ++++++++++++++++++++++*/
 
 static void usage(void)
