@@ -264,6 +264,7 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 out:
 	return ret;
 }
+EXPORT_SYMBOL(swap_writepage);
 
 static sector_t swap_page_sector(struct page *page)
 {
@@ -389,6 +390,7 @@ failed_rdma:
 out:
 	return ret;
 }
+EXPORT_SYMBOL(swap_readpage);
 
 int swap_set_page_dirty(struct page *page)
 {
