@@ -542,7 +542,7 @@ typedef enum {
  * pageout is called by shrink_page_list() for each dirty page.
  * Calls ->writepage().
  */
-static pageout_t pageout(struct page *page, struct address_space *mapping,
+pageout_t pageout(struct page *page, struct address_space *mapping,
 			 struct scan_control *sc)
 {
 	/*
@@ -612,6 +612,7 @@ static pageout_t pageout(struct page *page, struct address_space *mapping,
 
 	return PAGE_CLEAN;
 }
+EXPORT_SYMBOL(pageout);
 
 /*
  * Same as remove_mapping, but if the page is removed from the mapping, it
@@ -888,7 +889,7 @@ static void page_check_dirty_writeback(struct page *page,
 /*
  * shrink_page_list() returns the number of reclaimed pages
  */
-static unsigned long shrink_page_list(struct list_head *page_list,
+unsigned long shrink_page_list(struct list_head *page_list,
 				      struct zone *zone,
 				      struct scan_control *sc,
 				      enum ttu_flags ttu_flags,
@@ -1241,6 +1242,7 @@ keep:
 	*ret_nr_immediate += nr_immediate;
 	return nr_reclaimed;
 }
+EXPORT_SYMBOL(shrink_page_list);
 
 unsigned long reclaim_clean_pages_from_list(struct zone *zone,
 					    struct list_head *page_list)

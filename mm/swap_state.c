@@ -605,6 +605,10 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 	struct page *found_page, *new_page = NULL;
 	struct address_space *swapper_space = swap_address_space(entry);
 	int err;
+	// magic value passed from prefetch_addr to skip adding to lru
+	// done this way to avoid altering abi, not sure who else depends
+	// on this functioon
+	int magic_value = *new_page_allocated;
 	*new_page_allocated = false;
 
 	do {
@@ -671,7 +675,8 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 			/*
 			 * Initiate read into locked page and return.
 			 */
-			lru_cache_add_anon(new_page);
+			if (magic_value != 44)
+				lru_cache_add_anon(new_page);
 			*new_page_allocated = true;
 			//printk("%s: added new page into anon lru for entry %ld with mapcount %d\n",__func__, entry.val, page_mapcount(new_page));
 			return new_page;
