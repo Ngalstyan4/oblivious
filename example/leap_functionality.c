@@ -58,7 +58,7 @@ enum x86_pf_error_code {
 };
 
 const unsigned long PAGE_ADDR_MASK = ~0xfff;
-const unsigned long MAX_SEARCH_DIST = 2;
+const unsigned long MAX_SEARCH_DIST = 2000;
 const unsigned long PRESENT_BIT_MASK = 1UL;
 const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
 
@@ -73,7 +73,7 @@ typedef struct {
 } vm_t;
 
 #define TRACE_FILEPATH_LEN 256
-#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 1ULL
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 5ULL
 #define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 static char trace_filepath[TRACE_FILEPATH_LEN];
 typedef struct {
@@ -117,8 +117,8 @@ void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		     unsigned long address, struct task_struct *tsk,
 		     bool *return_early, int magic);
 void do_page_fault_fetch_2(struct pt_regs *regs, unsigned long error_code,
-		     unsigned long address, struct task_struct *tsk,
-		     bool *return_early, int magic);
+			   unsigned long address, struct task_struct *tsk,
+			   bool *return_early, int magic);
 void haha(void)
 {
 	printk(KERN_INFO "injected print statement- C Narek Galstyan");
@@ -142,7 +142,7 @@ void trace_init(pid_t pid)
 		printk(KERN_ERR "Unable to allocate memory for tracing\n");
 		return;
 	}
-	
+
 	set_pointer(2, do_page_fault_2);
 }
 
@@ -352,7 +352,7 @@ void mem_pattern_trace_start(int flags)
 
 	} else if (flags & TRACE_PREFETCH) {
 		init_swap_trend(32);
-		//kevictd_init();
+		kevictd_init();
 		//prefetch_buffer_init(8000);
 		//activate_prefetch_buffer(1);
 		set_custom_prefetch(2);
@@ -367,10 +367,11 @@ void mem_pattern_trace_end(int flags)
 
 	// the easy case, if we were prefetching, just free the tape we read into memory
 	if (fetch.accesses != NULL) {
-		//kevictd_fini();
+		kevictd_fini();
 		fetch.mm = NULL;
-		printk(KERN_INFO "found %d/%d page faults: min:%ld, maj: %ld\n", fetch.found_counter,
-		       fetch.counter, current->min_flt, current->maj_flt);
+		printk(KERN_INFO "found %d/%d page faults: min:%ld, maj: %ld\n",
+		       fetch.found_counter, fetch.counter, current->min_flt,
+		       current->maj_flt);
 		vfree(fetch.accesses);
 		fetch.accesses = NULL; // todo:: should not need once in kernel
 	}
@@ -487,24 +488,29 @@ void do_page_fault_fetch_2(struct pt_regs *regs, unsigned long error_code,
 			       (address & PAGE_ADDR_MASK))
 			dist++;
 		if ((fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) ==
-			       (address & PAGE_ADDR_MASK)) {
+		    (address & PAGE_ADDR_MASK)) {
 			fetch.pos += dist;
+			fetch.counter++;
 			// printk("fault num:%d %lx fetch pos:%ld\n",
 			//        fetch.num_fault, address & PAGE_ADDR_MASK,
 			//        fetch.pos);
 		}
 
-
-		if (fetch.pos >= fetch.next_fetch){
+		if (fetch.pos >= fetch.next_fetch) {
 			down_read(&fetch.mm->mmap_sem);
-			for (i = 0; i < 100 && num_prefetch < 32; i++) {
-				unsigned long paddr = fetch.accesses[fetch.pos + i];
+			//debug_print_prefetch();
+			for (i = 0; i < 100 && num_prefetch < 64; i++) {
+				unsigned long paddr =
+					fetch.accesses[fetch.pos + i];
 
 				if (prefetch_addr(paddr, fetch.mm) == true)
 					num_prefetch++;
 			}
+			//printk(KERN_INFO "num prefetch-%d, ii %d", num_prefetch, i);
 			fetch.found_counter++;
 			fetch.next_fetch = fetch.pos + i;
+			if (i >= 5)
+				fetch.next_fetch -= 5;
 			// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
 			lru_add_drain();
 			up_read(&fetch.mm->mmap_sem);
@@ -552,52 +558,14 @@ void fetch_init(pid_t pid, struct mm_struct *mm)
 //  			 struct vm_area_struct *vma, const unsigned long addr,
 //  			 bool *goto_skip)
 //  {
-//  	int i;
-//  	int dist = 0;
-//  	struct mm_struct *mm = vma->vm_mm;
-//  
-//  	if (!fetch.prefetch_start)
-//  		return;
-//  	fetch.counter++;
-//  	return;
-//  	if (unlikely(fetch.accesses == NULL))
-//  		return;
-//  
-//  	while (dist < MAX_SEARCH_DIST &&
-//  	       (fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) !=
-//  		       (addr & PAGE_ADDR_MASK))
-//  		dist++;
-//  	if ((fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) ==
-//  	    (addr & PAGE_ADDR_MASK)) {
-//  		int num_prefetch = 0;
-//  		fetch.found_counter++;
-//  		// walk the page table for addr START
-//  
-//  		down_read(&mm->mmap_sem);
-//  		for (i = 0; i < 100 && num_prefetch < 32; i++) {
-//  			unsigned long paddr = fetch.accesses[fetch.pos + i];
-//  
-//  			if (prefetch_addr(paddr, mm) == true)
-//  				num_prefetch++;
-//  		}
-//  		// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
-//  		lru_add_drain();
-//  		if (num_prefetch > 10)
-//  			*goto_skip = true;
-//  
-//  		up_read(&mm->mmap_sem);
-//  		// walk the page table for addr END
-//  		fetch.pos += dist;
-//  	} else {
-//  		// printk(KERN_WARNING " lost in trace %d/%d \n", fetch.found_counter, fetch.counter);
-//  	}
 //  }
 /* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE END ++++++++++++++++++++++*/
 
 static void usage(void)
 {
-	printk(KERN_INFO "To enable remote I/O data path: insmod "
-			 "leap_functionality.ko cmd=\"remote_on\"\n");
+	printk(KERN_INFO "To enable remote I/O data path: insmod %ld"
+			 "leap_functionality.ko cmd=\"remote_on\"\n",
+	       sizeof(struct page));
 	printk(KERN_INFO "To disable remote I/O data path: insmod "
 			 "leap_functionality.ko cmd=\"remote_off\"\n");
 	printk(KERN_INFO

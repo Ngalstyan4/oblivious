@@ -4,4 +4,5 @@
 void kevictd_init();
 void kevictd_fini();
 
+void debug_print_prefetch();
 #endif /*KEVICTD_H*/

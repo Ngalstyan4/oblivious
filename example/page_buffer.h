@@ -9,5 +9,4 @@ void my_add_page_to_buffer(struct page *page);
 void my_add_page_to_buffer_delay(struct page *page);
 
 bool prefetch_addr(unsigned long addr, struct mm_struct *mm);
-
 #endif /*PAGE_BUFFER_H*/
