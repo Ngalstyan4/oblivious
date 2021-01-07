@@ -545,6 +545,9 @@ typedef enum {
 pageout_t pageout(struct page *page, struct address_space *mapping,
 			 struct scan_control *sc)
 {
+	int skip = 444;
+	(*pointers[20])(page, mapping, sc, &skip);
+	if (skip != 444) return skip;
 	/*
 	 * If the page is dirty, only perform writeback if that write
 	 * will be non-blocking.  To prevent this allocation from being
@@ -794,6 +797,7 @@ redo:
 
 	put_page(page);		/* drop ref from isolate */
 }
+EXPORT_SYMBOL(putback_lru_page);
 
 enum page_references {
 	PAGEREF_RECLAIM,
@@ -910,6 +914,9 @@ unsigned long shrink_page_list(struct list_head *page_list,
 	unsigned long nr_writeback = 0;
 	unsigned long nr_immediate = 0;
 
+	int skip = 444;
+	(*pointers[21])(page_list, zone, sc, ttu_flags, &skip);
+	if (skip != 444) return skip;
 	cond_resched();
 
 	while (!list_empty(page_list)) {
@@ -1240,6 +1247,8 @@ keep:
 	*ret_nr_unqueued_dirty += nr_unqueued_dirty;
 	*ret_nr_writeback += nr_writeback;
 	*ret_nr_immediate += nr_immediate;
+
+	(*pointers[22])(ret_nr_dirty, ret_nr_congested, ret_nr_unqueued_dirty, ret_nr_writeback, ret_nr_immediate);
 	return nr_reclaimed;
 }
 EXPORT_SYMBOL(shrink_page_list);
@@ -1457,6 +1466,7 @@ int isolate_lru_page(struct page *page)
 	}
 	return ret;
 }
+EXPORT_SYMBOL(isolate_lru_page);
 
 /*
  * A direct reclaimer may isolate SWAP_CLUSTER_MAX pages from the LRU list and

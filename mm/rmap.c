@@ -616,6 +616,7 @@ void try_to_unmap_flush(void)
 	tlb_ubc->writable = false;
 	put_cpu();
 }
+EXPORT_SYMBOL(try_to_unmap_flush);
 
 /* Flush iff there are potentially writable TLB entries that can race with IO */
 void try_to_unmap_flush_dirty(void)
@@ -625,6 +626,7 @@ void try_to_unmap_flush_dirty(void)
 	if (tlb_ubc->writable)
 		try_to_unmap_flush();
 }
+EXPORT_SYMBOL(try_to_unmap_flush_dirty);
 
 static void set_tlb_ubc_flush_pending(struct mm_struct *mm,
 		struct page *page, bool writable)
@@ -1520,6 +1522,7 @@ int try_to_unmap(struct page *page, enum ttu_flags flags)
 		ret = SWAP_SUCCESS;
 	return ret;
 }
+EXPORT_SYMBOL(try_to_unmap);
 
 /**
  * try_to_munlock - try to munlock a page
