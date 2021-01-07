@@ -357,6 +357,7 @@ int add_to_swap(struct page *page, struct list_head *list)
 		return 0;
 	}
 }
+EXPORT_SYMBOL(add_to_swap);
 
 /*
  * This must be called only on pages that have

@@ -273,4 +273,5 @@ static inline int page_mkclean(struct page *page)
 #define SWAP_FAIL	2
 #define SWAP_MLOCK	3
 
+void try_to_unmap_flush_dirty(void);
 #endif	/* _LINUX_RMAP_H */
