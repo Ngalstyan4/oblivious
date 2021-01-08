@@ -156,7 +156,7 @@ enum {
 	SWP_SCANNING	= (1 << 11),	/* refcount in scan_swap_map */
 };
 
-#define SWAP_CLUSTER_MAX 32UL
+#define SWAP_CLUSTER_MAX 64UL
 #define COMPACT_CLUSTER_MAX SWAP_CLUSTER_MAX
 
 #define SWAP_MAP_MAX	0x3e	/* Max duplication count, in first swap_map */
@@ -332,6 +332,7 @@ extern void kswapd_stop(int nid);
 
 /* linux/mm/page_io.c */
 extern int swap_readpage(struct page *);
+extern int swap_readpage_sync(struct page *);
 extern int swap_writepage(struct page *page, struct writeback_control *wbc);
 extern void end_swap_bio_write(struct bio *bio);
 extern int __swap_writepage(struct page *page, struct writeback_control *wbc,

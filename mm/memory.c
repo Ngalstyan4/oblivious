@@ -68,6 +68,8 @@
 #include <linux/debugfs.h>
 #include <linux/userfaultfd_k.h>
 #include <linux/dax.h>
+#include <linux/frontswap.h>
+#include <linux/delay.h>
 
 #include <asm/io.h>
 #include <asm/mmu_context.h>
@@ -2698,6 +2700,7 @@ int do_swap_page(struct vm_fault *vmf)
 		}
 		goto out;
 	}
+
 	delayacct_set_flag(DELAYACCT_PF_SWAPIN);
 	page = lookup_swap_cache(entry);
 	if (!page) {

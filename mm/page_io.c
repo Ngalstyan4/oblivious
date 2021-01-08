@@ -3,7 +3,7 @@
  *
  *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
  *
- *  Swap reorganised 29.12.95, 
+ *  Swap reorganised 29.12.95,
  *  Asynchronous swapping added 30.12.95. Stephen Tweedie
  *  Removed race in async swapping. 14.4.1996. Bruno Haible
  *  Add swap of shared pages through the page cache. 20.2.1998. Stephen Tweedie
@@ -338,11 +338,8 @@ int swap_readpage(struct page *page)
 	VM_BUG_ON_PAGE(!PageSwapCache(page), page);
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 	VM_BUG_ON_PAGE(PageUptodate(page), page);
-	if (frontswap_load(page) == 0) {
-		SetPageUptodate(page);
-		unlock_page(page);
+	if (frontswap_load_async(page) == 0)
 		goto out;
-	}
 
 	if (sis->flags & SWP_FILE) {
 		struct file *swap_file = sis->swap_file;
@@ -377,6 +374,17 @@ int swap_readpage(struct page *page)
 	submit_bio(bio);
 out:
 	return ret;
+}
+
+int swap_readpage_sync(struct page *page)
+{
+	VM_BUG_ON_PAGE(!PageSwapCache(page), page);
+	VM_BUG_ON_PAGE(!PageLocked(page), page);
+	VM_BUG_ON_PAGE(PageUptodate(page), page);
+
+	BUG_ON(frontswap_load(page));
+
+	return 0;
 }
 
 int swap_set_page_dirty(struct page *page)

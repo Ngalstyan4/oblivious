@@ -964,8 +964,6 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 	unsigned nr_ref_keep = 0;
 	unsigned nr_unmap_fail = 0;
 
-	cond_resched();
-
 	while (!list_empty(page_list)) {
 		struct address_space *mapping;
 		struct page *page;
@@ -974,8 +972,6 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		bool dirty, writeback;
 		bool lazyfree = false;
 		int ret = SWAP_SUCCESS;
-
-		cond_resched();
 
 		page = lru_to_page(page_list);
 		list_del(&page->lru);
@@ -1208,6 +1204,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			case PAGE_SUCCESS:
 				if (PageWriteback(page))
 					goto keep;
+
 				if (PageDirty(page))
 					goto keep;
 
@@ -1330,6 +1327,7 @@ keep:
 		stat->nr_ref_keep = nr_ref_keep;
 		stat->nr_unmap_fail = nr_unmap_fail;
 	}
+
 	return nr_reclaimed;
 }
 

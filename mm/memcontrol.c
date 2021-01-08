@@ -94,6 +94,8 @@ int do_swap_account __read_mostly;
 #define do_swap_account		0
 #endif
 
+#define FASTSWAP_RECLAIM_CPU	7
+
 /* Whether legacy memory+swap accounting is active */
 static bool do_memsw_account(void)
 {
@@ -1842,12 +1844,23 @@ static void reclaim_high(struct mem_cgroup *memcg,
 	} while ((memcg = parent_mem_cgroup(memcg)));
 }
 
+#define MAX_RECLAIM_OFFLOAD 2048UL
 static void high_work_func(struct work_struct *work)
 {
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = container_of(work, struct mem_cgroup, high_work);
+	unsigned long high = memcg->high;
+	unsigned long nr_pages = page_counter_read(&memcg->memory);
+	unsigned long reclaim;
 
-	memcg = container_of(work, struct mem_cgroup, high_work);
-	reclaim_high(memcg, CHARGE_BATCH, GFP_KERNEL);
+	if (nr_pages > high) {
+		reclaim = min(nr_pages - high, MAX_RECLAIM_OFFLOAD);
+
+		/* reclaim_high only reclaims iff nr_pages > high */
+		reclaim_high(memcg, reclaim, GFP_KERNEL);
+	}
+
+	if (page_counter_read(&memcg->memory) > memcg->high)
+		schedule_work_on(FASTSWAP_RECLAIM_CPU, &memcg->high_work);
 }
 
 /*
@@ -1865,6 +1878,7 @@ void mem_cgroup_handle_over_high(void)
 	memcg = get_mem_cgroup_from_mm(current->mm);
 	reclaim_high(memcg, nr_pages, GFP_KERNEL);
 	css_put(&memcg->css);
+
 	current->memcg_nr_pages_over_high = 0;
 }
 
@@ -1878,6 +1892,9 @@ static int try_charge(struct mem_cgroup *memcg, gfp_t gfp_mask,
 	unsigned long nr_reclaimed;
 	bool may_swap = true;
 	bool drained = false;
+	unsigned long high_limit;
+	unsigned long curr_pages;
+	unsigned long excess;
 
 	if (mem_cgroup_is_root(memcg))
 		return 0;
@@ -2006,14 +2023,20 @@ done_restock:
 	 * reclaim, the cost of mismatch is negligible.
 	 */
 	do {
-		if (page_counter_read(&memcg->memory) > memcg->high) {
-			/* Don't bother a random interrupted task */
-			if (in_interrupt()) {
-				schedule_work(&memcg->high_work);
-				break;
+		high_limit = memcg->high;
+		curr_pages = page_counter_read(&memcg->memory);
+
+		if (curr_pages > high_limit) {
+			excess = curr_pages - high_limit;
+			/* regardless of whether we use app cpu or worker, we evict
+			 * at most MAX_RECLAIM_OFFLOAD pages at a time */
+			if (excess > MAX_RECLAIM_OFFLOAD && !in_interrupt()) {
+				current->memcg_nr_pages_over_high += MAX_RECLAIM_OFFLOAD;
+				set_notify_resume(current);
+			} else {
+				schedule_work_on(FASTSWAP_RECLAIM_CPU, &memcg->high_work);
 			}
-			current->memcg_nr_pages_over_high += batch;
-			set_notify_resume(current);
+
 			break;
 		}
 	} while ((memcg = parent_mem_cgroup(memcg)));
@@ -5081,7 +5104,6 @@ static ssize_t memory_high_write(struct kernfs_open_file *of,
 				 char *buf, size_t nbytes, loff_t off)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
-	unsigned long nr_pages;
 	unsigned long high;
 	int err;
 
@@ -5092,12 +5114,9 @@ static ssize_t memory_high_write(struct kernfs_open_file *of,
 
 	memcg->high = high;
 
-	nr_pages = page_counter_read(&memcg->memory);
-	if (nr_pages > high)
-		try_to_free_mem_cgroup_pages(memcg, nr_pages - high,
-					     GFP_KERNEL, true);
-
+	/* concurrent eviction on shrink */
 	memcg_wb_domain_size_changed(memcg);
+	schedule_work_on(FASTSWAP_RECLAIM_CPU, &memcg->high_work);
 	return nbytes;
 }
 
