@@ -16,7 +16,7 @@
 #include <linux/err.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include "internal.h"
 #include <keys/user-type.h>
 
@@ -73,7 +73,7 @@ static void request_key_auth_describe(const struct key *key,
 
 	seq_puts(m, "key:");
 	seq_puts(m, key->description);
-	if (key_is_positive(key))
+	if (key_is_instantiated(key))
 		seq_printf(m, " pid:%d ci:%zu", rka->pid, rka->callout_len);
 }
 
@@ -202,7 +202,7 @@ struct key *request_key_auth_new(struct key *target, const void *callout_info,
 	authkey = key_alloc(&key_type_request_key_auth, desc,
 			    cred->fsuid, cred->fsgid, cred,
 			    KEY_POS_VIEW | KEY_POS_READ | KEY_POS_SEARCH |
-			    KEY_USR_VIEW, KEY_ALLOC_NOT_IN_QUOTA);
+			    KEY_USR_VIEW, KEY_ALLOC_NOT_IN_QUOTA, NULL);
 	if (IS_ERR(authkey)) {
 		ret = PTR_ERR(authkey);
 		goto error_alloc;

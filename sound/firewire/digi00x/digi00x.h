@@ -16,6 +16,7 @@
 #include <linux/mod_devicetable.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <linux/sched/signal.h>
 
 #include <sound/core.h>
 #include <sound/initval.h>
@@ -36,6 +37,9 @@ struct snd_dg00x {
 
 	struct mutex mutex;
 	spinlock_t lock;
+
+	bool registered;
+	struct delayed_work dwork;
 
 	struct amdtp_stream tx_stream;
 	struct fw_iso_resources tx_resources;

@@ -11,7 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/stddef.h>
 #include <linux/fs.h>
-#include <linux/sched.h>
+#include <linux/sched/mm.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
 #include <linux/bootmem.h>
@@ -70,14 +70,14 @@ static struct resource data_resource = {
 	.name   = "Kernel data",
 	.start  = 0,
 	.end    = 0,
-	.flags  = IORESOURCE_BUSY | IORESOURCE_MEM
+	.flags  = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM
 };
 
 static struct resource code_resource = {
 	.name   = "Kernel code",
 	.start  = 0,
 	.end    = 0,
-	.flags  = IORESOURCE_BUSY | IORESOURCE_MEM
+	.flags  = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM
 };
 
 unsigned long memory_start;
@@ -403,7 +403,7 @@ void __init cpu_init (void)
 	printk(KERN_INFO "Initializing CPU#%d\n", cpu_id);
 
 	/* Set up and load the per-CPU TSS and LDT */
-	atomic_inc(&init_mm.mm_count);
+	mmgrab(&init_mm);
 	current->active_mm = &init_mm;
 	if (current->mm)
 		BUG();

@@ -50,14 +50,18 @@ static u8 usb_bos_descriptor [] = {
 	0x00,				/* bU1DevExitLat, set later. */
 	0x00, 0x00,			/* __le16 bU2DevExitLat, set later. */
 	/* Second device capability, SuperSpeedPlus */
-	0x0c,				/* bLength 12, will be adjusted later */
+	0x1c,				/* bLength 28, will be adjusted later */
 	USB_DT_DEVICE_CAPABILITY,	/* Device Capability */
 	USB_SSP_CAP_TYPE,		/* bDevCapabilityType SUPERSPEED_PLUS */
 	0x00,				/* bReserved 0 */
-	0x00, 0x00, 0x00, 0x00,		/* bmAttributes, get from xhci psic */
-	0x00, 0x00,			/* wFunctionalitySupport */
+	0x23, 0x00, 0x00, 0x00,		/* bmAttributes, SSAC=3 SSIC=1 */
+	0x01, 0x00,			/* wFunctionalitySupport */
 	0x00, 0x00,			/* wReserved 0 */
-	/* Sublink Speed Attributes are added in xhci_create_usb3_bos_desc() */
+	/* Default Sublink Speed Attributes, overwrite if custom PSI exists */
+	0x34, 0x00, 0x05, 0x00,		/* 5Gbps, symmetric, rx, ID = 4 */
+	0xb4, 0x00, 0x05, 0x00,		/* 5Gbps, symmetric, tx, ID = 4 */
+	0x35, 0x40, 0x0a, 0x00,		/* 10Gbps, SSP, symmetric, rx, ID = 5 */
+	0xb5, 0x40, 0x0a, 0x00,		/* 10Gbps, SSP, symmetric, tx, ID = 5 */
 };
 
 static int xhci_create_usb3_bos_desc(struct xhci_hcd *xhci, char *buf,
@@ -72,10 +76,14 @@ static int xhci_create_usb3_bos_desc(struct xhci_hcd *xhci, char *buf,
 	ssp_cap_size = sizeof(usb_bos_descriptor) - desc_size;
 
 	/* does xhci support USB 3.1 Enhanced SuperSpeed */
-	if (xhci->usb3_rhub.min_rev >= 0x01 && xhci->usb3_rhub.psi_uid_count) {
-		/* two SSA entries for each unique PSI ID, one RX and one TX */
-		ssa_count = xhci->usb3_rhub.psi_uid_count * 2;
-		ssa_size = ssa_count * sizeof(u32);
+	if (xhci->usb3_rhub.min_rev >= 0x01) {
+		/* does xhci provide a PSI table for SSA speed attributes? */
+		if (xhci->usb3_rhub.psi_count) {
+			/* two SSA entries for each unique PSI ID, RX and TX */
+			ssa_count = xhci->usb3_rhub.psi_uid_count * 2;
+			ssa_size = ssa_count * sizeof(u32);
+			ssp_cap_size -= 16; /* skip copying the default SSA */
+		}
 		desc_size += ssp_cap_size;
 		usb3_1 = true;
 	}
@@ -102,7 +110,8 @@ static int xhci_create_usb3_bos_desc(struct xhci_hcd *xhci, char *buf,
 		put_unaligned_le16(HCS_U2_LATENCY(temp), &buf[13]);
 	}
 
-	if (usb3_1) {
+	/* If PSI table exists, add the custom speed attributes from it */
+	if (usb3_1 && xhci->usb3_rhub.psi_count) {
 		u32 ssp_cap_base, bm_attrib, psi;
 		int offset;
 
@@ -380,6 +389,8 @@ static int xhci_stop_device(struct xhci_hcd *xhci, int slot_id, int suspend)
 	if (!virt_dev)
 		return -ENODEV;
 
+	trace_xhci_stop_device(virt_dev);
+
 	cmd = xhci_alloc_command(xhci, false, true, GFP_NOIO);
 	if (!cmd) {
 		xhci_dbg(xhci, "Couldn't allocate command structure.\n");
@@ -394,37 +405,26 @@ static int xhci_stop_device(struct xhci_hcd *xhci, int slot_id, int suspend)
 						     GFP_NOWAIT);
 			if (!command) {
 				spin_unlock_irqrestore(&xhci->lock, flags);
-				ret = -ENOMEM;
-				goto cmd_cleanup;
-			}
+				xhci_free_command(xhci, cmd);
+				return -ENOMEM;
 
-			ret = xhci_queue_stop_endpoint(xhci, command, slot_id,
-						       i, suspend);
-			if (ret) {
-				spin_unlock_irqrestore(&xhci->lock, flags);
-				xhci_free_command(xhci, command);
-				goto cmd_cleanup;
 			}
+			xhci_queue_stop_endpoint(xhci, command, slot_id, i,
+						 suspend);
 		}
 	}
-	ret = xhci_queue_stop_endpoint(xhci, cmd, slot_id, 0, suspend);
-	if (ret) {
-		spin_unlock_irqrestore(&xhci->lock, flags);
-		goto cmd_cleanup;
-	}
-
+	xhci_queue_stop_endpoint(xhci, cmd, slot_id, 0, suspend);
 	xhci_ring_cmd_db(xhci);
 	spin_unlock_irqrestore(&xhci->lock, flags);
 
 	/* Wait for last stop endpoint command to finish */
 	wait_for_completion(cmd->completion);
 
-	if (cmd->status == COMP_CMD_ABORT || cmd->status == COMP_CMD_STOP) {
+	if (cmd->status == COMP_COMMAND_ABORTED ||
+			cmd->status == COMP_STOPPED) {
 		xhci_warn(xhci, "Timeout while waiting for stop endpoint command\n");
 		ret = -ETIME;
 	}
-
-cmd_cleanup:
 	xhci_free_command(xhci, cmd);
 	return ret;
 }
@@ -458,6 +458,12 @@ static void xhci_disable_port(struct usb_hcd *hcd, struct xhci_hcd *xhci,
 	if (hcd->speed >= HCD_USB3) {
 		xhci_dbg(xhci, "Ignoring request to disable "
 				"SuperSpeed port.\n");
+		return;
+	}
+
+	if (xhci->quirks & XHCI_BROKEN_PORT_PED) {
+		xhci_dbg(xhci,
+			 "Broken Port Enabled/Disabled, ignoring port disable request.\n");
 		return;
 	}
 
@@ -780,9 +786,6 @@ static u32 xhci_get_port_status(struct usb_hcd *hcd,
 			clear_bit(wIndex, &bus_state->resuming_ports);
 
 			set_bit(wIndex, &bus_state->rexit_ports);
-
-			xhci_test_and_clear_bit(xhci, port_array, wIndex,
-						PORT_PLC);
 			xhci_set_link_state(xhci, port_array, wIndex,
 					XDEV_U0);
 
@@ -873,7 +876,7 @@ static u32 xhci_get_port_status(struct usb_hcd *hcd,
 		xhci_hub_report_usb2_link_state(&status, raw_port_status);
 	}
 	if (bus_state->port_c_suspend & (1 << wIndex))
-		status |= 1 << USB_PORT_FEAT_C_SUSPEND;
+		status |= USB_PORT_STAT_C_SUSPEND << 16;
 
 	return status;
 }
@@ -996,8 +999,7 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			temp = readl(port_array[wIndex]);
 			if ((temp & PORT_PE) == 0 || (temp & PORT_RESET)
 				|| (temp & PORT_PLS_MASK) >= XDEV_U3) {
-				xhci_warn(xhci, "USB core suspending device "
-					  "not in U0/U1/U2.\n");
+				xhci_warn(xhci, "USB core suspending device not in U0/U1/U2.\n");
 				goto error;
 			}
 

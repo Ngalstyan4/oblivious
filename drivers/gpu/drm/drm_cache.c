@@ -29,7 +29,9 @@
  */
 
 #include <linux/export.h>
-#include <drm/drmP.h>
+#include <linux/highmem.h>
+
+#include <drm/drm_cache.h>
 
 #if defined(CONFIG_X86)
 #include <asm/smp.h>
@@ -67,12 +69,20 @@ static void drm_cache_flush_clflush(struct page *pages[],
 }
 #endif
 
+/**
+ * drm_clflush_pages - Flush dcache lines of a set of pages.
+ * @pages: List of pages to be flushed.
+ * @num_pages: Number of pages in the array.
+ *
+ * Flush every data cache line entry that points to an address belonging
+ * to a page in the array.
+ */
 void
 drm_clflush_pages(struct page *pages[], unsigned long num_pages)
 {
 
 #if defined(CONFIG_X86)
-	if (cpu_has_clflush) {
+	if (static_cpu_has(X86_FEATURE_CLFLUSH)) {
 		drm_cache_flush_clflush(pages, num_pages);
 		return;
 	}
@@ -101,11 +111,18 @@ drm_clflush_pages(struct page *pages[], unsigned long num_pages)
 }
 EXPORT_SYMBOL(drm_clflush_pages);
 
+/**
+ * drm_clflush_sg - Flush dcache lines pointing to a scather-gather.
+ * @st: struct sg_table.
+ *
+ * Flush every data cache line entry that points to an address in the
+ * sg.
+ */
 void
 drm_clflush_sg(struct sg_table *st)
 {
 #if defined(CONFIG_X86)
-	if (cpu_has_clflush) {
+	if (static_cpu_has(X86_FEATURE_CLFLUSH)) {
 		struct sg_page_iter sg_iter;
 
 		mb();
@@ -125,11 +142,19 @@ drm_clflush_sg(struct sg_table *st)
 }
 EXPORT_SYMBOL(drm_clflush_sg);
 
+/**
+ * drm_clflush_virt_range - Flush dcache lines of a region
+ * @addr: Initial kernel memory address.
+ * @length: Region size.
+ *
+ * Flush every data cache line entry that points to an address in the
+ * region requested.
+ */
 void
 drm_clflush_virt_range(void *addr, unsigned long length)
 {
 #if defined(CONFIG_X86)
-	if (cpu_has_clflush) {
+	if (static_cpu_has(X86_FEATURE_CLFLUSH)) {
 		const int size = boot_cpu_data.x86_clflush_size;
 		void *end = addr + length;
 		addr = (void *)(((unsigned long)addr) & -size);

@@ -20,13 +20,14 @@ static __inline__ int udplite_getfrag(void *from, char *to, int  offset,
 				      int len, int odd, struct sk_buff *skb)
 {
 	struct msghdr *msg = from;
-	return copy_from_iter(to, len, &msg->msg_iter) != len ? -EFAULT : 0;
+	return copy_from_iter_full(to, len, &msg->msg_iter) ? 0 : -EFAULT;
 }
 
 /* Designate sk as UDP-Lite socket */
 static inline int udplite_sk_init(struct sock *sk)
 {
 	udp_sk(sk)->pcflag = UDPLITE_BIT;
+	sk->sk_destruct = udp_destruct_sock;
 	return 0;
 }
 
@@ -62,7 +63,6 @@ static inline int udplite_checksum_init(struct sk_buff *skb, struct udphdr *uh)
 		UDP_SKB_CB(skb)->cscov = cscov;
 		if (skb->ip_summed == CHECKSUM_COMPLETE)
 			skb->ip_summed = CHECKSUM_NONE;
-		skb->csum_valid = 0;
         }
 
 	return 0;

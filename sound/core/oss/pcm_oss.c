@@ -28,11 +28,13 @@
 
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/sched/signal.h>
 #include <linux/time.h>
 #include <linux/vmalloc.h>
 #include <linux/module.h>
 #include <linux/math64.h>
 #include <linux/string.h>
+#include <linux/compat.h>
 #include <sound/core.h>
 #include <sound/minors.h>
 #include <sound/pcm.h>
@@ -465,6 +467,7 @@ static int snd_pcm_hw_param_near(struct snd_pcm_substream *pcm,
 		v = snd_pcm_hw_param_last(pcm, params, var, dir);
 	else
 		v = snd_pcm_hw_param_first(pcm, params, var, dir);
+	snd_BUG_ON(v < 0);
 	return v;
 }
 
@@ -853,7 +856,7 @@ static int snd_pcm_oss_change_params(struct snd_pcm_substream *substream,
 			return -EAGAIN;
 	} else if (mutex_lock_interruptible(&runtime->oss.params_lock))
 		return -EINTR;
-	sw_params = kmalloc(sizeof(*sw_params), GFP_KERNEL);
+	sw_params = kzalloc(sizeof(*sw_params), GFP_KERNEL);
 	params = kmalloc(sizeof(*params), GFP_KERNEL);
 	sparams = kmalloc(sizeof(*sparams), GFP_KERNEL);
 	if (!sw_params || !params || !sparams) {
@@ -991,7 +994,6 @@ static int snd_pcm_oss_change_params(struct snd_pcm_substream *substream,
 		goto failure;
 	}
 
-	memset(sw_params, 0, sizeof(*sw_params));
 	if (runtime->oss.trigger) {
 		sw_params->start_threshold = 1;
 	} else {
@@ -1369,11 +1371,8 @@ static ssize_t snd_pcm_oss_write1(struct snd_pcm_substream *substream, const cha
 
 	if ((tmp = snd_pcm_oss_make_ready(substream)) < 0)
 		return tmp;
+	mutex_lock(&runtime->oss.params_lock);
 	while (bytes > 0) {
-		if (mutex_lock_interruptible(&runtime->oss.params_lock)) {
-			tmp = -ERESTARTSYS;
-			break;
-		}
 		if (bytes < runtime->oss.period_bytes || runtime->oss.buffer_used > 0) {
 			tmp = bytes;
 			if (tmp + runtime->oss.buffer_used > runtime->oss.period_bytes)
@@ -1417,18 +1416,14 @@ static ssize_t snd_pcm_oss_write1(struct snd_pcm_substream *substream, const cha
 			xfer += tmp;
 			if ((substream->f_flags & O_NONBLOCK) != 0 &&
 			    tmp != runtime->oss.period_bytes)
-				tmp = -EAGAIN;
+				break;
 		}
- err:
-		mutex_unlock(&runtime->oss.params_lock);
-		if (tmp < 0)
-			break;
-		if (signal_pending(current)) {
-			tmp = -ERESTARTSYS;
-			break;
-		}
-		tmp = 0;
 	}
+	mutex_unlock(&runtime->oss.params_lock);
+	return xfer;
+
+ err:
+	mutex_unlock(&runtime->oss.params_lock);
 	return xfer > 0 ? (snd_pcm_sframes_t)xfer : tmp;
 }
 
@@ -1476,11 +1471,8 @@ static ssize_t snd_pcm_oss_read1(struct snd_pcm_substream *substream, char __use
 
 	if ((tmp = snd_pcm_oss_make_ready(substream)) < 0)
 		return tmp;
+	mutex_lock(&runtime->oss.params_lock);
 	while (bytes > 0) {
-		if (mutex_lock_interruptible(&runtime->oss.params_lock)) {
-			tmp = -ERESTARTSYS;
-			break;
-		}
 		if (bytes < runtime->oss.period_bytes || runtime->oss.buffer_used > 0) {
 			if (runtime->oss.buffer_used == 0) {
 				tmp = snd_pcm_oss_read2(substream, runtime->oss.buffer, runtime->oss.period_bytes, 1);
@@ -1511,16 +1503,12 @@ static ssize_t snd_pcm_oss_read1(struct snd_pcm_substream *substream, char __use
 			bytes -= tmp;
 			xfer += tmp;
 		}
- err:
-		mutex_unlock(&runtime->oss.params_lock);
-		if (tmp < 0)
-			break;
-		if (signal_pending(current)) {
-			tmp = -ERESTARTSYS;
-			break;
-		}
-		tmp = 0;
 	}
+	mutex_unlock(&runtime->oss.params_lock);
+	return xfer;
+
+ err:
+	mutex_unlock(&runtime->oss.params_lock);
 	return xfer > 0 ? (snd_pcm_sframes_t)xfer : tmp;
 }
 
@@ -1814,9 +1802,10 @@ static int snd_pcm_oss_get_formats(struct snd_pcm_oss_file *pcm_oss_file)
 		return -ENOMEM;
 	_snd_pcm_hw_params_any(params);
 	err = snd_pcm_hw_refine(substream, params);
+	format_mask = *hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT); 
+	kfree(params);
 	if (err < 0)
-		goto error;
-	format_mask = *hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
+		return err;
 	for (fmt = 0; fmt < 32; ++fmt) {
 		if (snd_mask_test(&format_mask, fmt)) {
 			int f = snd_pcm_oss_format_to(fmt);
@@ -1824,10 +1813,7 @@ static int snd_pcm_oss_get_formats(struct snd_pcm_oss_file *pcm_oss_file)
 				formats |= f;
 		}
 	}
-
- error:
-	kfree(params);
-	return err < 0 ? err : formats;
+	return formats;
 }
 
 static int snd_pcm_oss_set_format(struct snd_pcm_oss_file *pcm_oss_file, int format)
@@ -2516,7 +2502,7 @@ static long snd_pcm_oss_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return put_user(SNDRV_OSS_VERSION, p);
 	if (cmd == OSS_ALSAEMULVER)
 		return put_user(1, p);
-#if defined(CONFIG_SND_MIXER_OSS) || (defined(MODULE) && defined(CONFIG_SND_MIXER_OSS_MODULE))
+#if IS_REACHABLE(CONFIG_SND_MIXER_OSS)
 	if (((cmd >> 8) & 0xff) == 'M')	{	/* mixer ioctl - for OSS compatibility */
 		struct snd_pcm_substream *substream;
 		int idx;
@@ -2667,7 +2653,11 @@ static long snd_pcm_oss_ioctl(struct file *file, unsigned int cmd, unsigned long
 
 #ifdef CONFIG_COMPAT
 /* all compatible */
-#define snd_pcm_oss_ioctl_compat	snd_pcm_oss_ioctl
+static long snd_pcm_oss_ioctl_compat(struct file *file, unsigned int cmd,
+				     unsigned long arg)
+{
+	return snd_pcm_oss_ioctl(file, cmd, (unsigned long)compat_ptr(arg));
+}
 #else
 #define snd_pcm_oss_ioctl_compat	NULL
 #endif

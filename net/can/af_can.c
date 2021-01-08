@@ -722,12 +722,13 @@ static int can_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (unlikely(!net_eq(dev_net(dev), &init_net)))
 		goto drop;
 
-	if (unlikely(dev->type != ARPHRD_CAN || skb->len != CAN_MTU ||
-		     cfd->len > CAN_MAX_DLEN)) {
-		pr_warn_once("PF_CAN: dropped non conform CAN skbuf: dev type %d, len %d, datalen %d\n",
-			     dev->type, skb->len, cfd->len);
+	if (WARN_ONCE(dev->type != ARPHRD_CAN ||
+		      skb->len != CAN_MTU ||
+		      cfd->len > CAN_MAX_DLEN,
+		      "PF_CAN: dropped non conform CAN skbuf: "
+		      "dev type %d, len %d, datalen %d\n",
+		      dev->type, skb->len, cfd->len))
 		goto drop;
-	}
 
 	can_receive(skb, dev);
 	return NET_RX_SUCCESS;
@@ -745,12 +746,13 @@ static int canfd_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (unlikely(!net_eq(dev_net(dev), &init_net)))
 		goto drop;
 
-	if (unlikely(dev->type != ARPHRD_CAN || skb->len != CANFD_MTU ||
-		     cfd->len > CANFD_MAX_DLEN)) {
-		pr_warn_once("PF_CAN: dropped non conform CAN FD skbuf: dev type %d, len %d, datalen %d\n",
-			     dev->type, skb->len, cfd->len);
+	if (WARN_ONCE(dev->type != ARPHRD_CAN ||
+		      skb->len != CANFD_MTU ||
+		      cfd->len > CANFD_MAX_DLEN,
+		      "PF_CAN: dropped non conform CAN FD skbuf: "
+		      "dev type %d, len %d, datalen %d\n",
+		      dev->type, skb->len, cfd->len))
 		goto drop;
-	}
 
 	can_receive(skb, dev);
 	return NET_RX_SUCCESS;
@@ -917,14 +919,14 @@ static __init int can_init(void)
 	if (!rcv_cache)
 		return -ENOMEM;
 
-	if (stats_timer) {
+	if (IS_ENABLED(CONFIG_PROC_FS)) {
+		if (stats_timer) {
 		/* the statistics are updated every second (timer triggered) */
-		setup_timer(&can_stattimer, can_stat_update, 0);
-		mod_timer(&can_stattimer, round_jiffies(jiffies + HZ));
-	} else
-		can_stattimer.function = NULL;
-
-	can_init_proc();
+			setup_timer(&can_stattimer, can_stat_update, 0);
+			mod_timer(&can_stattimer, round_jiffies(jiffies + HZ));
+		}
+		can_init_proc();
+	}
 
 	/* protocol register */
 	sock_register(&can_family_ops);
@@ -939,10 +941,12 @@ static __exit void can_exit(void)
 {
 	struct net_device *dev;
 
-	if (stats_timer)
-		del_timer_sync(&can_stattimer);
+	if (IS_ENABLED(CONFIG_PROC_FS)) {
+		if (stats_timer)
+			del_timer_sync(&can_stattimer);
 
-	can_remove_proc();
+		can_remove_proc();
+	}
 
 	/* protocol unregister */
 	dev_remove_pack(&canfd_packet);

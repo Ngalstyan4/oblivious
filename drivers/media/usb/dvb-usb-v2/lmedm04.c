@@ -48,10 +48,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  *
  * see Documentation/dvb/README.dvb-usb for more information
  *
@@ -99,9 +95,7 @@ static int dvb_usb_lme2510_debug;
 } while (0)
 #define deb_info(level, args...) lme_debug(dvb_usb_lme2510_debug, level, args)
 #define debug_data_snipet(level, name, p) \
-	 deb_info(level, name" (%02x%02x%02x%02x%02x%02x%02x%02x)", \
-		*p, *(p+1), *(p+2), *(p+3), *(p+4), \
-			*(p+5), *(p+6), *(p+7));
+	 deb_info(level, name" (%8phN)", p);
 #define info(args...) pr_info(DVB_USB_LOG_PREFIX": "args)
 
 module_param_named(debug, dvb_usb_lme2510_debug, int, 0644);
@@ -156,21 +150,19 @@ struct lme2510_state {
 static int lme2510_bulk_write(struct usb_device *dev,
 				u8 *snd, int len, u8 pipe)
 {
-	int ret, actual_l;
+	int actual_l;
 
-	ret = usb_bulk_msg(dev, usb_sndbulkpipe(dev, pipe),
-				snd, len , &actual_l, 100);
-	return ret;
+	return usb_bulk_msg(dev, usb_sndbulkpipe(dev, pipe),
+			    snd, len, &actual_l, 100);
 }
 
 static int lme2510_bulk_read(struct usb_device *dev,
 				u8 *rev, int len, u8 pipe)
 {
-	int ret, actual_l;
+	int actual_l;
 
-	ret = usb_bulk_msg(dev, usb_rcvbulkpipe(dev, pipe),
-				 rev, len , &actual_l, 200);
-	return ret;
+	return usb_bulk_msg(dev, usb_rcvbulkpipe(dev, pipe),
+			    rev, len, &actual_l, 200);
 }
 
 static int lme2510_usb_talk(struct dvb_usb_device *d,
@@ -317,7 +309,7 @@ static void lme2510_int_response(struct urb *lme_urb)
 {
 	struct dvb_usb_adapter *adap = lme_urb->context;
 	struct lme2510_state *st = adap_to_priv(adap);
-	static u8 *ibuf, *rbuf;
+	u8 *ibuf, *rbuf;
 	int i = 0, offset;
 	u32 key;
 	u8 signal_lock = 0;
@@ -357,7 +349,8 @@ static void lme2510_int_response(struct urb *lme_urb)
 						ibuf[5]);
 
 			deb_info(1, "INT Key = 0x%08x", key);
-			rc_keydown(adap_to_d(adap)->rc_dev, RC_TYPE_NEC, key, 0);
+			rc_keydown(adap_to_d(adap)->rc_dev, RC_TYPE_NEC32, key,
+									0);
 			break;
 		case 0xbb:
 			switch (st->tuner_config) {
@@ -503,23 +496,18 @@ static int lme2510_pid_filter(struct dvb_usb_adapter *adap, int index, u16 pid,
 
 static int lme2510_return_status(struct dvb_usb_device *d)
 {
-	int ret;
+	int ret = 0;
 	u8 *data;
 
-	data = kzalloc(6, GFP_KERNEL);
+	data = kzalloc(10, GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 
-	ret = usb_control_msg(d->udev, usb_rcvctrlpipe(d->udev, 0),
-			      0x06, 0x80, 0x0302, 0x00,
-			      data, 0x6, 200);
-	if (ret != 6)
-		ret = -EINVAL;
-	else
-		ret = data[2];
+	ret |= usb_control_msg(d->udev, usb_rcvctrlpipe(d->udev, 0),
+			0x06, 0x80, 0x0302, 0x00, data, 0x0006, 200);
+	info("Firmware Status: %x (%x)", ret , data[2]);
 
-	info("Firmware Status: %6ph", data);
-
+	ret = (ret < 0) ? -ENODEV : data[2];
 	kfree(data);
 	return ret;
 }
@@ -1008,8 +996,9 @@ static int lme_name(struct dvb_usb_adapter *adap)
 	struct dvb_usb_device *d = adap_to_d(adap);
 	struct lme2510_state *st = adap_to_priv(adap);
 	const char *desc = d->name;
-	char *fe_name[] = {"", " LG TDQY-P001F", " SHARP:BS2F7HZ7395",
-				" SHARP:BS2F7HZ0194", " RS2000"};
+	static const char * const fe_name[] = {
+		"", " LG TDQY-P001F", " SHARP:BS2F7HZ7395",
+		" SHARP:BS2F7HZ0194", " RS2000"};
 	char *name = adap->fe[0]->ops.info.name;
 
 	strlcpy(name, desc, 128);
@@ -1083,6 +1072,8 @@ static int dm04_lme2510_frontend_attach(struct dvb_usb_adapter *adap)
 
 		if (adap->fe[0]) {
 			info("FE Found M88RS2000");
+			dvb_attach(ts2020_attach, adap->fe[0], &ts2020_config,
+					&d->i2c_adap);
 			st->i2c_tuner_gate_w = 5;
 			st->i2c_tuner_gate_r = 5;
 			st->i2c_tuner_addr = 0x60;
@@ -1128,7 +1119,7 @@ static int dm04_lme2510_tuner(struct dvb_usb_adapter *adap)
 {
 	struct dvb_usb_device *d = adap_to_d(adap);
 	struct lme2510_state *st = adap_to_priv(adap);
-	char *tun_msg[] = {"", "TDA8263", "IX2505V", "DVB_PLL_OPERA", "RS2000"};
+	static const char * const tun_msg[] = {"", "TDA8263", "IX2505V", "DVB_PLL_OPERA", "RS2000"};
 	int ret = 0;
 
 	switch (st->tuner_config) {
@@ -1148,18 +1139,17 @@ static int dm04_lme2510_tuner(struct dvb_usb_adapter *adap)
 			ret = st->tuner_config;
 		break;
 	case TUNER_RS2000:
-		if (dvb_attach(ts2020_attach, adap->fe[0],
-			       &ts2020_config, &d->i2c_adap))
-			ret = st->tuner_config;
+		ret = st->tuner_config;
 		break;
 	default:
 		break;
 	}
 
-	if (ret) {
+	if (ret)
 		info("TUN Found %s tuner", tun_msg[ret]);
-	} else {
-		info("TUN No tuner found");
+	else {
+		info("TUN No tuner found --- resetting device");
+		lme_coldreset(d);
 		return -ENODEV;
 	}
 
@@ -1183,10 +1173,7 @@ static int lme2510_powerup(struct dvb_usb_device *d, int onoff)
 
 	mutex_lock(&d->i2c_mutex);
 
-	if (onoff)
-		ret = lme2510_usb_talk(d, lnb_on, len, rbuf, rlen);
-	else
-		ret = lme2510_usb_talk(d, lnb_off, len, rbuf, rlen);
+	ret = lme2510_usb_talk(d, onoff ? lnb_on : lnb_off, len, rbuf, rlen);
 
 	st->i2c_talk_onoff = 1;
 
@@ -1203,7 +1190,6 @@ static int lme2510_get_adapter_count(struct dvb_usb_device *d)
 static int lme2510_identify_state(struct dvb_usb_device *d, const char **name)
 {
 	struct lme2510_state *st = d->priv;
-	int status;
 
 	usb_reset_configuration(d->udev);
 
@@ -1212,16 +1198,12 @@ static int lme2510_identify_state(struct dvb_usb_device *d, const char **name)
 
 	st->dvb_usb_lme2510_firmware = dvb_usb_lme2510_firmware;
 
-	status = lme2510_return_status(d);
-	if (status == 0x44) {
+	if (lme2510_return_status(d) == 0x44) {
 		*name = lme_firmware_switch(d, 0);
 		return COLD;
 	}
 
-	if (status != 0x47)
-		return -EINVAL;
-
-	return WARM;
+	return 0;
 }
 
 static int lme2510_get_stream_config(struct dvb_frontend *fe, u8 *ts_type,
@@ -1251,7 +1233,7 @@ static int lme2510_get_stream_config(struct dvb_frontend *fe, u8 *ts_type,
 static int lme2510_get_rc_config(struct dvb_usb_device *d,
 	struct dvb_usb_rc *rc)
 {
-	rc->allowed_protos = RC_BIT_NEC;
+	rc->allowed_protos = RC_BIT_NEC32;
 	return 0;
 }
 

@@ -19,9 +19,6 @@ static inline u32 arp_hashfn(const void *pkey, const struct net_device *dev, u32
 
 static inline struct neighbour *__ipv4_neigh_lookup_noref(struct net_device *dev, u32 key)
 {
-	if (dev->flags & (IFF_LOOPBACK | IFF_POINTOPOINT))
-		key = INADDR_ANY;
-
 	return ___neigh_lookup_noref(&arp_tbl, neigh_key_eq32, arp_hashfn, &key, dev);
 }
 
@@ -36,6 +33,22 @@ static inline struct neighbour *__ipv4_neigh_lookup(struct net_device *dev, u32 
 	rcu_read_unlock_bh();
 
 	return n;
+}
+
+static inline void __ipv4_confirm_neigh(struct net_device *dev, u32 key)
+{
+	struct neighbour *n;
+
+	rcu_read_lock_bh();
+	n = __ipv4_neigh_lookup_noref(dev, key);
+	if (n) {
+		unsigned long now = jiffies;
+
+		/* avoid dirtying neighbour */
+		if (n->confirmed != now)
+			n->confirmed = now;
+	}
+	rcu_read_unlock_bh();
 }
 
 void arp_init(void);

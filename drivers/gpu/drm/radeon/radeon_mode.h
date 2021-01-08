@@ -32,6 +32,7 @@
 
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_dp_helper.h>
 #include <drm/drm_dp_mst_helper.h>
 #include <drm/drm_fixed.h>
@@ -937,7 +938,7 @@ extern void radeon_crtc_fb_gamma_get(struct drm_crtc *crtc, u16 *red, u16 *green
 				     u16 *blue, int regno);
 int radeon_framebuffer_init(struct drm_device *dev,
 			     struct radeon_framebuffer *rfb,
-			     struct drm_mode_fb_cmd2 *mode_cmd,
+			     const struct drm_mode_fb_cmd2 *mode_cmd,
 			     struct drm_gem_object *obj);
 
 int radeonfb_remove(struct drm_device *dev, struct drm_framebuffer *fb);

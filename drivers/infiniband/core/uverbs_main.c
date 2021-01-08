@@ -46,11 +46,12 @@
 #include <linux/anon_inodes.h>
 #include <linux/slab.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <rdma/ib.h>
 
 #include "uverbs.h"
+#include "core_priv.h"
 
 MODULE_AUTHOR("Roland Dreier");
 MODULE_DESCRIPTION("InfiniBand userspace verbs access");
@@ -76,6 +77,8 @@ DEFINE_IDR(ib_uverbs_qp_idr);
 DEFINE_IDR(ib_uverbs_srq_idr);
 DEFINE_IDR(ib_uverbs_xrcd_idr);
 DEFINE_IDR(ib_uverbs_rule_idr);
+DEFINE_IDR(ib_uverbs_wq_idr);
+DEFINE_IDR(ib_uverbs_rwq_ind_tbl_idr);
 
 static DEFINE_SPINLOCK(map_lock);
 static DECLARE_BITMAP(dev_map, IB_UVERBS_MAX_DEVICES);
@@ -130,10 +133,27 @@ static int (*uverbs_ex_cmd_table[])(struct ib_uverbs_file *file,
 	[IB_USER_VERBS_EX_CMD_QUERY_DEVICE]	= ib_uverbs_ex_query_device,
 	[IB_USER_VERBS_EX_CMD_CREATE_CQ]	= ib_uverbs_ex_create_cq,
 	[IB_USER_VERBS_EX_CMD_CREATE_QP]        = ib_uverbs_ex_create_qp,
+	[IB_USER_VERBS_EX_CMD_CREATE_WQ]        = ib_uverbs_ex_create_wq,
+	[IB_USER_VERBS_EX_CMD_MODIFY_WQ]        = ib_uverbs_ex_modify_wq,
+	[IB_USER_VERBS_EX_CMD_DESTROY_WQ]       = ib_uverbs_ex_destroy_wq,
+	[IB_USER_VERBS_EX_CMD_CREATE_RWQ_IND_TBL] = ib_uverbs_ex_create_rwq_ind_table,
+	[IB_USER_VERBS_EX_CMD_DESTROY_RWQ_IND_TBL] = ib_uverbs_ex_destroy_rwq_ind_table,
+	[IB_USER_VERBS_EX_CMD_MODIFY_QP]        = ib_uverbs_ex_modify_qp,
 };
 
 static void ib_uverbs_add_one(struct ib_device *device);
 static void ib_uverbs_remove_one(struct ib_device *device, void *client_data);
+
+int uverbs_dealloc_mw(struct ib_mw *mw)
+{
+	struct ib_pd *pd = mw->pd;
+	int ret;
+
+	ret = mw->device->dealloc_mw(mw);
+	if (!ret)
+		atomic_dec(&pd->usecnt);
+	return ret;
+}
 
 static void ib_uverbs_release_dev(struct kobject *kobj)
 {
@@ -218,6 +238,8 @@ static int ib_uverbs_cleanup_ucontext(struct ib_uverbs_file *file,
 
 		idr_remove_uobj(&ib_uverbs_ah_idr, uobj);
 		ib_destroy_ah(ah);
+		ib_rdmacg_uncharge(&uobj->cg_obj, context->device,
+				   RDMACG_RESOURCE_HCA_OBJECT);
 		kfree(uobj);
 	}
 
@@ -226,7 +248,9 @@ static int ib_uverbs_cleanup_ucontext(struct ib_uverbs_file *file,
 		struct ib_mw *mw = uobj->object;
 
 		idr_remove_uobj(&ib_uverbs_mw_idr, uobj);
-		ib_dealloc_mw(mw);
+		uverbs_dealloc_mw(mw);
+		ib_rdmacg_uncharge(&uobj->cg_obj, context->device,
+				   RDMACG_RESOURCE_HCA_OBJECT);
 		kfree(uobj);
 	}
 
@@ -235,6 +259,8 @@ static int ib_uverbs_cleanup_ucontext(struct ib_uverbs_file *file,
 
 		idr_remove_uobj(&ib_uverbs_rule_idr, uobj);
 		ib_destroy_flow(flow_id);
+		ib_rdmacg_uncharge(&uobj->cg_obj, context->device,
+				   RDMACG_RESOURCE_HCA_OBJECT);
 		kfree(uobj);
 	}
 
@@ -247,8 +273,31 @@ static int ib_uverbs_cleanup_ucontext(struct ib_uverbs_file *file,
 		if (qp == qp->real_qp)
 			ib_uverbs_detach_umcast(qp, uqp);
 		ib_destroy_qp(qp);
+		ib_rdmacg_uncharge(&uobj->cg_obj, context->device,
+				   RDMACG_RESOURCE_HCA_OBJECT);
 		ib_uverbs_release_uevent(file, &uqp->uevent);
 		kfree(uqp);
+	}
+
+	list_for_each_entry_safe(uobj, tmp, &context->rwq_ind_tbl_list, list) {
+		struct ib_rwq_ind_table *rwq_ind_tbl = uobj->object;
+		struct ib_wq **ind_tbl = rwq_ind_tbl->ind_tbl;
+
+		idr_remove_uobj(&ib_uverbs_rwq_ind_tbl_idr, uobj);
+		ib_destroy_rwq_ind_table(rwq_ind_tbl);
+		kfree(ind_tbl);
+		kfree(uobj);
+	}
+
+	list_for_each_entry_safe(uobj, tmp, &context->wq_list, list) {
+		struct ib_wq *wq = uobj->object;
+		struct ib_uwq_object *uwq =
+			container_of(uobj, struct ib_uwq_object, uevent.uobject);
+
+		idr_remove_uobj(&ib_uverbs_wq_idr, uobj);
+		ib_destroy_wq(wq);
+		ib_uverbs_release_uevent(file, &uwq->uevent);
+		kfree(uwq);
 	}
 
 	list_for_each_entry_safe(uobj, tmp, &context->srq_list, list) {
@@ -258,6 +307,8 @@ static int ib_uverbs_cleanup_ucontext(struct ib_uverbs_file *file,
 
 		idr_remove_uobj(&ib_uverbs_srq_idr, uobj);
 		ib_destroy_srq(srq);
+		ib_rdmacg_uncharge(&uobj->cg_obj, context->device,
+				   RDMACG_RESOURCE_HCA_OBJECT);
 		ib_uverbs_release_uevent(file, uevent);
 		kfree(uevent);
 	}
@@ -270,6 +321,8 @@ static int ib_uverbs_cleanup_ucontext(struct ib_uverbs_file *file,
 
 		idr_remove_uobj(&ib_uverbs_cq_idr, uobj);
 		ib_destroy_cq(cq);
+		ib_rdmacg_uncharge(&uobj->cg_obj, context->device,
+				   RDMACG_RESOURCE_HCA_OBJECT);
 		ib_uverbs_release_ucq(file, ev_file, ucq);
 		kfree(ucq);
 	}
@@ -279,6 +332,8 @@ static int ib_uverbs_cleanup_ucontext(struct ib_uverbs_file *file,
 
 		idr_remove_uobj(&ib_uverbs_mr_idr, uobj);
 		ib_dereg_mr(mr);
+		ib_rdmacg_uncharge(&uobj->cg_obj, context->device,
+				   RDMACG_RESOURCE_HCA_OBJECT);
 		kfree(uobj);
 	}
 
@@ -299,10 +354,15 @@ static int ib_uverbs_cleanup_ucontext(struct ib_uverbs_file *file,
 
 		idr_remove_uobj(&ib_uverbs_pd_idr, uobj);
 		ib_dealloc_pd(pd);
+		ib_rdmacg_uncharge(&uobj->cg_obj, context->device,
+				   RDMACG_RESOURCE_HCA_OBJECT);
 		kfree(uobj);
 	}
 
 	put_pid(context->tgid);
+
+	ib_rdmacg_uncharge(&context->cg_obj, context->device,
+			   RDMACG_RESOURCE_HCA_HANDLE);
 
 	return context->device->dealloc_ucontext(context);
 }
@@ -554,6 +614,16 @@ void ib_uverbs_qp_event_handler(struct ib_event *event, void *context_ptr)
 				&uobj->events_reported);
 }
 
+void ib_uverbs_wq_event_handler(struct ib_event *event, void *context_ptr)
+{
+	struct ib_uevent_object *uobj = container_of(event->element.wq->uobject,
+						  struct ib_uevent_object, uobject);
+
+	ib_uverbs_async_handler(context_ptr, uobj->uobject.user_handle,
+				event->event, &uobj->event_list,
+				&uobj->events_reported);
+}
+
 void ib_uverbs_srq_event_handler(struct ib_event *event, void *context_ptr)
 {
 	struct ib_uevent_object *uobj;
@@ -671,18 +741,37 @@ out:
 	return ev_file;
 }
 
+static int verify_command_mask(struct ib_device *ib_dev, __u32 command)
+{
+	u64 mask;
+
+	if (command <= IB_USER_VERBS_CMD_OPEN_QP)
+		mask = ib_dev->uverbs_cmd_mask;
+	else
+		mask = ib_dev->uverbs_ex_cmd_mask;
+
+	if (mask & ((u64)1 << command))
+		return 0;
+
+	return -1;
+}
+
 static ssize_t ib_uverbs_write(struct file *filp, const char __user *buf,
 			     size_t count, loff_t *pos)
 {
 	struct ib_uverbs_file *file = filp->private_data;
 	struct ib_device *ib_dev;
 	struct ib_uverbs_cmd_hdr hdr;
+	__u32 command;
 	__u32 flags;
 	int srcu_key;
 	ssize_t ret;
 
-	if (WARN_ON_ONCE(!ib_safe_file_access(filp)))
+	if (!ib_safe_file_access(filp)) {
+		pr_err_once("uverbs_write: process %d (%s) changed security contexts after opening file descriptor, this is not allowed.\n",
+			    task_tgid_vnr(current), current->comm);
 		return -EACCES;
+	}
 
 	if (count < sizeof hdr)
 		return -EINVAL;
@@ -698,34 +787,31 @@ static ssize_t ib_uverbs_write(struct file *filp, const char __user *buf,
 		goto out;
 	}
 
+	if (hdr.command & ~(__u32)(IB_USER_VERBS_CMD_FLAGS_MASK |
+				   IB_USER_VERBS_CMD_COMMAND_MASK)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	command = hdr.command & IB_USER_VERBS_CMD_COMMAND_MASK;
+	if (verify_command_mask(ib_dev, command)) {
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+
+	if (!file->ucontext &&
+	    command != IB_USER_VERBS_CMD_GET_CONTEXT) {
+		ret = -EINVAL;
+		goto out;
+	}
+
 	flags = (hdr.command &
 		 IB_USER_VERBS_CMD_FLAGS_MASK) >> IB_USER_VERBS_CMD_FLAGS_SHIFT;
 
 	if (!flags) {
-		__u32 command;
-
-		if (hdr.command & ~(__u32)(IB_USER_VERBS_CMD_FLAGS_MASK |
-					   IB_USER_VERBS_CMD_COMMAND_MASK)) {
-			ret = -EINVAL;
-			goto out;
-		}
-
-		command = hdr.command & IB_USER_VERBS_CMD_COMMAND_MASK;
-
 		if (command >= ARRAY_SIZE(uverbs_cmd_table) ||
 		    !uverbs_cmd_table[command]) {
 			ret = -EINVAL;
-			goto out;
-		}
-
-		if (!file->ucontext &&
-		    command != IB_USER_VERBS_CMD_GET_CONTEXT) {
-			ret = -EINVAL;
-			goto out;
-		}
-
-		if (!(ib_dev->uverbs_cmd_mask & (1ull << command))) {
-			ret = -ENOSYS;
 			goto out;
 		}
 
@@ -740,20 +826,10 @@ static ssize_t ib_uverbs_write(struct file *filp, const char __user *buf,
 						 hdr.out_words * 4);
 
 	} else if (flags == IB_USER_VERBS_CMD_FLAG_EXTENDED) {
-		__u32 command;
-
 		struct ib_uverbs_ex_cmd_hdr ex_hdr;
 		struct ib_udata ucore;
 		struct ib_udata uhw;
 		size_t written_count = count;
-
-		if (hdr.command & ~(__u32)(IB_USER_VERBS_CMD_FLAGS_MASK |
-					   IB_USER_VERBS_CMD_COMMAND_MASK)) {
-			ret = -EINVAL;
-			goto out;
-		}
-
-		command = hdr.command & IB_USER_VERBS_CMD_COMMAND_MASK;
 
 		if (command >= ARRAY_SIZE(uverbs_ex_cmd_table) ||
 		    !uverbs_ex_cmd_table[command]) {
@@ -763,11 +839,6 @@ static ssize_t ib_uverbs_write(struct file *filp, const char __user *buf,
 
 		if (!file->ucontext) {
 			ret = -EINVAL;
-			goto out;
-		}
-
-		if (!(ib_dev->uverbs_ex_cmd_mask & (1ull << command))) {
-			ret = -ENOSYS;
 			goto out;
 		}
 
@@ -1052,7 +1123,7 @@ static int find_overflow_devnum(void)
 		ret = alloc_chrdev_region(&overflow_maj, 0, IB_UVERBS_MAX_DEVICES,
 					  "infiniband_verbs");
 		if (ret) {
-			printk(KERN_ERR "user_verbs: couldn't register dynamic device number\n");
+			pr_err("user_verbs: couldn't register dynamic device number\n");
 			return ret;
 		}
 	}
@@ -1123,7 +1194,7 @@ static void ib_uverbs_add_one(struct ib_device *device)
 	if (cdev_add(&uverbs_dev->cdev, base, 1))
 		goto err_cdev;
 
-	uverbs_dev->dev = device_create(uverbs_class, device->dma_device,
+	uverbs_dev->dev = device_create(uverbs_class, device->dev.parent,
 					uverbs_dev->cdev.dev, uverbs_dev,
 					"uverbs%d", uverbs_dev->devnum);
 	if (IS_ERR(uverbs_dev->dev))
@@ -1281,14 +1352,14 @@ static int __init ib_uverbs_init(void)
 	ret = register_chrdev_region(IB_UVERBS_BASE_DEV, IB_UVERBS_MAX_DEVICES,
 				     "infiniband_verbs");
 	if (ret) {
-		printk(KERN_ERR "user_verbs: couldn't register device number\n");
+		pr_err("user_verbs: couldn't register device number\n");
 		goto out;
 	}
 
 	uverbs_class = class_create(THIS_MODULE, "infiniband_verbs");
 	if (IS_ERR(uverbs_class)) {
 		ret = PTR_ERR(uverbs_class);
-		printk(KERN_ERR "user_verbs: couldn't create class infiniband_verbs\n");
+		pr_err("user_verbs: couldn't create class infiniband_verbs\n");
 		goto out_chrdev;
 	}
 
@@ -1296,13 +1367,13 @@ static int __init ib_uverbs_init(void)
 
 	ret = class_create_file(uverbs_class, &class_attr_abi_version.attr);
 	if (ret) {
-		printk(KERN_ERR "user_verbs: couldn't create abi_version attribute\n");
+		pr_err("user_verbs: couldn't create abi_version attribute\n");
 		goto out_class;
 	}
 
 	ret = ib_register_client(&uverbs_client);
 	if (ret) {
-		printk(KERN_ERR "user_verbs: couldn't register client\n");
+		pr_err("user_verbs: couldn't register client\n");
 		goto out_class;
 	}
 

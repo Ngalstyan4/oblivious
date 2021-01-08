@@ -10,14 +10,16 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/acpi.h>
 #include <linux/efi.h>
 #include <linux/efi-bgrt.h>
 
-struct acpi_table_bgrt *bgrt_tab;
-void *__initdata bgrt_image;
+struct acpi_table_bgrt bgrt_tab;
 size_t __initdata bgrt_image_size;
 
 struct bmp_header {
@@ -25,75 +27,58 @@ struct bmp_header {
 	u32 size;
 } __packed;
 
-void __init efi_bgrt_init(void)
+void __init efi_bgrt_init(struct acpi_table_header *table)
 {
-	acpi_status status;
 	void *image;
 	struct bmp_header bmp_header;
+	struct acpi_table_bgrt *bgrt = &bgrt_tab;
 
 	if (acpi_disabled)
 		return;
 
-	status = acpi_get_table("BGRT", 0,
-	                        (struct acpi_table_header **)&bgrt_tab);
-	if (ACPI_FAILURE(status))
-		return;
-
-	if (bgrt_tab->header.length < sizeof(*bgrt_tab)) {
-		pr_err("Ignoring BGRT: invalid length %u (expected %zu)\n",
-		       bgrt_tab->header.length, sizeof(*bgrt_tab));
+	if (table->length < sizeof(bgrt_tab)) {
+		pr_notice("Ignoring BGRT: invalid length %u (expected %zu)\n",
+		       table->length, sizeof(bgrt_tab));
 		return;
 	}
-	if (bgrt_tab->version != 1) {
-		pr_err("Ignoring BGRT: invalid version %u (expected 1)\n",
-		       bgrt_tab->version);
-		return;
+	*bgrt = *(struct acpi_table_bgrt *)table;
+	if (bgrt->version != 1) {
+		pr_notice("Ignoring BGRT: invalid version %u (expected 1)\n",
+		       bgrt->version);
+		goto out;
 	}
-	if (bgrt_tab->status & 0xfe) {
-		pr_err("Ignoring BGRT: reserved status bits are non-zero %u\n",
-		       bgrt_tab->status);
-		return;
+	if (bgrt->status & 0xfe) {
+		pr_notice("Ignoring BGRT: reserved status bits are non-zero %u\n",
+		       bgrt->status);
+		goto out;
 	}
-	if (bgrt_tab->status != 1) {
-		pr_debug("Ignoring BGRT: invalid status %u (expected 1)\n",
-			 bgrt_tab->status);
-		return;
+	if (bgrt->image_type != 0) {
+		pr_notice("Ignoring BGRT: invalid image type %u (expected 0)\n",
+		       bgrt->image_type);
+		goto out;
 	}
-	if (bgrt_tab->image_type != 0) {
-		pr_err("Ignoring BGRT: invalid image type %u (expected 0)\n",
-		       bgrt_tab->image_type);
-		return;
-	}
-	if (!bgrt_tab->image_address) {
-		pr_err("Ignoring BGRT: null image address\n");
-		return;
+	if (!bgrt->image_address) {
+		pr_notice("Ignoring BGRT: null image address\n");
+		goto out;
 	}
 
-	image = memremap(bgrt_tab->image_address, sizeof(bmp_header), MEMREMAP_WB);
+	image = early_memremap(bgrt->image_address, sizeof(bmp_header));
 	if (!image) {
-		pr_err("Ignoring BGRT: failed to map image header memory\n");
-		return;
+		pr_notice("Ignoring BGRT: failed to map image header memory\n");
+		goto out;
 	}
 
 	memcpy(&bmp_header, image, sizeof(bmp_header));
-	memunmap(image);
+	early_memunmap(image, sizeof(bmp_header));
+	if (bmp_header.id != 0x4d42) {
+		pr_notice("Ignoring BGRT: Incorrect BMP magic number 0x%x (expected 0x4d42)\n",
+			bmp_header.id);
+		goto out;
+	}
 	bgrt_image_size = bmp_header.size;
+	efi_mem_reserve(bgrt->image_address, bgrt_image_size);
 
-	bgrt_image = kmalloc(bgrt_image_size, GFP_KERNEL | __GFP_NOWARN);
-	if (!bgrt_image) {
-		pr_err("Ignoring BGRT: failed to allocate memory for image (wanted %zu bytes)\n",
-		       bgrt_image_size);
-		return;
-	}
-
-	image = memremap(bgrt_tab->image_address, bmp_header.size, MEMREMAP_WB);
-	if (!image) {
-		pr_err("Ignoring BGRT: failed to map image memory\n");
-		kfree(bgrt_image);
-		bgrt_image = NULL;
-		return;
-	}
-
-	memcpy(bgrt_image, image, bgrt_image_size);
-	memunmap(image);
+	return;
+out:
+	memset(bgrt, 0, sizeof(bgrt_tab));
 }

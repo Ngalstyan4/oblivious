@@ -11,7 +11,7 @@
 #include <linux/bootmem.h>
 #include <linux/debugfs.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/pfn_t.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
@@ -36,14 +36,14 @@
 #undef pr_fmt
 #define pr_fmt(fmt) "" fmt
 
-static bool __read_mostly boot_cpu_done;
-static bool __read_mostly pat_disabled = !IS_ENABLED(CONFIG_X86_PAT);
-static bool __read_mostly pat_initialized;
-static bool __read_mostly init_cm_done;
+static bool boot_cpu_done;
+
+static int __read_mostly __pat_enabled = IS_ENABLED(CONFIG_X86_PAT);
+static void init_cache_modes(void);
 
 void pat_disable(const char *reason)
 {
-	if (pat_disabled)
+	if (!__pat_enabled)
 		return;
 
 	if (boot_cpu_done) {
@@ -51,8 +51,10 @@ void pat_disable(const char *reason)
 		return;
 	}
 
-	pat_disabled = true;
+	__pat_enabled = 0;
 	pr_info("x86/PAT: %s\n", reason);
+
+	init_cache_modes();
 }
 
 static int __init nopat(char *str)
@@ -64,7 +66,7 @@ early_param("nopat", nopat);
 
 bool pat_enabled(void)
 {
-	return pat_initialized;
+	return !!__pat_enabled;
 }
 EXPORT_SYMBOL_GPL(pat_enabled);
 
@@ -157,7 +159,7 @@ enum {
 	PAT_WT = 4,		/* Write Through */
 	PAT_WP = 5,		/* Write Protected */
 	PAT_WB = 6,		/* Write Back (default) */
-	PAT_UC_MINUS = 7,	/* UC, but can be overriden by MTRR */
+	PAT_UC_MINUS = 7,	/* UC, but can be overridden by MTRR */
 };
 
 #define CM(c) (_PAGE_CACHE_MODE_ ## c)
@@ -202,8 +204,6 @@ static void __init_cache_modes(u64 pat)
 		update_cache_mode_entry(i, cache);
 	}
 	pr_info("x86/PAT: Configuration [0-7]: %s\n", pat_msg);
-
-	init_cm_done = true;
 }
 
 #define PAT(x, y)	((u64)PAT_ ## y << ((x)*8))
@@ -224,7 +224,6 @@ static void pat_bsp_init(u64 pat)
 	}
 
 	wrmsrl(MSR_IA32_CR_PAT, pat);
-	pat_initialized = true;
 
 	__init_cache_modes(pat);
 }
@@ -242,9 +241,10 @@ static void pat_ap_init(u64 pat)
 	wrmsrl(MSR_IA32_CR_PAT, pat);
 }
 
-void init_cache_modes(void)
+static void init_cache_modes(void)
 {
 	u64 pat = 0;
+	static int init_cm_done;
 
 	if (init_cm_done)
 		return;
@@ -286,6 +286,8 @@ void init_cache_modes(void)
 	}
 
 	__init_cache_modes(pat);
+
+	init_cm_done = 1;
 }
 
 /**
@@ -303,8 +305,10 @@ void pat_init(void)
 	u64 pat;
 	struct cpuinfo_x86 *c = &boot_cpu_data;
 
-	if (pat_disabled)
+	if (!pat_enabled()) {
+		init_cache_modes();
 		return;
+	}
 
 	if ((c->x86_vendor == X86_VENDOR_INTEL) &&
 	    (((c->x86 == 0x6) && (c->x86_model <= 0xd)) ||
@@ -626,7 +630,7 @@ int free_memtype(u64 start, u64 end)
 	entry = rbt_memtype_erase(start, end);
 	spin_unlock(&memtype_lock);
 
-	if (!entry) {
+	if (IS_ERR(entry)) {
 		pr_info("x86/PAT: %s:%d freeing invalid memtype [mem %#010Lx-%#010Lx]\n",
 			current->comm, current->pid, start, end - 1);
 		return -EINVAL;
@@ -725,6 +729,20 @@ void io_free_memtype(resource_size_t start, resource_size_t end)
 {
 	free_memtype(start, end);
 }
+
+int arch_io_reserve_memtype_wc(resource_size_t start, resource_size_t size)
+{
+	enum page_cache_mode type = _PAGE_CACHE_MODE_WC;
+
+	return io_reserve_memtype(start, start + size, &type);
+}
+EXPORT_SYMBOL(arch_io_reserve_memtype_wc);
+
+void arch_io_free_memtype_wc(resource_size_t start, resource_size_t size)
+{
+	io_free_memtype(start, start + size);
+}
+EXPORT_SYMBOL(arch_io_free_memtype_wc);
 
 pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
 				unsigned long size, pgprot_t vma_prot)
@@ -923,9 +941,10 @@ int track_pfn_copy(struct vm_area_struct *vma)
 }
 
 /*
- * prot is passed in as a parameter for the new mapping. If the vma has a
- * linear pfn mapping for the entire range reserve the entire vma range with
- * single reserve_pfn_range call.
+ * prot is passed in as a parameter for the new mapping. If the vma has
+ * a linear pfn mapping for the entire range, or no vma is provided,
+ * reserve the entire pfn + size range with single reserve_pfn_range
+ * call.
  */
 int track_pfn_remap(struct vm_area_struct *vma, pgprot_t *prot,
 		    unsigned long pfn, unsigned long addr, unsigned long size)
@@ -934,11 +953,12 @@ int track_pfn_remap(struct vm_area_struct *vma, pgprot_t *prot,
 	enum page_cache_mode pcm;
 
 	/* reserve the whole chunk starting from paddr */
-	if (addr == vma->vm_start && size == (vma->vm_end - vma->vm_start)) {
+	if (!vma || (addr == vma->vm_start
+				&& size == (vma->vm_end - vma->vm_start))) {
 		int ret;
 
 		ret = reserve_pfn_range(paddr, size, prot, 0);
-		if (!ret)
+		if (ret == 0 && vma)
 			vma->vm_flags |= VM_PAT;
 		return ret;
 	}
@@ -960,26 +980,23 @@ int track_pfn_remap(struct vm_area_struct *vma, pgprot_t *prot,
 			return -EINVAL;
 	}
 
-	*prot = __pgprot((pgprot_val(vma->vm_page_prot) & (~_PAGE_CACHE_MASK)) |
+	*prot = __pgprot((pgprot_val(*prot) & (~_PAGE_CACHE_MASK)) |
 			 cachemode2protval(pcm));
 
 	return 0;
 }
 
-int track_pfn_insert(struct vm_area_struct *vma, pgprot_t *prot,
-		     unsigned long pfn)
+void track_pfn_insert(struct vm_area_struct *vma, pgprot_t *prot, pfn_t pfn)
 {
 	enum page_cache_mode pcm;
 
 	if (!pat_enabled())
-		return 0;
+		return;
 
 	/* Set prot based on lookup */
-	pcm = lookup_memtype((resource_size_t)pfn << PAGE_SHIFT);
-	*prot = __pgprot((pgprot_val(vma->vm_page_prot) & (~_PAGE_CACHE_MASK)) |
+	pcm = lookup_memtype(pfn_t_to_phys(pfn));
+	*prot = __pgprot((pgprot_val(*prot) & (~_PAGE_CACHE_MASK)) |
 			 cachemode2protval(pcm));
-
-	return 0;
 }
 
 /*
@@ -993,7 +1010,7 @@ void untrack_pfn(struct vm_area_struct *vma, unsigned long pfn,
 	resource_size_t paddr;
 	unsigned long prot;
 
-	if (!(vma->vm_flags & VM_PAT))
+	if (vma && !(vma->vm_flags & VM_PAT))
 		return;
 
 	/* free the chunk starting from pfn or the whole chunk */
@@ -1007,6 +1024,17 @@ void untrack_pfn(struct vm_area_struct *vma, unsigned long pfn,
 		size = vma->vm_end - vma->vm_start;
 	}
 	free_pfn_range(paddr, size);
+	if (vma)
+		vma->vm_flags &= ~VM_PAT;
+}
+
+/*
+ * untrack_pfn_moved is called, while mremapping a pfnmap for a new region,
+ * with the old vma after its pfnmap page table has been removed.  The new
+ * vma has a new pfnmap to the same pfn & cache type with VM_PAT set.
+ */
+void untrack_pfn_moved(struct vm_area_struct *vma)
+{
 	vma->vm_flags &= ~VM_PAT;
 }
 

@@ -34,8 +34,7 @@ struct cxl_context *cxl_context_alloc(void)
 /*
  * Initialises a CXL context.
  */
-int cxl_context_init(struct cxl_context *ctx, struct cxl_afu *afu, bool master,
-		     struct address_space *mapping)
+int cxl_context_init(struct cxl_context *ctx, struct cxl_afu *afu, bool master)
 {
 	int i;
 
@@ -44,7 +43,7 @@ int cxl_context_init(struct cxl_context *ctx, struct cxl_afu *afu, bool master,
 	ctx->master = master;
 	ctx->pid = ctx->glpid = NULL; /* Set in start work ioctl */
 	mutex_init(&ctx->mapping_lock);
-	ctx->mapping = mapping;
+	ctx->mapping = NULL;
 
 	/*
 	 * Allocate the segment table before we put it in the IDR so that we
@@ -67,6 +66,9 @@ int cxl_context_init(struct cxl_context *ctx, struct cxl_afu *afu, bool master,
 	ctx->pending_fault = false;
 	ctx->pending_afu_err = false;
 
+	INIT_LIST_HEAD(&ctx->irq_names);
+	INIT_LIST_HEAD(&ctx->extra_irq_contexts);
+
 	/*
 	 * When we have to destroy all contexts in cxl_context_detach_all() we
 	 * end up with afu_release_irqs() called from inside a
@@ -87,7 +89,7 @@ int cxl_context_init(struct cxl_context *ctx, struct cxl_afu *afu, bool master,
 	 */
 	mutex_lock(&afu->contexts_lock);
 	idr_preload(GFP_KERNEL);
-	i = idr_alloc(&ctx->afu->contexts_idr, ctx, 0,
+	i = idr_alloc(&ctx->afu->contexts_idr, ctx, ctx->afu->adapter->min_pe,
 		      ctx->afu->num_procs, GFP_NOWAIT);
 	idr_preload_end();
 	mutex_unlock(&afu->contexts_lock);
@@ -95,7 +97,12 @@ int cxl_context_init(struct cxl_context *ctx, struct cxl_afu *afu, bool master,
 		return i;
 
 	ctx->pe = i;
-	ctx->elem = &ctx->afu->spa[i];
+	if (cpu_has_feature(CPU_FTR_HVMODE)) {
+		ctx->elem = &ctx->afu->native->spa[i];
+		ctx->external_pe = ctx->pe;
+	} else {
+		ctx->external_pe = -1; /* assigned when attaching */
+	}
 	ctx->pe_inserted = false;
 
 	/*
@@ -106,16 +113,24 @@ int cxl_context_init(struct cxl_context *ctx, struct cxl_afu *afu, bool master,
 	return 0;
 }
 
-static int cxl_mmap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+void cxl_context_set_mapping(struct cxl_context *ctx,
+			struct address_space *mapping)
 {
+	mutex_lock(&ctx->mapping_lock);
+	ctx->mapping = mapping;
+	mutex_unlock(&ctx->mapping_lock);
+}
+
+static int cxl_mmap_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
 	struct cxl_context *ctx = vma->vm_file->private_data;
-	unsigned long address = (unsigned long)vmf->virtual_address;
 	u64 area, offset;
 
 	offset = vmf->pgoff << PAGE_SHIFT;
 
 	pr_devel("%s: pe: %i address: 0x%lx offset: 0x%llx\n",
-			__func__, ctx->pe, address, offset);
+			__func__, ctx->pe, vmf->address, offset);
 
 	if (ctx->afu->current_mode == CXL_MODE_DEDICATED) {
 		area = ctx->afu->psn_phys;
@@ -147,7 +162,7 @@ static int cxl_mmap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 		return VM_FAULT_SIGBUS;
 	}
 
-	vm_insert_pfn(vma, address, (area + offset) >> PAGE_SHIFT);
+	vm_insert_pfn(vma, vmf->address, (area + offset) >> PAGE_SHIFT);
 
 	mutex_unlock(&ctx->status_mutex);
 
@@ -214,15 +229,25 @@ int __detach_context(struct cxl_context *ctx)
 	/* Only warn if we detached while the link was OK.
 	 * If detach fails when hw is down, we don't care.
 	 */
-	WARN_ON(cxl_detach_process(ctx) &&
-		cxl_adapter_link_ok(ctx->afu->adapter));
+	WARN_ON(cxl_ops->detach_process(ctx) &&
+		cxl_ops->link_ok(ctx->afu->adapter, ctx->afu));
 	flush_work(&ctx->fault_work); /* Only needed for dedicated process */
+
+	/*
+	 * Wait until no further interrupts are presented by the PSL
+	 * for this context.
+	 */
+	if (cxl_ops->irq_wait)
+		cxl_ops->irq_wait(ctx);
 
 	/* release the reference to the group leader and mm handling pid */
 	put_pid(ctx->pid);
 	put_pid(ctx->glpid);
 
 	cxl_ctx_put();
+
+	/* Decrease the attached context count on the adapter */
+	cxl_adapter_context_put(ctx->afu->adapter);
 	return 0;
 }
 
@@ -282,11 +307,8 @@ static void reclaim_ctx(struct rcu_head *rcu)
 	if (ctx->ff_page)
 		__free_page(ctx->ff_page);
 	ctx->sstp = NULL;
-	if (ctx->kernelapi)
-		kfree(ctx->mapping);
 
-	if (ctx->irq_bitmap)
-		kfree(ctx->irq_bitmap);
+	kfree(ctx->irq_bitmap);
 
 	/* Drop ref to the afu device taken during cxl_context_init */
 	cxl_afu_put(ctx->afu);
@@ -296,6 +318,8 @@ static void reclaim_ctx(struct rcu_head *rcu)
 
 void cxl_context_free(struct cxl_context *ctx)
 {
+	if (ctx->kernelapi && ctx->mapping)
+		cxl_release_mapping(ctx);
 	mutex_lock(&ctx->afu->contexts_lock);
 	idr_remove(&ctx->afu->contexts_idr, ctx->pe);
 	mutex_unlock(&ctx->afu->contexts_lock);

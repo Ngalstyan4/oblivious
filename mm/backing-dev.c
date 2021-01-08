@@ -237,6 +237,7 @@ static __init int bdi_class_init(void)
 
 	bdi_class->dev_groups = bdi_dev_groups;
 	bdi_debug_init();
+
 	return 0;
 }
 postcore_initcall(bdi_class_init);
@@ -310,6 +311,7 @@ static int wb_init(struct bdi_writeback *wb, struct backing_dev_info *bdi,
 	spin_lock_init(&wb->work_lock);
 	INIT_LIST_HEAD(&wb->work_list);
 	INIT_DELAYED_WORK(&wb->dwork, wb_workfn);
+	wb->dirty_sleep = jiffies;
 
 	wb->congested = wb_congested_get_create(bdi, blkcg_id, gfp);
 	if (!wb->congested)
@@ -328,7 +330,7 @@ static int wb_init(struct bdi_writeback *wb, struct backing_dev_info *bdi,
 	return 0;
 
 out_destroy_stat:
-	while (--i)
+	while (i--)
 		percpu_counter_destroy(&wb->stat[i]);
 	fprop_local_destroy_percpu(&wb->completions);
 out_put_cong:
@@ -409,8 +411,8 @@ retry:
 
 	while (*node != NULL) {
 		parent = *node;
-		congested = container_of(parent, struct bdi_writeback_congested,
-					 rb_node);
+		congested = rb_entry(parent, struct bdi_writeback_congested,
+				     rb_node);
 		if (congested->blkcg_id < blkcg_id)
 			node = &parent->rb_left;
 		else if (congested->blkcg_id > blkcg_id)
@@ -672,7 +674,7 @@ static int cgwb_bdi_init(struct backing_dev_info *bdi)
 
 	ret = wb_init(&bdi->wb, bdi, 1, GFP_KERNEL);
 	if (!ret) {
-		bdi->wb.memcg_css = mem_cgroup_root_css;
+		bdi->wb.memcg_css = &root_mem_cgroup->css;
 		bdi->wb.blkcg_css = blkcg_root_css;
 	}
 	return ret;
@@ -681,33 +683,26 @@ static int cgwb_bdi_init(struct backing_dev_info *bdi)
 static void cgwb_bdi_destroy(struct backing_dev_info *bdi)
 {
 	struct radix_tree_iter iter;
-	struct rb_node *rbn;
 	void **slot;
 
 	WARN_ON(test_bit(WB_registered, &bdi->wb.state));
 
 	spin_lock_irq(&cgwb_lock);
-
 	radix_tree_for_each_slot(slot, &bdi->cgwb_tree, &iter, 0)
 		cgwb_kill(*slot);
-
-	while ((rbn = rb_first(&bdi->cgwb_congested_tree))) {
-		struct bdi_writeback_congested *congested =
-			rb_entry(rbn, struct bdi_writeback_congested, rb_node);
-
-		rb_erase(rbn, &bdi->cgwb_congested_tree);
-		congested->bdi = NULL;	/* mark @congested unlinked */
-	}
-
 	spin_unlock_irq(&cgwb_lock);
 
 	/*
-	 * All cgwb's and their congested states must be shutdown and
-	 * released before returning.  Drain the usage counter to wait for
-	 * all cgwb's and cgwb_congested's ever created on @bdi.
+	 * All cgwb's must be shutdown and released before returning.  Drain
+	 * the usage counter to wait for all cgwb's ever created on @bdi.
 	 */
 	atomic_dec(&bdi->usage_cnt);
 	wait_event(cgwb_release_wait, !atomic_read(&bdi->usage_cnt));
+	/*
+	 * Grab back our reference so that we hold it when @bdi gets
+	 * re-registered.
+	 */
+	atomic_inc(&bdi->usage_cnt);
 }
 
 /**
@@ -747,6 +742,21 @@ void wb_blkcg_offline(struct blkcg *blkcg)
 	spin_unlock_irq(&cgwb_lock);
 }
 
+static void cgwb_bdi_exit(struct backing_dev_info *bdi)
+{
+	struct rb_node *rbn;
+
+	spin_lock_irq(&cgwb_lock);
+	while ((rbn = rb_first(&bdi->cgwb_congested_tree))) {
+		struct bdi_writeback_congested *congested =
+			rb_entry(rbn, struct bdi_writeback_congested, rb_node);
+
+		rb_erase(rbn, &bdi->cgwb_congested_tree);
+		congested->bdi = NULL;	/* mark @congested unlinked */
+	}
+	spin_unlock_irq(&cgwb_lock);
+}
+
 #else	/* CONFIG_CGROUP_WRITEBACK */
 
 static int cgwb_bdi_init(struct backing_dev_info *bdi)
@@ -767,7 +777,9 @@ static int cgwb_bdi_init(struct backing_dev_info *bdi)
 	return 0;
 }
 
-static void cgwb_bdi_destroy(struct backing_dev_info *bdi)
+static void cgwb_bdi_destroy(struct backing_dev_info *bdi) { }
+
+static void cgwb_bdi_exit(struct backing_dev_info *bdi)
 {
 	wb_congested_put(bdi->wb_congested);
 }
@@ -780,6 +792,7 @@ int bdi_init(struct backing_dev_info *bdi)
 
 	bdi->dev = NULL;
 
+	kref_init(&bdi->refcnt);
 	bdi->min_ratio = 0;
 	bdi->max_ratio = 100;
 	bdi->max_prop_frac = FPROP_FRAC_BASE;
@@ -794,6 +807,22 @@ int bdi_init(struct backing_dev_info *bdi)
 	return ret;
 }
 EXPORT_SYMBOL(bdi_init);
+
+struct backing_dev_info *bdi_alloc_node(gfp_t gfp_mask, int node_id)
+{
+	struct backing_dev_info *bdi;
+
+	bdi = kmalloc_node(sizeof(struct backing_dev_info),
+			   gfp_mask | __GFP_ZERO, node_id);
+	if (!bdi)
+		return NULL;
+
+	if (bdi_init(bdi)) {
+		kfree(bdi);
+		return NULL;
+	}
+	return bdi;
+}
 
 int bdi_register(struct backing_dev_info *bdi, struct device *parent,
 		const char *fmt, ...)
@@ -838,6 +867,8 @@ int bdi_register_owner(struct backing_dev_info *bdi, struct device *owner)
 			MINOR(owner->devt));
 	if (rc)
 		return rc;
+	/* Leaking owner reference... */
+	WARN_ON(bdi->owner);
 	bdi->owner = owner;
 	get_device(owner);
 	return 0;
@@ -875,10 +906,25 @@ void bdi_unregister(struct backing_dev_info *bdi)
 	}
 }
 
-void bdi_exit(struct backing_dev_info *bdi)
+static void bdi_exit(struct backing_dev_info *bdi)
 {
 	WARN_ON_ONCE(bdi->dev);
 	wb_exit(&bdi->wb);
+	cgwb_bdi_exit(bdi);
+}
+
+static void release_bdi(struct kref *ref)
+{
+	struct backing_dev_info *bdi =
+			container_of(ref, struct backing_dev_info, refcnt);
+
+	bdi_exit(bdi);
+	kfree(bdi);
+}
+
+void bdi_put(struct backing_dev_info *bdi)
+{
+	kref_put(&bdi->refcnt, release_bdi);
 }
 
 void bdi_destroy(struct backing_dev_info *bdi)
@@ -922,7 +968,7 @@ static atomic_t nr_wb_congested[2];
 void clear_wb_congested(struct bdi_writeback_congested *congested, int sync)
 {
 	wait_queue_head_t *wqh = &congestion_wqh[sync];
-	enum wb_state bit;
+	enum wb_congested_state bit;
 
 	bit = sync ? WB_sync_congested : WB_async_congested;
 	if (test_and_clear_bit(bit, &congested->state))
@@ -935,7 +981,7 @@ EXPORT_SYMBOL(clear_wb_congested);
 
 void set_wb_congested(struct bdi_writeback_congested *congested, int sync)
 {
-	enum wb_state bit;
+	enum wb_congested_state bit;
 
 	bit = sync ? WB_sync_congested : WB_async_congested;
 	if (!test_and_set_bit(bit, &congested->state))
@@ -971,25 +1017,24 @@ long congestion_wait(int sync, long timeout)
 EXPORT_SYMBOL(congestion_wait);
 
 /**
- * wait_iff_congested - Conditionally wait for a backing_dev to become uncongested or a zone to complete writes
- * @zone: A zone to check if it is heavily congested
+ * wait_iff_congested - Conditionally wait for a backing_dev to become uncongested or a pgdat to complete writes
+ * @pgdat: A pgdat to check if it is heavily congested
  * @sync: SYNC or ASYNC IO
  * @timeout: timeout in jiffies
  *
  * In the event of a congested backing_dev (any backing_dev) and the given
- * @zone has experienced recent congestion, this waits for up to @timeout
+ * @pgdat has experienced recent congestion, this waits for up to @timeout
  * jiffies for either a BDI to exit congestion of the given @sync queue
  * or a write to complete.
  *
- * In the absence of zone congestion, a short sleep or a cond_resched is
- * performed to yield the processor and to allow other subsystems to make
- * a forward progress.
+ * In the absence of pgdat congestion, cond_resched() is called to yield
+ * the processor if necessary but otherwise does not sleep.
  *
  * The return value is 0 if the sleep is for the full timeout. Otherwise,
  * it is the number of jiffies that were still remaining when the function
  * returned. return_value == timeout implies the function did not sleep.
  */
-long wait_iff_congested(struct zone *zone, int sync, long timeout)
+long wait_iff_congested(struct pglist_data *pgdat, int sync, long timeout)
 {
 	long ret;
 	unsigned long start = jiffies;
@@ -998,24 +1043,12 @@ long wait_iff_congested(struct zone *zone, int sync, long timeout)
 
 	/*
 	 * If there is no congestion, or heavy congestion is not being
-	 * encountered in the current zone, yield if necessary instead
+	 * encountered in the current pgdat, yield if necessary instead
 	 * of sleeping on the congestion queue
 	 */
 	if (atomic_read(&nr_wb_congested[sync]) == 0 ||
-	    !test_bit(ZONE_CONGESTED, &zone->flags)) {
-
-		/*
-		 * Memory allocation/reclaim might be called from a WQ
-		 * context and the current implementation of the WQ
-		 * concurrency control doesn't recognize that a particular
-		 * WQ is congested if the worker thread is looping without
-		 * ever sleeping. Therefore we have to do a short sleep
-		 * here rather than calling cond_resched().
-		 */
-		if (current->flags & PF_WQ_WORKER)
-			schedule_timeout_uninterruptible(1);
-		else
-			cond_resched();
+	    !test_bit(PGDAT_CONGESTED, &pgdat->flags)) {
+		cond_resched();
 
 		/* In case we scheduled, work out time remaining */
 		ret = timeout - (jiffies - start);
@@ -1050,8 +1083,8 @@ int pdflush_proc_obsolete(struct ctl_table *table, int write,
 
 	if (copy_to_user(buffer, kbuf, sizeof(kbuf)))
 		return -EFAULT;
-	printk_once(KERN_WARNING "%s exported in /proc is scheduled for removal\n",
-			table->procname);
+	pr_warn_once("%s exported in /proc is scheduled for removal\n",
+		     table->procname);
 
 	*lenp = 2;
 	*ppos += *lenp;

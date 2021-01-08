@@ -7,7 +7,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2015, Intel Corp.
+ * Copyright (C) 2000 - 2017, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -120,7 +120,7 @@
 #define AML_CREATE_WORD_FIELD_OP    (u16) 0x8b
 #define AML_CREATE_BYTE_FIELD_OP    (u16) 0x8c
 #define AML_CREATE_BIT_FIELD_OP     (u16) 0x8d
-#define AML_TYPE_OP                 (u16) 0x8e
+#define AML_OBJECT_TYPE_OP          (u16) 0x8e
 #define AML_CREATE_QWORD_FIELD_OP   (u16) 0x8f	/* ACPI 2.0 */
 #define AML_LAND_OP                 (u16) 0x90
 #define AML_LOR_OP                  (u16) 0x91
@@ -238,7 +238,9 @@
 #define ARGP_TERMLIST               0x0F
 #define ARGP_WORDDATA               0x10
 #define ARGP_QWORDDATA              0x11
-#define ARGP_SIMPLENAME             0x12
+#define ARGP_SIMPLENAME             0x12	/* name_string | local_term | arg_term */
+#define ARGP_NAME_OR_REF            0x13	/* For object_type only */
+#define ARGP_MAX                    0x13
 
 /*
  * Resolved argument types for the AML Interpreter
@@ -275,9 +277,23 @@
 #define ARGI_DEVICE_REF             0x0D
 #define ARGI_REFERENCE              0x0E
 #define ARGI_TARGETREF              0x0F	/* Target, subject to implicit conversion */
-#define ARGI_FIXED_TARGET           0x10	/* Target, no implicit conversion */
-#define ARGI_SIMPLE_TARGET          0x11	/* Name, Local, Arg -- no implicit conversion */
-#define ARGI_STORE_TARGET           0x12	/* Target for store is TARGETREF + package objects */
+#define ARGI_SIMPLE_TARGET          0x10	/* Name, Local, Arg -- no implicit conversion */
+#define ARGI_STORE_TARGET           0x11	/* Target for store is TARGETREF + package objects */
+/*
+ * #define ARGI_FIXED_TARGET           0x10     Target, no implicit conversion
+ *
+ * Removed 10/2016. ARGI_FIXED_TARGET was used for these operators:
+ *      from_BCD
+ *      to_BCD
+ *      to_decimal_string
+ *      to_hex_string
+ *      to_integer
+ *      to_buffer
+ * The purpose of this type was to disable "implicit result conversion",
+ * but this was incorrect per the ACPI spec and other ACPI implementations.
+ * These operators now have the target operand defined as a normal
+ * ARGI_TARGETREF.
+ */
 
 /* Multiple/complex types */
 

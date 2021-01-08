@@ -50,7 +50,7 @@
 #include <linux/semaphore.h>
 #include <linux/slab.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <rdma/ib_mad.h>
 #include <rdma/ib_user_mad.h>
@@ -210,6 +210,7 @@ static void send_handler(struct ib_mad_agent *agent,
 }
 
 static void recv_handler(struct ib_mad_agent *agent,
+			 struct ib_mad_send_buf *send_buf,
 			 struct ib_mad_recv_wc *mad_recv_wc)
 {
 	struct ib_umad_file *file = agent->context;
@@ -1187,7 +1188,7 @@ static int ib_umad_init_port(struct ib_device *device, int port_num,
 	if (cdev_add(&port->cdev, base, 1))
 		goto err_cdev;
 
-	port->dev = device_create(umad_class, device->dma_device,
+	port->dev = device_create(umad_class, device->dev.parent,
 				  port->cdev.dev, port,
 				  "umad%d", port->dev_num);
 	if (IS_ERR(port->dev))
@@ -1206,7 +1207,7 @@ static int ib_umad_init_port(struct ib_device *device, int port_num,
 	if (cdev_add(&port->sm_cdev, base, 1))
 		goto err_sm_cdev;
 
-	port->sm_dev = device_create(umad_class, device->dma_device,
+	port->sm_dev = device_create(umad_class, device->dev.parent,
 				     port->sm_cdev.dev, port,
 				     "issm%d", port->dev_num);
 	if (IS_ERR(port->sm_dev))

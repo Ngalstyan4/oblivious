@@ -168,6 +168,8 @@ struct hid_item {
 #define HID_UP_MSVENDOR		0xff000000
 #define HID_UP_CUSTOM		0x00ff0000
 #define HID_UP_LOGIVENDOR	0xffbc0000
+#define HID_UP_LOGIVENDOR2   0xff090000
+#define HID_UP_LOGIVENDOR3   0xff430000
 #define HID_UP_LNVENDOR		0xffa00000
 #define HID_UP_SENSOR		0x00200000
 
@@ -229,7 +231,11 @@ struct hid_item {
 #define HID_DG_TAP		0x000d0035
 #define HID_DG_TABLETFUNCTIONKEY	0x000d0039
 #define HID_DG_PROGRAMCHANGEKEY	0x000d003a
+#define HID_DG_BATTERYSTRENGTH	0x000d003b
 #define HID_DG_INVERT		0x000d003c
+#define HID_DG_TILT_X		0x000d003d
+#define HID_DG_TILT_Y		0x000d003e
+#define HID_DG_TWIST		0x000d0041
 #define HID_DG_TIPSWITCH	0x000d0042
 #define HID_DG_TIPSWITCH2	0x000d0043
 #define HID_DG_BARRELSWITCH	0x000d0044
@@ -477,6 +483,7 @@ struct hid_input {
 	struct list_head list;
 	struct hid_report *report;
 	struct input_dev *input;
+	bool registered;
 };
 
 enum hid_type {
@@ -562,6 +569,9 @@ struct hid_device {							/* device report descriptor */
 	spinlock_t  debug_list_lock;
 	wait_queue_head_t debug_wait;
 };
+
+#define to_hid_device(pdev) \
+	container_of(pdev, struct hid_device, dev)
 
 static inline void *hid_get_drvdata(struct hid_device *hdev)
 {
@@ -712,6 +722,9 @@ struct hid_driver {
 	struct device_driver driver;
 };
 
+#define to_hid_driver(pdrv) \
+	container_of(pdrv, struct hid_driver, driver)
+
 /**
  * hid_ll_driver - low level driver callbacks
  * @start: called on probe to start the device
@@ -829,7 +842,7 @@ __u32 hid_field_extract(const struct hid_device *hid, __u8 *report,
  */
 static inline void hid_device_io_start(struct hid_device *hid) {
 	if (hid->io_started) {
-		dev_warn(&hid->dev, "io already started");
+		dev_warn(&hid->dev, "io already started\n");
 		return;
 	}
 	hid->io_started = true;
@@ -849,7 +862,7 @@ static inline void hid_device_io_start(struct hid_device *hid) {
  */
 static inline void hid_device_io_stop(struct hid_device *hid) {
 	if (!hid->io_started) {
-		dev_warn(&hid->dev, "io already stopped");
+		dev_warn(&hid->dev, "io already stopped\n");
 		return;
 	}
 	hid->io_started = false;

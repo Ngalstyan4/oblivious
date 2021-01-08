@@ -89,10 +89,8 @@ static int ds1374_read_rtc(struct i2c_client *client, u32 *time,
 	int ret;
 	int i;
 
-	if (nbytes > 4) {
-		WARN_ON(1);
+	if (WARN_ON(nbytes > 4))
 		return -EINVAL;
-	}
 
 	ret = i2c_smbus_read_i2c_block_data(client, reg, nbytes, buf);
 
@@ -527,10 +525,6 @@ static long ds1374_wdt_ioctl(struct file *file, unsigned int cmd,
 		if (get_user(new_margin, (int __user *)arg))
 			return -EFAULT;
 
-		/* the hardware's tick rate is 4096 Hz, so
-		 * the counter value needs to be scaled accordingly
-		 */
-		new_margin <<= 12;
 		if (new_margin < 1 || new_margin > 16777216)
 			return -EINVAL;
 
@@ -539,8 +533,7 @@ static long ds1374_wdt_ioctl(struct file *file, unsigned int cmd,
 		ds1374_wdt_ping();
 		/* fallthrough */
 	case WDIOC_GETTIMEOUT:
-		/* when returning ... inverse is true */
-		return put_user((wdt_margin >> 12), (int __user *)arg);
+		return put_user(wdt_margin, (int __user *)arg);
 	case WDIOC_SETOPTIONS:
 		if (copy_from_user(&options, (int __user *)arg, sizeof(int)))
 			return -EFAULT;
@@ -548,15 +541,14 @@ static long ds1374_wdt_ioctl(struct file *file, unsigned int cmd,
 		if (options & WDIOS_DISABLECARD) {
 			pr_info("disable watchdog\n");
 			ds1374_wdt_disable();
-			return 0;
 		}
 
 		if (options & WDIOS_ENABLECARD) {
 			pr_info("enable watchdog\n");
 			ds1374_wdt_settimeout(wdt_margin);
 			ds1374_wdt_ping();
-			return 0;
 		}
+
 		return -EINVAL;
 	}
 	return -ENOTTY;

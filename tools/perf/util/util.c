@@ -14,14 +14,25 @@
 #include <limits.h>
 #include <byteswap.h>
 #include <linux/kernel.h>
+#include <linux/log2.h>
+#include <linux/time64.h>
 #include <unistd.h>
 #include "callchain.h"
+#include "strlist.h"
 
-struct callchain_param	callchain_param = {
-	.mode	= CHAIN_GRAPH_ABS,
-	.min_percent = 0.5,
-	.order  = ORDER_CALLEE,
-	.key	= CCKEY_FUNCTION
+#define CALLCHAIN_PARAM_DEFAULT			\
+	.mode		= CHAIN_GRAPH_ABS,	\
+	.min_percent	= 0.5,			\
+	.order		= ORDER_CALLEE,		\
+	.key		= CCKEY_FUNCTION,	\
+	.value		= CCVAL_PERCENT,	\
+
+struct callchain_param callchain_param = {
+	CALLCHAIN_PARAM_DEFAULT
+};
+
+struct callchain_param callchain_param_default = {
+	CALLCHAIN_PARAM_DEFAULT
 };
 
 /*
@@ -29,6 +40,9 @@ struct callchain_param	callchain_param = {
  */
 unsigned int page_size;
 int cacheline_size;
+
+int sysctl_perf_event_max_stack = PERF_MAX_STACK_DEPTH;
+int sysctl_perf_event_max_contexts_per_stack = PERF_MAX_CONTEXTS_PER_STACK;
 
 bool test_attr__enabled;
 
@@ -71,7 +85,7 @@ int mkdir_p(char *path, mode_t mode)
 	return (stat(path, &st) && mkdir(path, mode)) ? -1 : 0;
 }
 
-int rm_rf(char *path)
+int rm_rf(const char *path)
 {
 	DIR *dir;
 	int ret = 0;
@@ -91,20 +105,17 @@ int rm_rf(char *path)
 		scnprintf(namebuf, sizeof(namebuf), "%s/%s",
 			  path, d->d_name);
 
-		ret = stat(namebuf, &statbuf);
+		/* We have to check symbolic link itself */
+		ret = lstat(namebuf, &statbuf);
 		if (ret < 0) {
 			pr_debug("stat failed: %s\n", namebuf);
 			break;
 		}
 
-		if (S_ISREG(statbuf.st_mode))
-			ret = unlink(namebuf);
-		else if (S_ISDIR(statbuf.st_mode))
+		if (S_ISDIR(statbuf.st_mode))
 			ret = rm_rf(namebuf);
-		else {
-			pr_debug("unknown file: %s\n", namebuf);
-			ret = -1;
-		}
+		else
+			ret = unlink(namebuf);
 	}
 	closedir(dir);
 
@@ -112,6 +123,40 @@ int rm_rf(char *path)
 		return ret;
 
 	return rmdir(path);
+}
+
+/* A filter which removes dot files */
+bool lsdir_no_dot_filter(const char *name __maybe_unused, struct dirent *d)
+{
+	return d->d_name[0] != '.';
+}
+
+/* lsdir reads a directory and store it in strlist */
+struct strlist *lsdir(const char *name,
+		      bool (*filter)(const char *, struct dirent *))
+{
+	struct strlist *list = NULL;
+	DIR *dir;
+	struct dirent *d;
+
+	dir = opendir(name);
+	if (!dir)
+		return NULL;
+
+	list = strlist__new(NULL, NULL);
+	if (!list) {
+		errno = ENOMEM;
+		goto out;
+	}
+
+	while ((d = readdir(dir)) != NULL) {
+		if (!filter || filter(name, d))
+			strlist__add(list, d->d_name);
+	}
+
+out:
+	closedir(dir);
+	return list;
 }
 
 static int slow_copyfile(const char *from, const char *to)
@@ -351,74 +396,16 @@ void sighandler_dump_stack(int sig)
 {
 	psignal(sig, "perf");
 	dump_stack();
-	exit(sig);
+	signal(sig, SIG_DFL);
+	raise(sig);
 }
 
-void get_term_dimensions(struct winsize *ws)
+int timestamp__scnprintf_usec(u64 timestamp, char *buf, size_t sz)
 {
-	char *s = getenv("LINES");
+	u64  sec = timestamp / NSEC_PER_SEC;
+	u64 usec = (timestamp % NSEC_PER_SEC) / NSEC_PER_USEC;
 
-	if (s != NULL) {
-		ws->ws_row = atoi(s);
-		s = getenv("COLUMNS");
-		if (s != NULL) {
-			ws->ws_col = atoi(s);
-			if (ws->ws_row && ws->ws_col)
-				return;
-		}
-	}
-#ifdef TIOCGWINSZ
-	if (ioctl(1, TIOCGWINSZ, ws) == 0 &&
-	    ws->ws_row && ws->ws_col)
-		return;
-#endif
-	ws->ws_row = 25;
-	ws->ws_col = 80;
-}
-
-void set_term_quiet_input(struct termios *old)
-{
-	struct termios tc;
-
-	tcgetattr(0, old);
-	tc = *old;
-	tc.c_lflag &= ~(ICANON | ECHO);
-	tc.c_cc[VMIN] = 0;
-	tc.c_cc[VTIME] = 0;
-	tcsetattr(0, TCSANOW, &tc);
-}
-
-int parse_nsec_time(const char *str, u64 *ptime)
-{
-	u64 time_sec, time_nsec;
-	char *end;
-
-	time_sec = strtoul(str, &end, 10);
-	if (*end != '.' && *end != '\0')
-		return -1;
-
-	if (*end == '.') {
-		int i;
-		char nsec_buf[10];
-
-		if (strlen(++end) > 9)
-			return -1;
-
-		strncpy(nsec_buf, end, 9);
-		nsec_buf[9] = '\0';
-
-		/* make it nsec precision */
-		for (i = strlen(nsec_buf); i < 9; i++)
-			nsec_buf[i] = '0';
-
-		time_nsec = strtoul(nsec_buf, &end, 10);
-		if (*end != '\0')
-			return -1;
-	} else
-		time_nsec = 0;
-
-	*ptime = time_sec * NSEC_PER_SEC + time_nsec;
-	return 0;
+	return scnprintf(buf, sz, "%"PRIu64".%06"PRIu64, sec, usec);
 }
 
 unsigned long parse_tag_value(const char *str, struct parse_tag *tags)
@@ -501,7 +488,6 @@ int parse_callchain_record(const char *arg, struct callchain_param *param)
 				       "needed for --call-graph fp\n");
 			break;
 
-#ifdef HAVE_DWARF_UNWIND_SUPPORT
 		/* Dwarf style */
 		} else if (!strncmp(name, "dwarf", sizeof("dwarf"))) {
 			const unsigned long default_stack_dump_size = 8192;
@@ -517,7 +503,6 @@ int parse_callchain_record(const char *arg, struct callchain_param *param)
 				ret = get_stack_size(tok, &size);
 				param->dump_size = size;
 			}
-#endif /* HAVE_DWARF_UNWIND_SUPPORT */
 		} else if (!strncmp(name, "lbr", sizeof("lbr"))) {
 			if (!strtok_r(NULL, ",", &saveptr)) {
 				param->record_mode = CALLCHAIN_LBR;
@@ -536,54 +521,6 @@ int parse_callchain_record(const char *arg, struct callchain_param *param)
 
 	free(buf);
 	return ret;
-}
-
-int filename__read_str(const char *filename, char **buf, size_t *sizep)
-{
-	size_t size = 0, alloc_size = 0;
-	void *bf = NULL, *nbf;
-	int fd, n, err = 0;
-	char sbuf[STRERR_BUFSIZE];
-
-	fd = open(filename, O_RDONLY);
-	if (fd < 0)
-		return -errno;
-
-	do {
-		if (size == alloc_size) {
-			alloc_size += BUFSIZ;
-			nbf = realloc(bf, alloc_size);
-			if (!nbf) {
-				err = -ENOMEM;
-				break;
-			}
-
-			bf = nbf;
-		}
-
-		n = read(fd, bf + size, alloc_size - size);
-		if (n < 0) {
-			if (size) {
-				pr_warning("read failed %d: %s\n", errno,
-					 strerror_r(errno, sbuf, sizeof(sbuf)));
-				err = 0;
-			} else
-				err = -errno;
-
-			break;
-		}
-
-		size += n;
-	} while (n > 0);
-
-	if (!err) {
-		*sizep = size;
-		*buf   = bf;
-	} else
-		free(bf);
-
-	close(fd);
-	return err;
 }
 
 const char *get_filename_for_perf_kvm(void)
@@ -667,12 +604,63 @@ bool find_process(const char *name)
 	return ret ? false : true;
 }
 
+static int
+fetch_ubuntu_kernel_version(unsigned int *puint)
+{
+	ssize_t len;
+	size_t line_len = 0;
+	char *ptr, *line = NULL;
+	int version, patchlevel, sublevel, err;
+	FILE *vsig = fopen("/proc/version_signature", "r");
+
+	if (!vsig) {
+		pr_debug("Open /proc/version_signature failed: %s\n",
+			 strerror(errno));
+		return -1;
+	}
+
+	len = getline(&line, &line_len, vsig);
+	fclose(vsig);
+	err = -1;
+	if (len <= 0) {
+		pr_debug("Reading from /proc/version_signature failed: %s\n",
+			 strerror(errno));
+		goto errout;
+	}
+
+	ptr = strrchr(line, ' ');
+	if (!ptr) {
+		pr_debug("Parsing /proc/version_signature failed: %s\n", line);
+		goto errout;
+	}
+
+	err = sscanf(ptr + 1, "%d.%d.%d",
+		     &version, &patchlevel, &sublevel);
+	if (err != 3) {
+		pr_debug("Unable to get kernel version from /proc/version_signature '%s'\n",
+			 line);
+		goto errout;
+	}
+
+	if (puint)
+		*puint = (version << 16) + (patchlevel << 8) + sublevel;
+	err = 0;
+errout:
+	free(line);
+	return err;
+}
+
 int
 fetch_kernel_version(unsigned int *puint, char *str,
 		     size_t str_size)
 {
 	struct utsname utsname;
 	int version, patchlevel, sublevel, err;
+	bool int_ver_ready = false;
+
+	if (access("/proc/version_signature", R_OK) == 0)
+		if (!fetch_ubuntu_kernel_version(puint))
+			int_ver_ready = true;
 
 	if (uname(&utsname))
 		return -1;
@@ -686,12 +674,131 @@ fetch_kernel_version(unsigned int *puint, char *str,
 		     &version, &patchlevel, &sublevel);
 
 	if (err != 3) {
-		pr_debug("Unablt to get kernel version from uname '%s'\n",
+		pr_debug("Unable to get kernel version from uname '%s'\n",
 			 utsname.release);
 		return -1;
 	}
 
-	if (puint)
+	if (puint && !int_ver_ready)
 		*puint = (version << 16) + (patchlevel << 8) + sublevel;
 	return 0;
+}
+
+const char *perf_tip(const char *dirpath)
+{
+	struct strlist *tips;
+	struct str_node *node;
+	char *tip = NULL;
+	struct strlist_config conf = {
+		.dirname = dirpath,
+		.file_only = true,
+	};
+
+	tips = strlist__new("tips.txt", &conf);
+	if (tips == NULL)
+		return errno == ENOENT ? NULL : "Tip: get more memory! ;-p";
+
+	if (strlist__nr_entries(tips) == 0)
+		goto out;
+
+	node = strlist__entry(tips, random() % strlist__nr_entries(tips));
+	if (asprintf(&tip, "Tip: %s", node->s) < 0)
+		tip = (char *)"Tip: get more memory! ;-)";
+
+out:
+	strlist__delete(tips);
+
+	return tip;
+}
+
+bool is_regular_file(const char *file)
+{
+	struct stat st;
+
+	if (stat(file, &st))
+		return false;
+
+	return S_ISREG(st.st_mode);
+}
+
+int fetch_current_timestamp(char *buf, size_t sz)
+{
+	struct timeval tv;
+	struct tm tm;
+	char dt[32];
+
+	if (gettimeofday(&tv, NULL) || !localtime_r(&tv.tv_sec, &tm))
+		return -1;
+
+	if (!strftime(dt, sizeof(dt), "%Y%m%d%H%M%S", &tm))
+		return -1;
+
+	scnprintf(buf, sz, "%s%02u", dt, (unsigned)tv.tv_usec / 10000);
+
+	return 0;
+}
+
+void print_binary(unsigned char *data, size_t len,
+		  size_t bytes_per_line, print_binary_t printer,
+		  void *extra)
+{
+	size_t i, j, mask;
+
+	if (!printer)
+		return;
+
+	bytes_per_line = roundup_pow_of_two(bytes_per_line);
+	mask = bytes_per_line - 1;
+
+	printer(BINARY_PRINT_DATA_BEGIN, 0, extra);
+	for (i = 0; i < len; i++) {
+		if ((i & mask) == 0) {
+			printer(BINARY_PRINT_LINE_BEGIN, -1, extra);
+			printer(BINARY_PRINT_ADDR, i, extra);
+		}
+
+		printer(BINARY_PRINT_NUM_DATA, data[i], extra);
+
+		if (((i & mask) == mask) || i == len - 1) {
+			for (j = 0; j < mask-(i & mask); j++)
+				printer(BINARY_PRINT_NUM_PAD, -1, extra);
+
+			printer(BINARY_PRINT_SEP, i, extra);
+			for (j = i & ~mask; j <= i; j++)
+				printer(BINARY_PRINT_CHAR_DATA, data[j], extra);
+			for (j = 0; j < mask-(i & mask); j++)
+				printer(BINARY_PRINT_CHAR_PAD, i, extra);
+			printer(BINARY_PRINT_LINE_END, -1, extra);
+		}
+	}
+	printer(BINARY_PRINT_DATA_END, -1, extra);
+}
+
+int is_printable_array(char *p, unsigned int len)
+{
+	unsigned int i;
+
+	if (!p || !len || p[len - 1] != 0)
+		return 0;
+
+	len--;
+
+	for (i = 0; i < len; i++) {
+		if (!isprint(p[i]) && !isspace(p[i]))
+			return 0;
+	}
+	return 1;
+}
+
+int unit_number__scnprintf(char *buf, size_t size, u64 n)
+{
+	char unit[4] = "BKMG";
+	int i = 0;
+
+	while (((n / 1024) > 1) && (i < 3)) {
+		n /= 1024;
+		i++;
+	}
+
+	return scnprintf(buf, size, "%" PRIu64 "%c", n, unit[i]);
 }

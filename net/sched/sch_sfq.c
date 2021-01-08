@@ -23,6 +23,7 @@
 #include <linux/vmalloc.h>
 #include <net/netlink.h>
 #include <net/pkt_sched.h>
+#include <net/pkt_cls.h>
 #include <net/red.h>
 
 
@@ -343,7 +344,7 @@ static int sfq_headdrop(const struct sfq_sched_data *q)
 }
 
 static int
-sfq_enqueue(struct sk_buff *skb, struct Qdisc *sch)
+sfq_enqueue(struct sk_buff *skb, struct Qdisc *sch, struct sk_buff **to_free)
 {
 	struct sfq_sched_data *q = qdisc_priv(sch);
 	unsigned int hash, dropped;
@@ -367,7 +368,7 @@ sfq_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	if (x == SFQ_EMPTY_SLOT) {
 		x = q->dep[0].next; /* get a free slot */
 		if (x >= SFQ_MAX_FLOWS)
-			return qdisc_drop(skb, sch);
+			return qdisc_drop(skb, sch, to_free);
 		q->ht[hash] = x;
 		slot = &q->slots[x];
 		slot->hash = hash;
@@ -424,17 +425,16 @@ sfq_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	if (slot->qlen >= q->maxdepth) {
 congestion_drop:
 		if (!sfq_headdrop(q))
-			return qdisc_drop(skb, sch);
+			return qdisc_drop(skb, sch, to_free);
 
 		/* We know we have at least one packet in queue */
 		head = slot_dequeue_head(slot);
 		delta = qdisc_pkt_len(head) - qdisc_pkt_len(skb);
 		sch->qstats.backlog -= delta;
 		slot->backlog -= delta;
-		qdisc_drop(head, sch);
+		qdisc_drop(head, sch, to_free);
 
 		slot_queue_add(slot, skb);
-		qdisc_tree_reduce_backlog(sch, 0, delta);
 		return NET_XMIT_CN;
 	}
 
@@ -466,10 +466,8 @@ enqueue:
 	/* Return Congestion Notification only if we dropped a packet
 	 * from this flow.
 	 */
-	if (qlen != slot->qlen) {
-		qdisc_tree_reduce_backlog(sch, 0, dropped - qdisc_pkt_len(skb));
+	if (qlen != slot->qlen)
 		return NET_XMIT_CN;
-	}
 
 	/* As we dropped a packet, better let upper stack know this */
 	qdisc_tree_reduce_backlog(sch, 1, dropped);
@@ -523,7 +521,7 @@ sfq_reset(struct Qdisc *sch)
 	struct sk_buff *skb;
 
 	while ((skb = sfq_dequeue(sch)) != NULL)
-		kfree_skb(skb);
+		rtnl_kfree_skbs(skb, skb);
 }
 
 /*
@@ -632,9 +630,6 @@ static int sfq_change(struct Qdisc *sch, struct nlattr *opt)
 		ctl_v1 = nla_data(opt);
 	if (ctl->divisor &&
 	    (!is_power_of_2(ctl->divisor) || ctl->divisor > 65536))
-		return -EINVAL;
-	if (ctl_v1 && !red_check_params(ctl_v1->qth_min, ctl_v1->qth_max,
-					ctl_v1->Wlog))
 		return -EINVAL;
 	if (ctl_v1 && ctl_v1->qth_min) {
 		p = kmalloc(sizeof(*p), GFP_KERNEL);
@@ -903,7 +898,6 @@ static struct Qdisc_ops sfq_qdisc_ops __read_mostly = {
 	.enqueue	=	sfq_enqueue,
 	.dequeue	=	sfq_dequeue,
 	.peek		=	qdisc_peek_dequeued,
-	.drop		=	sfq_drop,
 	.init		=	sfq_init,
 	.reset		=	sfq_reset,
 	.destroy	=	sfq_destroy,

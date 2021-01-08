@@ -22,7 +22,6 @@
 #include <linux/list.h>
 #include <linux/bug.h>
 #include <linux/skbuff.h>
-#include <linux/semaphore.h>
 #include <linux/timer.h>
 
 struct ath10k;
@@ -297,10 +296,10 @@ struct ath10k_htc_svc_conn_resp {
 #define ATH10K_NUM_CONTROL_TX_BUFFERS 2
 #define ATH10K_HTC_MAX_LEN 4096
 #define ATH10K_HTC_MAX_CTRL_MSG_LEN 256
-#define ATH10K_HTC_WAIT_TIMEOUT_HZ (1*HZ)
+#define ATH10K_HTC_WAIT_TIMEOUT_HZ (1 * HZ)
 #define ATH10K_HTC_CONTROL_BUFFER_SIZE (ATH10K_HTC_MAX_CTRL_MSG_LEN + \
 					sizeof(struct ath10k_htc_hdr))
-#define ATH10K_HTC_CONN_SVC_TIMEOUT_HZ (1*HZ)
+#define ATH10K_HTC_CONN_SVC_TIMEOUT_HZ (1 * HZ)
 
 struct ath10k_htc_ep {
 	struct ath10k_htc *htc;
@@ -315,8 +314,6 @@ struct ath10k_htc_ep {
 
 	u8 seq_no; /* for debugging */
 	int tx_credits;
-	int tx_credit_size;
-	int tx_credits_per_max_message;
 	bool tx_credit_flow_enabled;
 };
 
@@ -340,7 +337,6 @@ struct ath10k_htc {
 	struct completion ctl_resp;
 
 	int total_transmit_credits;
-	struct ath10k_htc_svc_tx_credits service_tx_alloc[ATH10K_HTC_EP_COUNT];
 	int target_credit_size;
 };
 

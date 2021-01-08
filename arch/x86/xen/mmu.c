@@ -38,12 +38,13 @@
  *
  * Jeremy Fitzhardinge <jeremy@xensource.com>, XenSource Inc, 2007
  */
-#include <linux/sched.h>
+#include <linux/sched/mm.h>
 #include <linux/highmem.h>
 #include <linux/debugfs.h>
 #include <linux/bug.h>
 #include <linux/vmalloc.h>
-#include <linux/module.h>
+#include <linux/export.h>
+#include <linux/init.h>
 #include <linux/gfp.h>
 #include <linux/memblock.h>
 #include <linux/seq_file.h>
@@ -1256,7 +1257,7 @@ static void __init xen_pagetable_cleanhighmap(void)
 	xen_cleanhighmap(addr, addr + size);
 	xen_start_info->pt_base = (unsigned long)__va(__pa(xen_start_info->pt_base));
 #ifdef DEBUG
-	/* This is superflous and is not neccessary, but you know what
+	/* This is superfluous and is not necessary, but you know what
 	 * lets do it. The MODULES_VADDR -> MODULES_END should be clear of
 	 * anything at this stage. */
 	xen_cleanhighmap(MODULES_VADDR, roundup(MODULES_VADDR, PUD_SIZE) - 1);
@@ -1474,7 +1475,7 @@ static void xen_write_cr3(unsigned long cr3)
 /*
  * At the start of the day - when Xen launches a guest, it has already
  * built pagetables for the guest. We diligently look over them
- * in xen_setup_kernel_pagetable and graft as appropiate them in the
+ * in xen_setup_kernel_pagetable and graft as appropriate them in the
  * init_level4_pgt and its friends. Then when we are happy we load
  * the new init_level4_pgt - and continue on.
  *
@@ -1551,41 +1552,6 @@ static void xen_pgd_free(struct mm_struct *mm, pgd_t *pgd)
 #endif
 }
 
-#ifdef CONFIG_X86_32
-static pte_t __init mask_rw_pte(pte_t *ptep, pte_t pte)
-{
-	/* If there's an existing pte, then don't allow _PAGE_RW to be set */
-	if (pte_val_ma(*ptep) & _PAGE_PRESENT)
-		pte = __pte_ma(((pte_val_ma(*ptep) & _PAGE_RW) | ~_PAGE_RW) &
-			       pte_val_ma(pte));
-
-	return pte;
-}
-#else /* CONFIG_X86_64 */
-static pte_t __init mask_rw_pte(pte_t *ptep, pte_t pte)
-{
-	unsigned long pfn;
-
-	if (xen_feature(XENFEAT_writable_page_tables) ||
-	    xen_feature(XENFEAT_auto_translated_physmap) ||
-	    xen_start_info->mfn_list >= __START_KERNEL_map)
-		return pte;
-
-	/*
-	 * Pages belonging to the initial p2m list mapped outside the default
-	 * address range must be mapped read-only. This region contains the
-	 * page tables for mapping the p2m list, too, and page tables MUST be
-	 * mapped read-only.
-	 */
-	pfn = pte_pfn(pte);
-	if (pfn >= xen_start_info->first_p2m_pfn &&
-	    pfn < xen_start_info->first_p2m_pfn + xen_start_info->nr_p2m_frames)
-		pte = __pte_ma(pte_val_ma(pte) & ~_PAGE_RW);
-
-	return pte;
-}
-#endif /* CONFIG_X86_64 */
-
 /*
  * Init-time set_pte while constructing initial pagetables, which
  * doesn't allow RO page table pages to be remapped RW.
@@ -1600,13 +1566,37 @@ static pte_t __init mask_rw_pte(pte_t *ptep, pte_t pte)
  * so always write the PTE directly and rely on Xen trapping and
  * emulating any updates as necessary.
  */
+__visible pte_t xen_make_pte_init(pteval_t pte)
+{
+#ifdef CONFIG_X86_64
+	unsigned long pfn;
+
+	/*
+	 * Pages belonging to the initial p2m list mapped outside the default
+	 * address range must be mapped read-only. This region contains the
+	 * page tables for mapping the p2m list, too, and page tables MUST be
+	 * mapped read-only.
+	 */
+	pfn = (pte & PTE_PFN_MASK) >> PAGE_SHIFT;
+	if (xen_start_info->mfn_list < __START_KERNEL_map &&
+	    pfn >= xen_start_info->first_p2m_pfn &&
+	    pfn < xen_start_info->first_p2m_pfn + xen_start_info->nr_p2m_frames)
+		pte &= ~_PAGE_RW;
+#endif
+	pte = pte_pfn_to_mfn(pte);
+	return native_make_pte(pte);
+}
+PV_CALLEE_SAVE_REGS_THUNK(xen_make_pte_init);
+
 static void __init xen_set_pte_init(pte_t *ptep, pte_t pte)
 {
-	if (pte_mfn(pte) != INVALID_P2M_ENTRY)
-		pte = mask_rw_pte(ptep, pte);
-	else
-		pte = __pte_ma(0);
-
+#ifdef CONFIG_X86_32
+	/* If there's an existing pte, then don't allow _PAGE_RW to be set */
+	if (pte_mfn(pte) != INVALID_P2M_ENTRY
+	    && pte_val_ma(*ptep) & _PAGE_PRESENT)
+		pte = __pte_ma(((pte_val_ma(*ptep) & _PAGE_RW) | ~_PAGE_RW) &
+			       pte_val_ma(pte));
+#endif
 	native_set_pte(ptep, pte);
 }
 
@@ -1802,10 +1792,6 @@ static void __init set_page_prot_flags(void *addr, pgprot_t prot,
 	unsigned long pfn = __pa(addr) >> PAGE_SHIFT;
 	pte_t pte = pfn_pte(pfn, prot);
 
-	/* For PVH no need to set R/O or R/W to pin them or unpin them. */
-	if (xen_feature(XENFEAT_auto_translated_physmap))
-		return;
-
 	if (HYPERVISOR_update_va_mapping((unsigned long)addr, pte, flags))
 		BUG();
 }
@@ -1912,8 +1898,7 @@ static void __init check_pt_base(unsigned long *pt_base, unsigned long *pt_end,
  * level2_ident_pgt, and level2_kernel_pgt.  This means that only the
  * kernel has a physical mapping to start with - but that's enough to
  * get __va working.  We need to fill in the rest of the physical
- * mapping once some sort of allocator has been set up.  NOTE: for
- * PVH, the page tables are native.
+ * mapping once some sort of allocator has been set up.
  */
 void __init xen_setup_kernel_pagetable(pgd_t *pgd, unsigned long max_pfn)
 {
@@ -2038,8 +2023,7 @@ static unsigned long __init xen_read_phys_ulong(phys_addr_t addr)
 
 /*
  * Translate a virtual address to a physical one without relying on mapped
- * page tables. Don't rely on big pages being aligned in (guest) physical
- * space!
+ * page tables.
  */
 static phys_addr_t __init xen_early_virt_to_phys(unsigned long vaddr)
 {
@@ -2060,7 +2044,7 @@ static phys_addr_t __init xen_early_virt_to_phys(unsigned long vaddr)
 						       sizeof(pud)));
 	if (!pud_present(pud))
 		return 0;
-	pa = pud_val(pud) & PTE_PFN_MASK;
+	pa = pud_pfn(pud) << PAGE_SHIFT;
 	if (pud_large(pud))
 		return pa + (vaddr & ~PUD_MASK);
 
@@ -2068,7 +2052,7 @@ static phys_addr_t __init xen_early_virt_to_phys(unsigned long vaddr)
 						       sizeof(pmd)));
 	if (!pmd_present(pmd))
 		return 0;
-	pa = pmd_val(pmd) & PTE_PFN_MASK;
+	pa = pmd_pfn(pmd) << PAGE_SHIFT;
 	if (pmd_large(pmd))
 		return pa + (vaddr & ~PMD_MASK);
 
@@ -2408,6 +2392,7 @@ static void __init xen_post_allocator_init(void)
 	pv_mmu_ops.alloc_pud = xen_alloc_pud;
 	pv_mmu_ops.release_pud = xen_release_pud;
 #endif
+	pv_mmu_ops.make_pte = PV_CALLEE_SAVE(xen_make_pte);
 
 #ifdef CONFIG_X86_64
 	pv_mmu_ops.write_cr3 = &xen_write_cr3;
@@ -2437,7 +2422,6 @@ static const struct pv_mmu_ops xen_mmu_ops __initconst = {
 	.flush_tlb_others = xen_flush_tlb_others,
 
 	.pte_update = paravirt_nop,
-	.pte_update_defer = paravirt_nop,
 
 	.pgd_alloc = xen_pgd_alloc,
 	.pgd_free = xen_pgd_free,
@@ -2457,7 +2441,7 @@ static const struct pv_mmu_ops xen_mmu_ops __initconst = {
 	.pte_val = PV_CALLEE_SAVE(xen_pte_val),
 	.pgd_val = PV_CALLEE_SAVE(xen_pgd_val),
 
-	.make_pte = PV_CALLEE_SAVE(xen_make_pte),
+	.make_pte = PV_CALLEE_SAVE(xen_make_pte_init),
 	.make_pgd = PV_CALLEE_SAVE(xen_make_pgd),
 
 #ifdef CONFIG_X86_PAE
@@ -2794,7 +2778,7 @@ static int remap_area_mfn_pte_fn(pte_t *ptep, pgtable_t token,
 	struct remap_data *rmd = data;
 	pte_t pte = pte_mkspecial(mfn_pte(*rmd->mfn, rmd->prot));
 
-	/* If we have a contigious range, just update the mfn itself,
+	/* If we have a contiguous range, just update the mfn itself,
 	   else update pointer to be "next mfn". */
 	if (rmd->contiguous)
 		(*rmd->mfn)++;
@@ -2823,19 +2807,9 @@ static int do_remap_gfn(struct vm_area_struct *vma,
 
 	BUG_ON(!((vma->vm_flags & (VM_PFNMAP | VM_IO)) == (VM_PFNMAP | VM_IO)));
 
-	if (xen_feature(XENFEAT_auto_translated_physmap)) {
-#ifdef CONFIG_XEN_PVH
-		/* We need to update the local page tables and the xen HAP */
-		return xen_xlate_remap_gfn_array(vma, addr, gfn, nr, err_ptr,
-						 prot, domid, pages);
-#else
-		return -EINVAL;
-#endif
-        }
-
 	rmd.mfn = gfn;
 	rmd.prot = prot;
-	/* We use the err_ptr to indicate if there we are doing a contigious
+	/* We use the err_ptr to indicate if there we are doing a contiguous
 	 * mapping or a discontigious mapping. */
 	rmd.contiguous = !err_ptr;
 
@@ -2926,10 +2900,6 @@ int xen_unmap_domain_gfn_range(struct vm_area_struct *vma,
 	if (!pages || !xen_feature(XENFEAT_auto_translated_physmap))
 		return 0;
 
-#ifdef CONFIG_XEN_PVH
-	return xen_xlate_unmap_gfn_range(vma, numpgs, pages);
-#else
 	return -EINVAL;
-#endif
 }
 EXPORT_SYMBOL_GPL(xen_unmap_domain_gfn_range);

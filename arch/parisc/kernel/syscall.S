@@ -100,7 +100,7 @@ set_thread_pointer:
 	.endr
 
 /* This address must remain fixed at 0x100 for glibc's syscalls to work */
-	.align 256
+	.align LINUX_GATEWAY_ADDR
 linux_gateway_entry:
 	gate	.+8, %r0			/* become privileged */
 	mtsp	%r0,%sr4			/* get kernel space into sr4 */
@@ -336,6 +336,7 @@ tracesys_next:
 
 	ldo     -THREAD_SZ_ALGN-FRAME_SIZE(%r30),%r1      /* get task ptr */
 	LDREG	TI_TASK(%r1), %r1
+	LDREG   TASK_PT_GR28(%r1), %r28		/* Restore return value */
 	LDREG   TASK_PT_GR26(%r1), %r26		/* Restore the users args */
 	LDREG   TASK_PT_GR25(%r1), %r25
 	LDREG   TASK_PT_GR24(%r1), %r24
@@ -349,7 +350,8 @@ tracesys_next:
 	stw     %r21, -56(%r30)                 /* 6th argument */
 #endif
 
-	comiclr,>>=	__NR_Linux_syscalls, %r20, %r0
+	cmpib,COND(=),n -1,%r20,tracesys_exit /* seccomp may have returned -1 */
+	comiclr,>>	__NR_Linux_syscalls, %r20, %r0
 	b,n	.Ltracesys_nosys
 
 	LDREGX  %r20(%r19), %r19
@@ -688,15 +690,15 @@ cas_action:
 	/* ELF32 Process entry path */
 lws_compare_and_swap_2:
 #ifdef CONFIG_64BIT
-	/* Clip the input registers. We don't need to clip %r23 as we
-	   only use it for word operations */
+	/* Clip the input registers */
 	depdi	0, 31, 32, %r26
 	depdi	0, 31, 32, %r25
 	depdi	0, 31, 32, %r24
+	depdi	0, 31, 32, %r23
 #endif
 
 	/* Check the validity of the size pointer */
-	subi,>>= 3, %r23, %r0
+	subi,>>= 4, %r23, %r0
 	b,n	lws_exit_nosys
 
 	/* Jump to the functions which will load the old and new values into
@@ -740,7 +742,7 @@ lws_compare_and_swap_2:
 10:	ldd	0(%r25), %r25
 11:	ldd	0(%r24), %r24
 #else
-	/* Load old value into r22/r23 - high/low */
+	/* Load new value into r22/r23 - high/low */
 10:	ldw	0(%r25), %r22
 11:	ldw	4(%r25), %r23
 	/* Load new value into fr4 for atomic store later */
@@ -832,11 +834,11 @@ cas2_action:
 	copy	%r0, %r28
 #else
 	/* Compare first word */
-19:	ldw	0(%r26), %r29
+19:	ldw,ma	0(%r26), %r29
 	sub,=	%r29, %r22, %r0
 	b,n	cas2_end
 	/* Compare second word */
-20:	ldw	4(%r26), %r29
+20:	ldw,ma	4(%r26), %r29
 	sub,=	%r29, %r23, %r0
 	b,n	cas2_end
 	/* Perform the store */
@@ -912,6 +914,7 @@ END(lws_table)
 
 	.align 8
 ENTRY(sys_call_table)
+	.export sys_call_table,data
 #include "syscall_table.S"
 END(sys_call_table)
 

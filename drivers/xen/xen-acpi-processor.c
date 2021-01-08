@@ -116,7 +116,7 @@ static int push_cxx_to_hypervisor(struct acpi_processor *_pr)
 	set_xen_guest_handle(op.u.set_pminfo.power.states, dst_cx_states);
 
 	if (!no_hypercall)
-		ret = HYPERVISOR_dom0_op(&op);
+		ret = HYPERVISOR_platform_op(&op);
 
 	if (!ret) {
 		pr_debug("ACPI CPU%u - C-states uploaded.\n", _pr->acpi_id);
@@ -244,7 +244,7 @@ static int push_pxx_to_hypervisor(struct acpi_processor *_pr)
 	}
 
 	if (!no_hypercall)
-		ret = HYPERVISOR_dom0_op(&op);
+		ret = HYPERVISOR_platform_op(&op);
 
 	if (!ret) {
 		struct acpi_processor_performance *perf;
@@ -302,7 +302,7 @@ static unsigned int __init get_max_acpi_id(void)
 	info = &op.u.pcpu_info;
 	info->xen_cpuid = 0;
 
-	ret = HYPERVISOR_dom0_op(&op);
+	ret = HYPERVISOR_platform_op(&op);
 	if (ret)
 		return NR_CPUS;
 
@@ -310,7 +310,7 @@ static unsigned int __init get_max_acpi_id(void)
 	last_cpu = op.u.pcpu_info.max_present;
 	for (i = 0; i <= last_cpu; i++) {
 		info->xen_cpuid = i;
-		ret = HYPERVISOR_dom0_op(&op);
+		ret = HYPERVISOR_platform_op(&op);
 		if (ret)
 			continue;
 		max_acpi_id = max(info->acpi_id, max_acpi_id);
@@ -408,7 +408,7 @@ static int check_acpi_ids(struct acpi_processor *pr_backup)
 	acpi_walk_namespace(ACPI_TYPE_PROCESSOR, ACPI_ROOT_OBJECT,
 			    ACPI_UINT32_MAX,
 			    read_acpi_id, NULL, NULL, NULL);
-	acpi_get_devices("ACPI0007", read_acpi_id, NULL, NULL);
+	acpi_get_devices(ACPI_PROCESSOR_DEVICE_HID, read_acpi_id, NULL, NULL);
 
 upload:
 	if (!bitmap_equal(acpi_id_present, acpi_ids_done, nr_acpi_bits)) {

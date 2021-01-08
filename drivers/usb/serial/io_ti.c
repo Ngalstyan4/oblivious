@@ -2349,11 +2349,8 @@ static void change_port_settings(struct tty_struct *tty,
 	if (!baud) {
 		/* pick a default, any default... */
 		baud = 9600;
-	} else {
-		/* Avoid a zero divisor. */
-		baud = min(baud, 461550);
+	} else
 		tty_encode_baud_rate(tty, baud, baud);
-	}
 
 	edge_port->baud_rate = baud;
 	config->wBaudRate = (__u16)((461550L + baud/2) / baud);
@@ -2467,9 +2464,6 @@ static int get_serial_info(struct edgeport_port *edge_port,
 	struct serial_struct tmp;
 	unsigned cwait;
 
-	if (!retinfo)
-		return -EFAULT;
-
 	cwait = edge_port->port->port.closing_wait;
 	if (cwait != ASYNC_CLOSING_WAIT_NONE)
 		cwait = jiffies_to_msecs(cwait) / 10;
@@ -2480,7 +2474,6 @@ static int get_serial_info(struct edgeport_port *edge_port,
 	tmp.line		= edge_port->port->minor;
 	tmp.port		= edge_port->port->port_number;
 	tmp.irq			= 0;
-	tmp.flags		= ASYNC_SKIP_TEST | ASYNC_AUTO_IRQ;
 	tmp.xmit_fifo_size	= edge_port->port->bulk_out_size;
 	tmp.baud_base		= 9600;
 	tmp.close_delay		= 5*HZ;

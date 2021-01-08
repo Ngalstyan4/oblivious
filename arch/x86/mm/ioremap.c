@@ -9,7 +9,6 @@
 #include <linux/bootmem.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mmiotrace.h>
@@ -194,8 +193,8 @@ static void __iomem *__ioremap_caller(resource_size_t phys_addr,
 	 * Check if the request spans more than any BAR in the iomem resource
 	 * tree.
 	 */
-	WARN_ONCE(iomem_map_sanity_check(unaligned_phys_addr, unaligned_size),
-		  KERN_INFO "Info: mapping multiple BARs. Your kernel is fine.");
+	if (iomem_map_sanity_check(unaligned_phys_addr, unaligned_size))
+		pr_warn("caller %pS mapping multiple BARs\n", caller);
 
 	return ret_addr;
 err_free_area:
@@ -348,10 +347,10 @@ void iounmap(volatile void __iomem *addr)
 	    (void __force *)addr < phys_to_virt(ISA_END_ADDRESS))
 		return;
 
-	mmiotrace_iounmap(addr);
-
 	addr = (volatile void __iomem *)
 		(PAGE_MASK & (unsigned long __force)addr);
+
+	mmiotrace_iounmap(addr);
 
 	/* Use the vm area unlocked, assuming the caller
 	   ensures there isn't another iounmap for the same address
@@ -378,7 +377,7 @@ EXPORT_SYMBOL(iounmap);
 int __init arch_ioremap_pud_supported(void)
 {
 #ifdef CONFIG_X86_64
-	return cpu_has_gbpages;
+	return boot_cpu_has(X86_FEATURE_GBPAGES);
 #else
 	return 0;
 #endif
@@ -386,7 +385,7 @@ int __init arch_ioremap_pud_supported(void)
 
 int __init arch_ioremap_pmd_supported(void)
 {
-	return cpu_has_pse;
+	return boot_cpu_has(X86_FEATURE_PSE);
 }
 
 /*

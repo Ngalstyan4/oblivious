@@ -131,7 +131,7 @@ static struct ieee80211_rate rtl_ratetable_5g[] = {
 };
 
 static const struct ieee80211_supported_band rtl_band_2ghz = {
-	.band = IEEE80211_BAND_2GHZ,
+	.band = NL80211_BAND_2GHZ,
 
 	.channels = rtl_channeltable_2g,
 	.n_channels = ARRAY_SIZE(rtl_channeltable_2g),
@@ -143,7 +143,7 @@ static const struct ieee80211_supported_band rtl_band_2ghz = {
 };
 
 static struct ieee80211_supported_band rtl_band_5ghz = {
-	.band = IEEE80211_BAND_5GHZ,
+	.band = NL80211_BAND_5GHZ,
 
 	.channels = rtl_channeltable_5g,
 	.n_channels = ARRAY_SIZE(rtl_channeltable_5g),
@@ -197,7 +197,7 @@ static void _rtl_init_hw_ht_capab(struct ieee80211_hw *hw,
 
 	ht_cap->mcs.tx_params = IEEE80211_HT_MCS_TX_DEFINED;
 
-	/*hw->wiphy->bands[IEEE80211_BAND_2GHZ]
+	/*hw->wiphy->bands[NL80211_BAND_2GHZ]
 	 *base on ant_num
 	 *rx_mask: RX mask
 	 *if rx_ant = 1 rx_mask[0]= 0xff;==>MCS0-MCS7
@@ -207,8 +207,7 @@ static void _rtl_init_hw_ht_capab(struct ieee80211_hw *hw,
 	 *highest supported RX rate
 	 */
 	if (rtlpriv->dm.supp_phymode_switch) {
-		RT_TRACE(rtlpriv, COMP_INIT, DBG_EMERG,
-			 "Support phy mode switch\n");
+		pr_info("Support phy mode switch\n");
 
 		ht_cap->mcs.rx_mask[0] = 0xFF;
 		ht_cap->mcs.rx_mask[1] = 0xFF;
@@ -328,26 +327,26 @@ static void _rtl_init_mac80211(struct ieee80211_hw *hw)
 	    rtlhal->bandset == BAND_ON_BOTH) {
 		/* 1: 2.4 G bands */
 		/* <1> use  mac->bands as mem for hw->wiphy->bands */
-		sband = &(rtlmac->bands[IEEE80211_BAND_2GHZ]);
+		sband = &(rtlmac->bands[NL80211_BAND_2GHZ]);
 
-		/* <2> set hw->wiphy->bands[IEEE80211_BAND_2GHZ]
+		/* <2> set hw->wiphy->bands[NL80211_BAND_2GHZ]
 		 * to default value(1T1R) */
-		memcpy(&(rtlmac->bands[IEEE80211_BAND_2GHZ]), &rtl_band_2ghz,
+		memcpy(&(rtlmac->bands[NL80211_BAND_2GHZ]), &rtl_band_2ghz,
 				sizeof(struct ieee80211_supported_band));
 
 		/* <3> init ht cap base on ant_num */
 		_rtl_init_hw_ht_capab(hw, &sband->ht_cap);
 
 		/* <4> set mac->sband to wiphy->sband */
-		hw->wiphy->bands[IEEE80211_BAND_2GHZ] = sband;
+		hw->wiphy->bands[NL80211_BAND_2GHZ] = sband;
 
 		/* 2: 5 G bands */
 		/* <1> use  mac->bands as mem for hw->wiphy->bands */
-		sband = &(rtlmac->bands[IEEE80211_BAND_5GHZ]);
+		sband = &(rtlmac->bands[NL80211_BAND_5GHZ]);
 
-		/* <2> set hw->wiphy->bands[IEEE80211_BAND_5GHZ]
+		/* <2> set hw->wiphy->bands[NL80211_BAND_5GHZ]
 		 * to default value(1T1R) */
-		memcpy(&(rtlmac->bands[IEEE80211_BAND_5GHZ]), &rtl_band_5ghz,
+		memcpy(&(rtlmac->bands[NL80211_BAND_5GHZ]), &rtl_band_5ghz,
 				sizeof(struct ieee80211_supported_band));
 
 		/* <3> init ht cap base on ant_num */
@@ -355,15 +354,15 @@ static void _rtl_init_mac80211(struct ieee80211_hw *hw)
 
 		_rtl_init_hw_vht_capab(hw, &sband->vht_cap);
 		/* <4> set mac->sband to wiphy->sband */
-		hw->wiphy->bands[IEEE80211_BAND_5GHZ] = sband;
+		hw->wiphy->bands[NL80211_BAND_5GHZ] = sband;
 	} else {
 		if (rtlhal->current_bandtype == BAND_ON_2_4G) {
 			/* <1> use  mac->bands as mem for hw->wiphy->bands */
-			sband = &(rtlmac->bands[IEEE80211_BAND_2GHZ]);
+			sband = &(rtlmac->bands[NL80211_BAND_2GHZ]);
 
-			/* <2> set hw->wiphy->bands[IEEE80211_BAND_2GHZ]
+			/* <2> set hw->wiphy->bands[NL80211_BAND_2GHZ]
 			 * to default value(1T1R) */
-			memcpy(&(rtlmac->bands[IEEE80211_BAND_2GHZ]),
+			memcpy(&(rtlmac->bands[NL80211_BAND_2GHZ]),
 			       &rtl_band_2ghz,
 			       sizeof(struct ieee80211_supported_band));
 
@@ -371,14 +370,14 @@ static void _rtl_init_mac80211(struct ieee80211_hw *hw)
 			_rtl_init_hw_ht_capab(hw, &sband->ht_cap);
 
 			/* <4> set mac->sband to wiphy->sband */
-			hw->wiphy->bands[IEEE80211_BAND_2GHZ] = sband;
+			hw->wiphy->bands[NL80211_BAND_2GHZ] = sband;
 		} else if (rtlhal->current_bandtype == BAND_ON_5G) {
 			/* <1> use  mac->bands as mem for hw->wiphy->bands */
-			sband = &(rtlmac->bands[IEEE80211_BAND_5GHZ]);
+			sband = &(rtlmac->bands[NL80211_BAND_5GHZ]);
 
-			/* <2> set hw->wiphy->bands[IEEE80211_BAND_5GHZ]
+			/* <2> set hw->wiphy->bands[NL80211_BAND_5GHZ]
 			 * to default value(1T1R) */
-			memcpy(&(rtlmac->bands[IEEE80211_BAND_5GHZ]),
+			memcpy(&(rtlmac->bands[NL80211_BAND_5GHZ]),
 			       &rtl_band_5ghz,
 			       sizeof(struct ieee80211_supported_band));
 
@@ -387,10 +386,10 @@ static void _rtl_init_mac80211(struct ieee80211_hw *hw)
 
 			_rtl_init_hw_vht_capab(hw, &sband->vht_cap);
 			/* <4> set mac->sband to wiphy->sband */
-			hw->wiphy->bands[IEEE80211_BAND_5GHZ] = sband;
+			hw->wiphy->bands[NL80211_BAND_5GHZ] = sband;
 		} else {
-			RT_TRACE(rtlpriv, COMP_INIT, DBG_EMERG, "Err BAND %d\n",
-				 rtlhal->current_bandtype);
+			pr_err("Err BAND %d\n",
+			       rtlhal->current_bandtype);
 		}
 	}
 	/* <5> set hw caps */
@@ -476,6 +475,8 @@ static void _rtl_init_deferred_work(struct ieee80211_hw *hw)
 			  (void *)rtl_swlps_rfon_wq_callback);
 	INIT_DELAYED_WORK(&rtlpriv->works.fwevt_wq,
 			  (void *)rtl_fwevt_wq_callback);
+	INIT_DELAYED_WORK(&rtlpriv->works.c2hcmd_wq,
+			  (void *)rtl_c2hcmd_wq_callback);
 
 }
 
@@ -490,6 +491,7 @@ void rtl_deinit_deferred_work(struct ieee80211_hw *hw)
 	cancel_delayed_work(&rtlpriv->works.ps_work);
 	cancel_delayed_work(&rtlpriv->works.ps_rfon_wq);
 	cancel_delayed_work(&rtlpriv->works.fwevt_wq);
+	cancel_delayed_work(&rtlpriv->works.c2hcmd_wq);
 }
 EXPORT_SYMBOL_GPL(rtl_deinit_deferred_work);
 
@@ -544,7 +546,7 @@ int rtl_init_core(struct ieee80211_hw *hw)
 	 * mac80211 hw  in _rtl_init_mac80211.
 	 */
 	if (rtl_regd_init(hw, rtl_reg_notifier)) {
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG, "REGD init failed\n");
+		pr_err("REGD init failed\n");
 		return 1;
 	}
 
@@ -557,6 +559,7 @@ int rtl_init_core(struct ieee80211_hw *hw)
 	spin_lock_init(&rtlpriv->locks.rf_lock);
 	spin_lock_init(&rtlpriv->locks.waitq_lock);
 	spin_lock_init(&rtlpriv->locks.entry_list_lock);
+	spin_lock_init(&rtlpriv->locks.c2hcmd_lock);
 	spin_lock_init(&rtlpriv->locks.cck_and_rw_pagea_lock);
 	spin_lock_init(&rtlpriv->locks.check_sendpkt_lock);
 	spin_lock_init(&rtlpriv->locks.fw_ps_lock);
@@ -564,6 +567,7 @@ int rtl_init_core(struct ieee80211_hw *hw)
 	spin_lock_init(&rtlpriv->locks.iqk_lock);
 	/* <5> init list */
 	INIT_LIST_HEAD(&rtlpriv->entry_list);
+	INIT_LIST_HEAD(&rtlpriv->c2hcmd_list);
 
 	rtlmac->link_state = MAC80211_NOLINK;
 
@@ -576,6 +580,7 @@ EXPORT_SYMBOL_GPL(rtl_init_core);
 
 void rtl_deinit_core(struct ieee80211_hw *hw)
 {
+	rtl_c2hcmd_launcher(hw, 0);
 }
 EXPORT_SYMBOL_GPL(rtl_deinit_core);
 
@@ -861,7 +866,7 @@ static u8 _rtl_get_highest_n_rate(struct ieee80211_hw *hw,
 
 /* mac80211's rate_idx is like this:
  *
- * 2.4G band:rx_status->band == IEEE80211_BAND_2GHZ
+ * 2.4G band:rx_status->band == NL80211_BAND_2GHZ
  *
  * B/G rate:
  * (rx_status->flag & RX_FLAG_HT) = 0,
@@ -871,7 +876,7 @@ static u8 _rtl_get_highest_n_rate(struct ieee80211_hw *hw,
  * (rx_status->flag & RX_FLAG_HT) = 1,
  * DESC_RATEMCS0-->DESC_RATEMCS15 ==> idx is 0-->15
  *
- * 5G band:rx_status->band == IEEE80211_BAND_5GHZ
+ * 5G band:rx_status->band == NL80211_BAND_5GHZ
  * A rate:
  * (rx_status->flag & RX_FLAG_HT) = 0,
  * DESC_RATE6M-->DESC_RATE54M ==> idx is 0-->7,
@@ -958,7 +963,7 @@ int rtlwifi_rate_mapping(struct ieee80211_hw *hw, bool isht, bool isvht,
 		return rate_idx;
 	}
 	if (false == isht) {
-		if (IEEE80211_BAND_2GHZ == hw->conf.chandef.chan->band) {
+		if (NL80211_BAND_2GHZ == hw->conf.chandef.chan->band) {
 			switch (desc_rate) {
 			case DESC_RATE1M:
 				rate_idx = 0;
@@ -1694,8 +1699,7 @@ void rtl_watchdog_wq_callback(void *data)
 			 * we should reconnect this AP
 			 */
 			if (rtlpriv->link_info.roam_times >= 5) {
-				RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-					 "AP off, try to reconnect now\n");
+				pr_err("AP off, try to reconnect now\n");
 				rtlpriv->link_info.roam_times = 0;
 				ieee80211_connection_loss(
 					rtlpriv->mac80211.vif);
@@ -1731,6 +1735,95 @@ void rtl_fwevt_wq_callback(void *data)
 
 	rtlpriv->cfg->ops->c2h_command_handle(hw);
 }
+
+void rtl_c2hcmd_enqueue(struct ieee80211_hw *hw, u8 tag, u8 len, u8 *val)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	unsigned long flags;
+	struct rtl_c2hcmd *c2hcmd;
+
+	c2hcmd = kmalloc(sizeof(*c2hcmd),
+			 in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
+
+	if (!c2hcmd)
+		goto label_err;
+
+	c2hcmd->val = kmalloc(len,
+			      in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
+
+	if (!c2hcmd->val)
+		goto label_err2;
+
+	/* fill data */
+	c2hcmd->tag = tag;
+	c2hcmd->len = len;
+	memcpy(c2hcmd->val, val, len);
+
+	/* enqueue */
+	spin_lock_irqsave(&rtlpriv->locks.c2hcmd_lock, flags);
+
+	list_add_tail(&c2hcmd->list, &rtlpriv->c2hcmd_list);
+
+	spin_unlock_irqrestore(&rtlpriv->locks.c2hcmd_lock, flags);
+
+	/* wake up wq */
+	queue_delayed_work(rtlpriv->works.rtl_wq, &rtlpriv->works.c2hcmd_wq, 0);
+
+	return;
+
+label_err2:
+	kfree(c2hcmd);
+
+label_err:
+	RT_TRACE(rtlpriv, COMP_CMD, DBG_WARNING,
+		 "C2H cmd enqueue fail.\n");
+}
+EXPORT_SYMBOL(rtl_c2hcmd_enqueue);
+
+void rtl_c2hcmd_launcher(struct ieee80211_hw *hw, int exec)
+{
+	struct rtl_priv *rtlpriv = rtl_priv(hw);
+	unsigned long flags;
+	struct rtl_c2hcmd *c2hcmd;
+	int i;
+
+	for (i = 0; i < 200; i++) {
+		/* dequeue a task */
+		spin_lock_irqsave(&rtlpriv->locks.c2hcmd_lock, flags);
+
+		c2hcmd = list_first_entry_or_null(&rtlpriv->c2hcmd_list,
+						  struct rtl_c2hcmd, list);
+
+		if (c2hcmd)
+			list_del(&c2hcmd->list);
+
+		spin_unlock_irqrestore(&rtlpriv->locks.c2hcmd_lock, flags);
+
+		/* do it */
+		if (!c2hcmd)
+			break;
+
+		if (rtlpriv->cfg->ops->c2h_content_parsing && exec)
+			rtlpriv->cfg->ops->c2h_content_parsing(hw,
+					c2hcmd->tag, c2hcmd->len, c2hcmd->val);
+
+		/* free */
+		kfree(c2hcmd->val);
+
+		kfree(c2hcmd);
+	}
+}
+
+void rtl_c2hcmd_wq_callback(void *data)
+{
+	struct rtl_works *rtlworks = container_of_dwork_rtl(data,
+							    struct rtl_works,
+							    c2hcmd_wq);
+	struct ieee80211_hw *hw = rtlworks->hw;
+
+	rtl_c2hcmd_launcher(hw, 1);
+}
+
 void rtl_easy_concurrent_retrytimer_callback(unsigned long data)
 {
 	struct ieee80211_hw *hw = (struct ieee80211_hw *)data;
@@ -1886,8 +1979,7 @@ void rtl_phy_scan_operation_backup(struct ieee80211_hw *hw, u8 operation)
 						      (u8 *)&iotype);
 			break;
 		default:
-			RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-				 "Unknown Scan Backup operation.\n");
+			pr_err("Unknown Scan Backup operation.\n");
 			break;
 		}
 	}
@@ -2085,65 +2177,6 @@ void rtl_recognize_peer(struct ieee80211_hw *hw, u8 *data, unsigned int len)
 	mac->vendor = vendor;
 }
 EXPORT_SYMBOL_GPL(rtl_recognize_peer);
-
-/*********************************************************
- *
- * sysfs functions
- *
- *********************************************************/
-static ssize_t rtl_show_debug_level(struct device *d,
-				    struct device_attribute *attr, char *buf)
-{
-	struct ieee80211_hw *hw = dev_get_drvdata(d);
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
-
-	return sprintf(buf, "0x%08X\n", rtlpriv->dbg.global_debuglevel);
-}
-
-static ssize_t rtl_store_debug_level(struct device *d,
-				     struct device_attribute *attr,
-				     const char *buf, size_t count)
-{
-	struct ieee80211_hw *hw = dev_get_drvdata(d);
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	unsigned long val;
-	int ret;
-
-	ret = kstrtoul(buf, 0, &val);
-	if (ret) {
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_DMESG,
-			 "%s is not in hex or decimal form.\n", buf);
-	} else {
-		rtlpriv->dbg.global_debuglevel = val;
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_DMESG,
-			 "debuglevel:%x\n",
-			 rtlpriv->dbg.global_debuglevel);
-	}
-
-	return strnlen(buf, count);
-}
-
-static DEVICE_ATTR(debug_level, S_IWUSR | S_IRUGO,
-		   rtl_show_debug_level, rtl_store_debug_level);
-
-static struct attribute *rtl_sysfs_entries[] = {
-
-	&dev_attr_debug_level.attr,
-
-	NULL
-};
-
-/*
- * "name" is folder name witch will be
- * put in device directory like :
- * sys/devices/pci0000:00/0000:00:1c.4/
- * 0000:06:00.0/rtl_sysfs
- */
-struct attribute_group rtl_attribute_group = {
-	.name = "rtlsysfs",
-	.attrs = rtl_sysfs_entries,
-};
-EXPORT_SYMBOL_GPL(rtl_attribute_group);
 
 MODULE_AUTHOR("lizhaoming	<chaoming_li@realsil.com.cn>");
 MODULE_AUTHOR("Realtek WlanFAE	<wlanfae@realtek.com>");

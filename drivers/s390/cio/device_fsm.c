@@ -44,7 +44,7 @@ static void ccw_timeout_log(struct ccw_device *cdev)
 	sch = to_subchannel(cdev->dev.parent);
 	private = to_io_private(sch);
 	orb = &private->orb;
-	cc = stsch_err(sch->schid, &schib);
+	cc = stsch(sch->schid, &schib);
 
 	printk(KERN_WARNING "cio: ccw device timeout occurred at %llx, "
 	       "device information:\n", get_tod_clock());
@@ -1056,12 +1056,6 @@ fsm_func_t *dev_jumptable[NR_DEV_STATES][NR_DEV_EVENTS] = {
 		[DEV_EVENT_NOTOPER]	= ccw_device_nop,
 		[DEV_EVENT_INTERRUPT]	= ccw_device_disabled_irq,
 		[DEV_EVENT_TIMEOUT]	= ccw_device_nop,
-		[DEV_EVENT_VERIFY]	= ccw_device_nop,
-	},
-	[DEV_STATE_SENSE_PGID] = {
-		[DEV_EVENT_NOTOPER]	= ccw_device_request_event,
-		[DEV_EVENT_INTERRUPT]	= ccw_device_request_event,
-		[DEV_EVENT_TIMEOUT]	= ccw_device_request_event,
 		[DEV_EVENT_VERIFY]	= ccw_device_nop,
 	},
 	[DEV_STATE_SENSE_ID] = {

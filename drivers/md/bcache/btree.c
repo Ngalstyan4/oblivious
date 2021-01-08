@@ -27,12 +27,14 @@
 
 #include <linux/slab.h>
 #include <linux/bitops.h>
-#include <linux/freezer.h>
 #include <linux/hash.h>
 #include <linux/kthread.h>
 #include <linux/prefetch.h>
 #include <linux/random.h>
 #include <linux/rcupdate.h>
+#include <linux/sched/clock.h>
+#include <linux/rculist.h>
+
 #include <trace/events/bcache.h>
 
 /*
@@ -295,10 +297,10 @@ static void bch_btree_node_read(struct btree *b)
 	closure_init_stack(&cl);
 
 	bio = bch_bbio_alloc(b->c);
-	bio->bi_rw	= REQ_META|READ_SYNC;
 	bio->bi_iter.bi_size = KEY_SIZE(&b->key) << 9;
 	bio->bi_end_io	= btree_node_read_endio;
 	bio->bi_private	= &cl;
+	bio->bi_opf = REQ_OP_READ | REQ_META;
 
 	bch_bio_map(bio, b->keys.set[0].data);
 
@@ -362,12 +364,8 @@ static void __btree_node_write_done(struct closure *cl)
 static void btree_node_write_done(struct closure *cl)
 {
 	struct btree *b = container_of(cl, struct btree, io);
-	struct bio_vec *bv;
-	int n;
 
-	bio_for_each_segment_all(bv, b->bio, n)
-		__free_page(bv->bv_page);
-
+	bio_free_pages(b->bio);
 	__btree_node_write_done(cl);
 }
 
@@ -397,8 +395,8 @@ static void do_btree_node_write(struct btree *b)
 
 	b->bio->bi_end_io	= btree_node_write_endio;
 	b->bio->bi_private	= cl;
-	b->bio->bi_rw		= REQ_META|WRITE_SYNC|REQ_FUA;
 	b->bio->bi_iter.bi_size	= roundup(set_bytes(i), block_bytes(b->c));
+	b->bio->bi_opf		= REQ_OP_WRITE | REQ_META | REQ_FUA;
 	bch_bio_map(b->bio, i);
 
 	/*
@@ -808,10 +806,7 @@ int bch_btree_cache_alloc(struct cache_set *c)
 	c->shrink.scan_objects = bch_mca_scan;
 	c->shrink.seeks = 4;
 	c->shrink.batch = c->btree_pages * 2;
-
-	if (register_shrinker(&c->shrink))
-		pr_warn("bcache: %s: could not register shrinker",
-				__func__);
+	register_shrinker(&c->shrink);
 
 	return 0;
 }

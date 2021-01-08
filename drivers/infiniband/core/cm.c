@@ -57,6 +57,54 @@ MODULE_AUTHOR("Sean Hefty");
 MODULE_DESCRIPTION("InfiniBand CM");
 MODULE_LICENSE("Dual BSD/GPL");
 
+static const char * const ibcm_rej_reason_strs[] = {
+	[IB_CM_REJ_NO_QP]			= "no QP",
+	[IB_CM_REJ_NO_EEC]			= "no EEC",
+	[IB_CM_REJ_NO_RESOURCES]		= "no resources",
+	[IB_CM_REJ_TIMEOUT]			= "timeout",
+	[IB_CM_REJ_UNSUPPORTED]			= "unsupported",
+	[IB_CM_REJ_INVALID_COMM_ID]		= "invalid comm ID",
+	[IB_CM_REJ_INVALID_COMM_INSTANCE]	= "invalid comm instance",
+	[IB_CM_REJ_INVALID_SERVICE_ID]		= "invalid service ID",
+	[IB_CM_REJ_INVALID_TRANSPORT_TYPE]	= "invalid transport type",
+	[IB_CM_REJ_STALE_CONN]			= "stale conn",
+	[IB_CM_REJ_RDC_NOT_EXIST]		= "RDC not exist",
+	[IB_CM_REJ_INVALID_GID]			= "invalid GID",
+	[IB_CM_REJ_INVALID_LID]			= "invalid LID",
+	[IB_CM_REJ_INVALID_SL]			= "invalid SL",
+	[IB_CM_REJ_INVALID_TRAFFIC_CLASS]	= "invalid traffic class",
+	[IB_CM_REJ_INVALID_HOP_LIMIT]		= "invalid hop limit",
+	[IB_CM_REJ_INVALID_PACKET_RATE]		= "invalid packet rate",
+	[IB_CM_REJ_INVALID_ALT_GID]		= "invalid alt GID",
+	[IB_CM_REJ_INVALID_ALT_LID]		= "invalid alt LID",
+	[IB_CM_REJ_INVALID_ALT_SL]		= "invalid alt SL",
+	[IB_CM_REJ_INVALID_ALT_TRAFFIC_CLASS]	= "invalid alt traffic class",
+	[IB_CM_REJ_INVALID_ALT_HOP_LIMIT]	= "invalid alt hop limit",
+	[IB_CM_REJ_INVALID_ALT_PACKET_RATE]	= "invalid alt packet rate",
+	[IB_CM_REJ_PORT_CM_REDIRECT]		= "port CM redirect",
+	[IB_CM_REJ_PORT_REDIRECT]		= "port redirect",
+	[IB_CM_REJ_INVALID_MTU]			= "invalid MTU",
+	[IB_CM_REJ_INSUFFICIENT_RESP_RESOURCES]	= "insufficient resp resources",
+	[IB_CM_REJ_CONSUMER_DEFINED]		= "consumer defined",
+	[IB_CM_REJ_INVALID_RNR_RETRY]		= "invalid RNR retry",
+	[IB_CM_REJ_DUPLICATE_LOCAL_COMM_ID]	= "duplicate local comm ID",
+	[IB_CM_REJ_INVALID_CLASS_VERSION]	= "invalid class version",
+	[IB_CM_REJ_INVALID_FLOW_LABEL]		= "invalid flow label",
+	[IB_CM_REJ_INVALID_ALT_FLOW_LABEL]	= "invalid alt flow label",
+};
+
+const char *__attribute_const__ ibcm_reject_msg(int reason)
+{
+	size_t index = reason;
+
+	if (index < ARRAY_SIZE(ibcm_rej_reason_strs) &&
+	    ibcm_rej_reason_strs[index])
+		return ibcm_rej_reason_strs[index];
+	else
+		return "unrecognized reason";
+}
+EXPORT_SYMBOL(ibcm_reject_msg);
+
 static void cm_add_one(struct ib_device *device);
 static void cm_remove_one(struct ib_device *device, void *client_data);
 
@@ -405,7 +453,7 @@ static int cm_init_av_by_path(struct ib_sa_path_rec *path, struct cm_av *av,
 	read_lock_irqsave(&cm.device_lock, flags);
 	list_for_each_entry(cm_dev, &cm.device_list, list) {
 		if (!ib_find_cached_gid(cm_dev->ib_device, &path->sgid,
-					ndev, &p, NULL)) {
+					path->gid_type, ndev, &p, NULL)) {
 			port = cm_dev->port[p-1];
 			break;
 		}
@@ -1582,6 +1630,7 @@ static struct cm_id_private * cm_match_req(struct cm_work *work,
 	struct cm_id_private *listen_cm_id_priv, *cur_cm_id_priv;
 	struct cm_timewait_info *timewait_info;
 	struct cm_req_msg *req_msg;
+	struct ib_cm_id *cm_id;
 
 	req_msg = (struct cm_req_msg *)work->mad_recv_wc->recv_buf.mad;
 
@@ -1603,10 +1652,18 @@ static struct cm_id_private * cm_match_req(struct cm_work *work,
 	timewait_info = cm_insert_remote_qpn(cm_id_priv->timewait_info);
 	if (timewait_info) {
 		cm_cleanup_timewait(cm_id_priv->timewait_info);
+		cur_cm_id_priv = cm_get_id(timewait_info->work.local_id,
+					   timewait_info->work.remote_id);
+
 		spin_unlock_irq(&cm.lock);
 		cm_issue_rej(work->port, work->mad_recv_wc,
 			     IB_CM_REJ_STALE_CONN, CM_MSG_RESPONSE_REQ,
 			     NULL, 0);
+		if (cur_cm_id_priv) {
+			cm_id = &cur_cm_id_priv->id;
+			ib_send_cm_dreq(cm_id, NULL, 0);
+			cm_deref_id(cur_cm_id_priv);
+		}
 		return NULL;
 	}
 
@@ -1663,6 +1720,8 @@ static int cm_req_handler(struct cm_work *work)
 	struct ib_cm_id *cm_id;
 	struct cm_id_private *cm_id_priv, *listen_cm_id_priv;
 	struct cm_req_msg *req_msg;
+	union ib_gid gid;
+	struct ib_gid_attr gid_attr;
 	int ret;
 
 	req_msg = (struct cm_req_msg *)work->mad_recv_wc->recv_buf.mad;
@@ -1702,12 +1761,32 @@ static int cm_req_handler(struct cm_work *work)
 	cm_format_paths_from_req(req_msg, &work->path[0], &work->path[1]);
 
 	memcpy(work->path[0].dmac, cm_id_priv->av.ah_attr.dmac, ETH_ALEN);
-	ret = cm_init_av_by_path(&work->path[0], &cm_id_priv->av,
-				 cm_id_priv);
+	work->path[0].hop_limit = cm_id_priv->av.ah_attr.grh.hop_limit;
+	ret = ib_get_cached_gid(work->port->cm_dev->ib_device,
+				work->port->port_num,
+				cm_id_priv->av.ah_attr.grh.sgid_index,
+				&gid, &gid_attr);
+	if (!ret) {
+		if (gid_attr.ndev) {
+			work->path[0].ifindex = gid_attr.ndev->ifindex;
+			work->path[0].net = dev_net(gid_attr.ndev);
+			dev_put(gid_attr.ndev);
+		}
+		work->path[0].gid_type = gid_attr.gid_type;
+		ret = cm_init_av_by_path(&work->path[0], &cm_id_priv->av,
+					 cm_id_priv);
+	}
 	if (ret) {
-		ib_get_cached_gid(work->port->cm_dev->ib_device,
-				  work->port->port_num, 0, &work->path[0].sgid,
-				  NULL);
+		int err = ib_get_cached_gid(work->port->cm_dev->ib_device,
+					    work->port->port_num, 0,
+					    &work->path[0].sgid,
+					    &gid_attr);
+		if (!err && gid_attr.ndev) {
+			work->path[0].ifindex = gid_attr.ndev->ifindex;
+			work->path[0].net = dev_net(gid_attr.ndev);
+			dev_put(gid_attr.ndev);
+		}
+		work->path[0].gid_type = gid_attr.gid_type;
 		ib_send_cm_rej(cm_id, IB_CM_REJ_INVALID_GID,
 			       &work->path[0].sgid, sizeof work->path[0].sgid,
 			       NULL, 0);
@@ -1962,6 +2041,9 @@ static int cm_rep_handler(struct cm_work *work)
 	struct cm_id_private *cm_id_priv;
 	struct cm_rep_msg *rep_msg;
 	int ret;
+	struct cm_id_private *cur_cm_id_priv;
+	struct ib_cm_id *cm_id;
+	struct cm_timewait_info *timewait_info;
 
 	rep_msg = (struct cm_rep_msg *)work->mad_recv_wc->recv_buf.mad;
 	cm_id_priv = cm_acquire_id(rep_msg->remote_comm_id, 0);
@@ -1996,16 +2078,26 @@ static int cm_rep_handler(struct cm_work *work)
 		goto error;
 	}
 	/* Check for a stale connection. */
-	if (cm_insert_remote_qpn(cm_id_priv->timewait_info)) {
+	timewait_info = cm_insert_remote_qpn(cm_id_priv->timewait_info);
+	if (timewait_info) {
 		rb_erase(&cm_id_priv->timewait_info->remote_id_node,
 			 &cm.remote_id_table);
 		cm_id_priv->timewait_info->inserted_remote_id = 0;
+		cur_cm_id_priv = cm_get_id(timewait_info->work.local_id,
+					   timewait_info->work.remote_id);
+
 		spin_unlock(&cm.lock);
 		spin_unlock_irq(&cm_id_priv->lock);
 		cm_issue_rej(work->port, work->mad_recv_wc,
 			     IB_CM_REJ_STALE_CONN, CM_MSG_RESPONSE_REP,
 			     NULL, 0);
 		ret = -EINVAL;
+		if (cur_cm_id_priv) {
+			cm_id = &cur_cm_id_priv->id;
+			ib_send_cm_dreq(cm_id, NULL, 0);
+			cm_deref_id(cur_cm_id_priv);
+		}
+
 		goto error;
 	}
 	spin_unlock(&cm.lock);
@@ -3317,6 +3409,8 @@ static void cm_process_send_error(struct ib_mad_send_buf *msg,
 	if (msg != cm_id_priv->msg || state != cm_id_priv->id.state)
 		goto discard;
 
+	pr_debug_ratelimited("CM: failed sending MAD in state %d. (%s)\n",
+			     state, ib_wc_status_msg(wc_status));
 	switch (state) {
 	case IB_CM_REQ_SENT:
 	case IB_CM_MRA_REQ_RCVD:
@@ -3558,6 +3652,7 @@ int ib_cm_notify(struct ib_cm_id *cm_id, enum ib_event_type event)
 EXPORT_SYMBOL(ib_cm_notify);
 
 static void cm_recv_handler(struct ib_mad_agent *mad_agent,
+			    struct ib_mad_send_buf *send_buf,
 			    struct ib_mad_recv_wc *mad_recv_wc)
 {
 	struct cm_port *port = mad_agent->context;
@@ -3807,16 +3902,6 @@ int ib_cm_init_qp_attr(struct ib_cm_id *cm_id,
 }
 EXPORT_SYMBOL(ib_cm_init_qp_attr);
 
-static void cm_get_ack_delay(struct cm_device *cm_dev)
-{
-	struct ib_device_attr attr;
-
-	if (ib_query_device(cm_dev->ib_device, &attr))
-		cm_dev->ack_delay = 0; /* acks will rely on packet life time */
-	else
-		cm_dev->ack_delay = attr.local_ca_ack_delay;
-}
-
 static ssize_t cm_show_counter(struct kobject *obj, struct attribute *attr,
 			       char *buf)
 {
@@ -3928,7 +4013,7 @@ static void cm_add_one(struct ib_device *ib_device)
 		return;
 
 	cm_dev->ib_device = ib_device;
-	cm_get_ack_delay(cm_dev);
+	cm_dev->ack_delay = ib_device->attrs.local_ca_ack_delay;
 	cm_dev->going_down = 0;
 	cm_dev->device = device_create(&cm_class, &ib_device->dev,
 				       MKDEV(0, 0), NULL,

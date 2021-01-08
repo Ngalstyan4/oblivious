@@ -266,6 +266,39 @@ static const struct clockgen_muxinfo ls1043a_hwa2 = {
 	},
 };
 
+static const struct clockgen_muxinfo ls1046a_hwa1 = {
+	{
+		{},
+		{},
+		{ CLKSEL_VALID, CGA_PLL1, PLL_DIV2 },
+		{ CLKSEL_VALID, CGA_PLL1, PLL_DIV3 },
+		{ CLKSEL_VALID, CGA_PLL1, PLL_DIV4 },
+		{ CLKSEL_VALID, PLATFORM_PLL, PLL_DIV1 },
+		{ CLKSEL_VALID, CGA_PLL2, PLL_DIV2 },
+		{ CLKSEL_VALID, CGA_PLL2, PLL_DIV3 },
+	},
+};
+
+static const struct clockgen_muxinfo ls1046a_hwa2 = {
+	{
+		{},
+		{ CLKSEL_VALID, CGA_PLL2, PLL_DIV1 },
+		{ CLKSEL_VALID, CGA_PLL2, PLL_DIV2 },
+		{ CLKSEL_VALID, CGA_PLL2, PLL_DIV3 },
+		{},
+		{},
+		{ CLKSEL_VALID, CGA_PLL1, PLL_DIV2 },
+	},
+};
+
+static const struct clockgen_muxinfo ls1012a_cmux = {
+	{
+		[0] = { CLKSEL_VALID, CGA_PLL1, PLL_DIV1 },
+		{},
+		[2] = { CLKSEL_VALID, CGA_PLL1, PLL_DIV2 },
+	}
+};
+
 static const struct clockgen_muxinfo t1023_hwa1 = {
 	{
 		{},
@@ -487,6 +520,31 @@ static const struct clockgen_chipinfo chipinfo[] = {
 		},
 		.pll_mask = 0x07,
 		.flags = CG_PLL_8BIT,
+	},
+	{
+		.compat = "fsl,ls1046a-clockgen",
+		.init_periph = t2080_init_periph,
+		.cmux_groups = {
+			&t1040_cmux
+		},
+		.hwaccel = {
+			&ls1046a_hwa1, &ls1046a_hwa2
+		},
+		.cmux_to_group = {
+			0, -1
+		},
+		.pll_mask = 0x07,
+		.flags = CG_PLL_8BIT,
+	},
+	{
+		.compat = "fsl,ls1012a-clockgen",
+		.cmux_groups = {
+			&ls1012a_cmux
+		},
+		.cmux_to_group = {
+			0, -1
+		},
+		.pll_mask = 0x03,
 	},
 	{
 		.compat = "fsl,ls2080a-clockgen",
@@ -876,14 +934,15 @@ static void __init core_mux_init(struct device_node *np)
 	}
 }
 
-static struct clk *sysclk_from_fixed(struct device_node *node, const char *name)
+static struct clk __init
+*sysclk_from_fixed(struct device_node *node, const char *name)
 {
 	u32 rate;
 
 	if (of_property_read_u32(node, "clock-frequency", &rate))
 		return ERR_PTR(-ENODEV);
 
-	return clk_register_fixed_rate(NULL, name, NULL, CLK_IS_ROOT, rate);
+	return clk_register_fixed_rate(NULL, name, NULL, 0, rate);
 }
 
 static struct clk *sysclk_from_parent(const char *name)
@@ -1272,8 +1331,10 @@ err:
 
 CLK_OF_DECLARE(qoriq_clockgen_1, "fsl,qoriq-clockgen-1.0", clockgen_init);
 CLK_OF_DECLARE(qoriq_clockgen_2, "fsl,qoriq-clockgen-2.0", clockgen_init);
+CLK_OF_DECLARE(qoriq_clockgen_ls1012a, "fsl,ls1012a-clockgen", clockgen_init);
 CLK_OF_DECLARE(qoriq_clockgen_ls1021a, "fsl,ls1021a-clockgen", clockgen_init);
 CLK_OF_DECLARE(qoriq_clockgen_ls1043a, "fsl,ls1043a-clockgen", clockgen_init);
+CLK_OF_DECLARE(qoriq_clockgen_ls1046a, "fsl,ls1046a-clockgen", clockgen_init);
 CLK_OF_DECLARE(qoriq_clockgen_ls2080a, "fsl,ls2080a-clockgen", clockgen_init);
 
 /* Legacy nodes */

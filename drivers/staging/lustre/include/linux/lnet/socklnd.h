@@ -60,7 +60,7 @@ typedef struct {
 } WIRE_ATTR ksock_hello_msg_t;
 
 typedef struct {
-	lnet_hdr_t	ksnm_hdr;	/* lnet hdr */
+	struct lnet_hdr	ksnm_hdr;	/* lnet hdr */
 
 	/*
 	 * ksnm_payload is removed because of winnt compiler's limitation:
@@ -80,19 +80,13 @@ typedef struct {
 	} WIRE_ATTR ksm_u;
 } WIRE_ATTR ksock_msg_t;
 
-static inline void
-socklnd_init_msg(ksock_msg_t *msg, int type)
-{
-	msg->ksm_csum = 0;
-	msg->ksm_type = type;
-	msg->ksm_zc_cookies[0] = msg->ksm_zc_cookies[1]  = 0;
-}
-
 #define KSOCK_MSG_NOOP	0xC0	/* ksm_u empty */
 #define KSOCK_MSG_LNET	0xC1	/* lnet msg */
 
-/* We need to know this number to parse hello msg from ksocklnd in
- * other LND (usocklnd, for example) */
+/*
+ * We need to know this number to parse hello msg from ksocklnd in
+ * other LND (usocklnd, for example)
+ */
 #define KSOCK_PROTO_V2	2
 #define KSOCK_PROTO_V3	3
 

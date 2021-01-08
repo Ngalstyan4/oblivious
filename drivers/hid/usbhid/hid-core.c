@@ -43,7 +43,6 @@
  */
 
 #define DRIVER_DESC "USB HID core driver"
-#define DRIVER_LICENSE "GPL"
 
 /*
  * Module parameters.
@@ -274,10 +273,10 @@ static void hid_irq_in(struct urb *urb)
 
 	switch (urb->status) {
 	case 0:			/* success */
-		usbhid_mark_busy(usbhid);
 		usbhid->retry_delay = 0;
 		if ((hid->quirks & HID_QUIRK_ALWAYS_POLL) && !hid->open)
 			break;
+		usbhid_mark_busy(usbhid);
 		if (!test_bit(HID_RESUME_RUNNING, &usbhid->iofl)) {
 			hid_input_report(urb->context, HID_INPUT_REPORT,
 					 urb->transfer_buffer,
@@ -971,8 +970,6 @@ static int usbhid_parse(struct hid_device *hid)
 	unsigned int rsize = 0;
 	char *rdesc;
 	int ret, n;
-	int num_descriptors;
-	size_t offset = offsetof(struct hid_descriptor, desc);
 
 	quirks = usbhid_lookup_quirk(le16_to_cpu(dev->descriptor.idVendor),
 			le16_to_cpu(dev->descriptor.idProduct));
@@ -995,18 +992,10 @@ static int usbhid_parse(struct hid_device *hid)
 		return -ENODEV;
 	}
 
-	if (hdesc->bLength < sizeof(struct hid_descriptor)) {
-		dbg_hid("hid descriptor is too short\n");
-		return -EINVAL;
-	}
-
 	hid->version = le16_to_cpu(hdesc->bcdHID);
 	hid->country = hdesc->bCountryCode;
 
-	num_descriptors = min_t(int, hdesc->bNumDescriptors,
-	       (hdesc->bLength - offset) / sizeof(struct hid_class_descriptor));
-
-	for (n = 0; n < num_descriptors; n++)
+	for (n = 0; n < hdesc->bNumDescriptors; n++)
 		if (hdesc->desc[n].bDescriptorType == HID_DT_REPORT)
 			rsize = le16_to_cpu(hdesc->desc[n].wDescriptorLength);
 
@@ -1469,7 +1458,7 @@ static int hid_post_reset(struct usb_interface *intf)
 	rdesc = kmalloc(hid->dev_rsize, GFP_KERNEL);
 	if (!rdesc) {
 		dbg_hid("couldn't allocate rdesc memory (post_reset)\n");
-		return 1;
+		return -ENOMEM;
 	}
 	status = hid_get_class_descriptor(dev,
 				interface->desc.bInterfaceNumber,
@@ -1477,13 +1466,13 @@ static int hid_post_reset(struct usb_interface *intf)
 	if (status < 0) {
 		dbg_hid("reading report descriptor failed (post_reset)\n");
 		kfree(rdesc);
-		return 1;
+		return status;
 	}
 	status = memcmp(rdesc, hid->dev_rdesc, hid->dev_rsize);
 	kfree(rdesc);
 	if (status != 0) {
 		dbg_hid("report descriptor changed\n");
-		return 1;
+		return -EPERM;
 	}
 
 	/* No need to do another reset or clear a halted endpoint */
@@ -1670,4 +1659,4 @@ MODULE_AUTHOR("Andreas Gal");
 MODULE_AUTHOR("Vojtech Pavlik");
 MODULE_AUTHOR("Jiri Kosina");
 MODULE_DESCRIPTION(DRIVER_DESC);
-MODULE_LICENSE(DRIVER_LICENSE);
+MODULE_LICENSE("GPL");

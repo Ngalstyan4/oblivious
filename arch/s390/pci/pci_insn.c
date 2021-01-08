@@ -7,7 +7,6 @@
 #include <linux/export.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
-#include <asm/facility.h>
 #include <asm/pci_insn.h>
 #include <asm/pci_debug.h>
 #include <asm/processor.h>
@@ -92,18 +91,15 @@ int zpci_refresh_trans(u64 fn, u64 addr, u64 range)
 }
 
 /* Set Interruption Controls */
-int zpci_set_irq_ctrl(u16 ctl, char *unused, u8 isc)
+void zpci_set_irq_ctrl(u16 ctl, char *unused, u8 isc)
 {
-	if (!test_facility(72))
-		return -EIO;
 	asm volatile (
 		"	.insn	rsy,0xeb00000000d1,%[ctl],%[isc],%[u]\n"
 		: : [ctl] "d" (ctl), [isc] "d" (isc << 27), [u] "Q" (*unused));
-	return 0;
 }
 
 /* PCI Load */
-static inline int __pcilg(u64 *data, u64 req, u64 offset, u8 *status)
+static inline int ____pcilg(u64 *data, u64 req, u64 offset, u8 *status)
 {
 	register u64 __req asm("2") = req;
 	register u64 __offset asm("3") = offset;
@@ -120,6 +116,16 @@ static inline int __pcilg(u64 *data, u64 req, u64 offset, u8 *status)
 		:  "d" (__offset)
 		: "cc");
 	*status = __req >> 24 & 0xff;
+	*data = __data;
+	return cc;
+}
+
+static inline int __pcilg(u64 *data, u64 req, u64 offset, u8 *status)
+{
+	u64 __data;
+	int cc;
+
+	cc = ____pcilg(&__data, req, offset, status);
 	if (!cc)
 		*data = __data;
 

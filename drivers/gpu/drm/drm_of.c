@@ -4,7 +4,13 @@
 #include <linux/of_graph.h>
 #include <drm/drmP.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_of.h>
+
+static void drm_release_of(struct device *dev, void *data)
+{
+	of_node_put(data);
+}
 
 /**
  * drm_crtc_port_mask - find the mask of a registered CRTC by port OF node
@@ -64,6 +70,24 @@ uint32_t drm_of_find_possible_crtcs(struct drm_device *dev,
 EXPORT_SYMBOL(drm_of_find_possible_crtcs);
 
 /**
+ * drm_of_component_match_add - Add a component helper OF node match rule
+ * @master: master device
+ * @matchptr: component match pointer
+ * @compare: compare function used for matching component
+ * @node: of_node
+ */
+void drm_of_component_match_add(struct device *master,
+				struct component_match **matchptr,
+				int (*compare)(struct device *, void *),
+				struct device_node *node)
+{
+	of_node_get(node);
+	component_match_add_release(master, matchptr, drm_release_of,
+				    compare, node);
+}
+EXPORT_SYMBOL_GPL(drm_of_component_match_add);
+
+/**
  * drm_of_component_probe - Generic probe function for a component based master
  * @dev: master device containing the OF node
  * @compare_of: compare function used for matching components
@@ -101,7 +125,7 @@ int drm_of_component_probe(struct device *dev,
 			continue;
 		}
 
-		component_match_add(dev, &match, compare_of, port);
+		drm_of_component_match_add(dev, &match, compare_of, port);
 		of_node_put(port);
 	}
 
@@ -140,7 +164,8 @@ int drm_of_component_probe(struct device *dev,
 				continue;
 			}
 
-			component_match_add(dev, &match, compare_of, remote);
+			drm_of_component_match_add(dev, &match, compare_of,
+						   remote);
 			of_node_put(remote);
 		}
 		of_node_put(port);
@@ -149,3 +174,37 @@ int drm_of_component_probe(struct device *dev,
 	return component_master_add_with_match(dev, m_ops, match);
 }
 EXPORT_SYMBOL(drm_of_component_probe);
+
+/*
+ * drm_of_encoder_active_endpoint - return the active encoder endpoint
+ * @node: device tree node containing encoder input ports
+ * @encoder: drm_encoder
+ *
+ * Given an encoder device node and a drm_encoder with a connected crtc,
+ * parse the encoder endpoint connecting to the crtc port.
+ */
+int drm_of_encoder_active_endpoint(struct device_node *node,
+				   struct drm_encoder *encoder,
+				   struct of_endpoint *endpoint)
+{
+	struct device_node *ep;
+	struct drm_crtc *crtc = encoder->crtc;
+	struct device_node *port;
+	int ret;
+
+	if (!node || !crtc)
+		return -EINVAL;
+
+	for_each_endpoint_of_node(node, ep) {
+		port = of_graph_get_remote_port(ep);
+		of_node_put(port);
+		if (port == crtc->port) {
+			ret = of_graph_parse_endpoint(ep, endpoint);
+			of_node_put(ep);
+			return ret;
+		}
+	}
+
+	return -EINVAL;
+}
+EXPORT_SYMBOL_GPL(drm_of_encoder_active_endpoint);

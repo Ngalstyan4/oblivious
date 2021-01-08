@@ -230,6 +230,7 @@ enum {
 	Opt_osdkeepalivetimeout,
 	Opt_mount_timeout,
 	Opt_osd_idle_ttl,
+	Opt_osd_request_timeout,
 	Opt_last_int,
 	/* int args above */
 	Opt_fsid,
@@ -256,6 +257,7 @@ static match_table_t opt_tokens = {
 	{Opt_osdkeepalivetimeout, "osdkeepalive=%d"},
 	{Opt_mount_timeout, "mount_timeout=%d"},
 	{Opt_osd_idle_ttl, "osd_idle_ttl=%d"},
+	{Opt_osd_request_timeout, "osd_request_timeout=%d"},
 	/* int args above */
 	{Opt_fsid, "fsid=%s"},
 	{Opt_name, "name=%s"},
@@ -361,7 +363,7 @@ ceph_parse_options(char *options, const char *dev_name,
 	opt->osd_keepalive_timeout = CEPH_OSD_KEEPALIVE_DEFAULT;
 	opt->mount_timeout = CEPH_MOUNT_TIMEOUT_DEFAULT;
 	opt->osd_idle_ttl = CEPH_OSD_IDLE_TTL_DEFAULT;
-	opt->monc_ping_timeout = CEPH_MONC_PING_TIMEOUT_DEFAULT;
+	opt->osd_request_timeout = CEPH_OSD_REQUEST_TIMEOUT_DEFAULT;
 
 	/* get mon ip(s) */
 	/* ip1[:port1][,ip2[:port2]...] */
@@ -474,6 +476,15 @@ ceph_parse_options(char *options, const char *dev_name,
 			}
 			opt->mount_timeout = msecs_to_jiffies(intval * 1000);
 			break;
+		case Opt_osd_request_timeout:
+			/* 0 is "wait forever" (i.e. infinite timeout) */
+			if (intval < 0 || intval > INT_MAX / 1000) {
+				pr_err("osd_request_timeout out of range\n");
+				err = -EINVAL;
+				goto out;
+			}
+			opt->osd_request_timeout = msecs_to_jiffies(intval * 1000);
+			break;
 
 		case Opt_share:
 			opt->flags &= ~CEPH_OPT_NOSHARE;
@@ -558,6 +569,9 @@ int ceph_print_client_options(struct seq_file *m, struct ceph_client *client)
 	if (opt->osd_keepalive_timeout != CEPH_OSD_KEEPALIVE_DEFAULT)
 		seq_printf(m, "osdkeepalivetimeout=%d,",
 		    jiffies_to_msecs(opt->osd_keepalive_timeout) / 1000);
+	if (opt->osd_request_timeout != CEPH_OSD_REQUEST_TIMEOUT_DEFAULT)
+		seq_printf(m, "osd_request_timeout=%d,",
+			   jiffies_to_msecs(opt->osd_request_timeout) / 1000);
 
 	/* drop redundant comma */
 	if (m->count != pos)
@@ -567,11 +581,17 @@ int ceph_print_client_options(struct seq_file *m, struct ceph_client *client)
 }
 EXPORT_SYMBOL(ceph_print_client_options);
 
-u64 ceph_client_id(struct ceph_client *client)
+struct ceph_entity_addr *ceph_client_addr(struct ceph_client *client)
+{
+	return &client->msgr.inst.addr;
+}
+EXPORT_SYMBOL(ceph_client_addr);
+
+u64 ceph_client_gid(struct ceph_client *client)
 {
 	return client->monc.auth->global_id;
 }
-EXPORT_SYMBOL(ceph_client_id);
+EXPORT_SYMBOL(ceph_client_gid);
 
 /*
  * create a fresh client instance
@@ -652,7 +672,7 @@ EXPORT_SYMBOL(ceph_destroy_client);
 /*
  * true if we have the mon map (and have thus joined the cluster)
  */
-static int have_mon_and_osd_map(struct ceph_client *client)
+static bool have_mon_and_osd_map(struct ceph_client *client)
 {
 	return client->monc.monmap && client->monc.monmap->epoch &&
 	       client->osdc.osdmap && client->osdc.osdmap->epoch;
@@ -685,6 +705,10 @@ int __ceph_open_session(struct ceph_client *client, unsigned long started)
 		if (client->auth_err < 0)
 			return client->auth_err;
 	}
+
+	pr_info("client%llu fsid %pU\n", ceph_client_gid(client),
+		&client->fsid);
+	ceph_debugfs_client_init(client);
 
 	return 0;
 }
@@ -745,6 +769,8 @@ out:
 static void __exit exit_ceph_lib(void)
 {
 	dout("exit_ceph_lib\n");
+	WARN_ON(!ceph_strings_empty());
+
 	ceph_osdc_cleanup();
 	ceph_msgr_exit();
 	ceph_crypto_shutdown();

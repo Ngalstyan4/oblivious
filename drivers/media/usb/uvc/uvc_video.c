@@ -694,22 +694,19 @@ void uvc_video_clock_update(struct uvc_streaming *stream,
 		ts.tv_nsec -= NSEC_PER_SEC;
 	}
 
-	uvc_trace(UVC_TRACE_CLOCK, "%s: SOF %u.%06llu y %llu ts %lu.%06lu "
-		  "buf ts %lu.%06lu (x1 %u/%u/%u x2 %u/%u/%u y1 %u y2 %u)\n",
+	uvc_trace(UVC_TRACE_CLOCK, "%s: SOF %u.%06llu y %llu ts %llu "
+		  "buf ts %llu (x1 %u/%u/%u x2 %u/%u/%u y1 %u y2 %u)\n",
 		  stream->dev->name,
 		  sof >> 16, div_u64(((u64)sof & 0xffff) * 1000000LLU, 65536),
-		  y, ts.tv_sec, ts.tv_nsec / NSEC_PER_USEC,
-		  vbuf->timestamp.tv_sec,
-		  (unsigned long)vbuf->timestamp.tv_usec,
+		  y, timespec_to_ns(&ts), vbuf->vb2_buf.timestamp,
 		  x1, first->host_sof, first->dev_sof,
 		  x2, last->host_sof, last->dev_sof, y1, y2);
 
 	/* Update the V4L2 buffer. */
-	vbuf->timestamp.tv_sec = ts.tv_sec;
-	vbuf->timestamp.tv_usec = ts.tv_nsec / NSEC_PER_USEC;
+	vbuf->vb2_buf.timestamp = timespec_to_ns(&ts);
 
 done:
-	spin_unlock_irqrestore(&stream->clock.lock, flags);
+	spin_unlock_irqrestore(&clock->lock, flags);
 }
 
 /* ------------------------------------------------------------------------
@@ -1034,9 +1031,7 @@ static int uvc_video_decode_start(struct uvc_streaming *stream,
 
 		buf->buf.field = V4L2_FIELD_NONE;
 		buf->buf.sequence = stream->sequence;
-		buf->buf.timestamp.tv_sec = ts.tv_sec;
-		buf->buf.timestamp.tv_usec =
-			ts.tv_nsec / NSEC_PER_USEC;
+		buf->buf.vb2_buf.timestamp = timespec_to_ns(&ts);
 
 		/* TODO: Handle PTS and SCR. */
 		buf->state = UVC_BUF_STATE_ACTIVE;
@@ -1267,8 +1262,7 @@ static void uvc_video_decode_bulk(struct urb *urb, struct uvc_streaming *stream,
 			uvc_video_decode_end(stream, buf, stream->bulk.header,
 				stream->bulk.payload_size);
 			if (buf->state == UVC_BUF_STATE_READY)
-				buf = uvc_queue_next_buffer(&stream->queue,
-							    buf);
+				uvc_queue_next_buffer(&stream->queue, buf);
 		}
 
 		stream->bulk.header_size = 0;
@@ -1472,13 +1466,16 @@ static unsigned int uvc_endpoint_max_bpi(struct usb_device *dev,
 					 struct usb_host_endpoint *ep)
 {
 	u16 psize;
+	u16 mult;
 
 	switch (dev->speed) {
 	case USB_SPEED_SUPER:
+	case USB_SPEED_SUPER_PLUS:
 		return le16_to_cpu(ep->ss_ep_comp.wBytesPerInterval);
 	case USB_SPEED_HIGH:
 		psize = usb_endpoint_maxp(&ep->desc);
-		return (psize & 0x07ff) * (1 + ((psize >> 11) & 3));
+		mult = usb_endpoint_maxp_mult(&ep->desc);
+		return (psize & 0x07ff) * mult;
 	case USB_SPEED_WIRELESS:
 		psize = usb_endpoint_maxp(&ep->desc);
 		return psize;
@@ -1555,7 +1552,7 @@ static int uvc_init_video_bulk(struct uvc_streaming *stream,
 	u16 psize;
 	u32 size;
 
-	psize = usb_endpoint_maxp(&ep->desc) & 0x7ff;
+	psize = usb_endpoint_maxp(&ep->desc);
 	size = stream->ctrl.dwMaxPayloadTransferSize;
 	stream->bulk.max_payload_size = size;
 

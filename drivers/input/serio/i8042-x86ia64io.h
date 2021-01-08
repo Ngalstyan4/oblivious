@@ -537,79 +537,7 @@ static const struct dmi_system_id i8042_dmi_noselftest_table[] = {
 	{
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "A455LD"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "K401LB"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "K501LB"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "K501LX"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "R409L"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "V502LX"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "X302LA"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "X450LCP"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "X450LD"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "X455LAB"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "X455LDB"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "X455LF"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "Z450LA"),
+			DMI_MATCH(DMI_CHASSIS_TYPE, "10"), /* Notebook */
 		},
 	},
 	{ }
@@ -795,13 +723,6 @@ static const struct dmi_system_id __initconst i8042_dmi_notimeout_table[] = {
 			DMI_MATCH(DMI_PRODUCT_NAME, "LIFEBOOK U574"),
 		},
 	},
-	{
-		/* Fujitsu UH554 laptop */
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "FUJITSU"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "LIFEBOOK UH544"),
-		},
-	},
 	{ }
 };
 
@@ -909,13 +830,6 @@ static const struct dmi_system_id __initconst i8042_dmi_kbdreset_table[] = {
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "GIGABYTE"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "P34"),
-		},
-	},
-	{
-		/* Gigabyte P57 - Elantech touchpad */
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "GIGABYTE"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "P57"),
 		},
 	},
 	{
@@ -1030,6 +944,10 @@ static struct pnp_driver i8042_pnp_kbd_driver = {
 	.name           = "i8042 kbd",
 	.id_table       = pnp_kbd_devids,
 	.probe          = i8042_pnp_kbd_probe,
+	.driver         = {
+		.probe_type = PROBE_FORCE_SYNCHRONOUS,
+		.suppress_bind_attrs = true,
+	},
 };
 
 static struct pnp_device_id pnp_aux_devids[] = {
@@ -1052,6 +970,10 @@ static struct pnp_driver i8042_pnp_aux_driver = {
 	.name           = "i8042 aux",
 	.id_table       = pnp_aux_devids,
 	.probe          = i8042_pnp_aux_probe,
+	.driver         = {
+		.probe_type = PROBE_FORCE_SYNCHRONOUS,
+		.suppress_bind_attrs = true,
+	},
 };
 
 static void i8042_pnp_exit(void)
@@ -1096,7 +1018,11 @@ static int __init i8042_pnp_init(void)
 #if defined(__ia64__)
 		return -ENODEV;
 #else
-		pr_info("PNP: No PS/2 controller found. Probing ports directly.\n");
+		pr_info("PNP: No PS/2 controller found.\n");
+		if (x86_platform.legacy.i8042 !=
+				X86_LEGACY_I8042_EXPECTED_PRESENT)
+			return -ENODEV;
+		pr_info("Probing ports directly.\n");
 		return 0;
 #endif
 	}
@@ -1172,10 +1098,10 @@ static int __init i8042_pnp_init(void)
 	return 0;
 }
 
-#else
+#else  /* !CONFIG_PNP */
 static inline int i8042_pnp_init(void) { return 0; }
 static inline void i8042_pnp_exit(void) { }
-#endif
+#endif /* CONFIG_PNP */
 
 static int __init i8042_platform_init(void)
 {
@@ -1183,8 +1109,8 @@ static int __init i8042_platform_init(void)
 
 #ifdef CONFIG_X86
 	u8 a20_on = 0xdf;
-	/* Just return if pre-detection shows no i8042 controller exist */
-	if (!x86_platform.i8042_detect())
+	/* Just return if platform does not have i8042 controller */
+	if (x86_platform.legacy.i8042 == X86_LEGACY_I8042_PLATFORM_ABSENT)
 		return -ENODEV;
 #endif
 

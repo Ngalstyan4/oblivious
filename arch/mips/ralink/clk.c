@@ -4,11 +4,12 @@
  *  by the Free Software Foundation.
  *
  *  Copyright (C) 2011 Gabor Juhos <juhosg@openwrt.org>
- *  Copyright (C) 2013 John Crispin <blogic@openwrt.org>
+ *  Copyright (C) 2013 John Crispin <john@phrozen.org>
  */
 
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/export.h>
 #include <linux/clkdev.h>
 #include <linux/clk.h>
 
@@ -61,6 +62,12 @@ int clk_set_rate(struct clk *clk, unsigned long rate)
 	return -1;
 }
 EXPORT_SYMBOL_GPL(clk_set_rate);
+
+long clk_round_rate(struct clk *clk, unsigned long rate)
+{
+	return -1;
+}
+EXPORT_SYMBOL_GPL(clk_round_rate);
 
 void __init plat_time_init(void)
 {

@@ -570,6 +570,15 @@ int snd_pcm_stop_xrun(struct snd_pcm_substream *substream);
 #ifdef CONFIG_PM
 int snd_pcm_suspend(struct snd_pcm_substream *substream);
 int snd_pcm_suspend_all(struct snd_pcm *pcm);
+#else
+static inline int snd_pcm_suspend(struct snd_pcm_substream *substream)
+{
+	return 0;
+}
+static inline int snd_pcm_suspend_all(struct snd_pcm *pcm)
+{
+	return 0;
+}
 #endif
 int snd_pcm_kernel_ioctl(struct snd_pcm_substream *substream, unsigned int cmd, void *arg);
 int snd_pcm_open_substream(struct snd_pcm *pcm, int stream, struct file *file,
@@ -1093,6 +1102,8 @@ unsigned int snd_pcm_rate_to_rate_bit(unsigned int rate);
 unsigned int snd_pcm_rate_bit_to_rate(unsigned int rate_bit);
 unsigned int snd_pcm_rate_mask_intersect(unsigned int rates_a,
 					 unsigned int rates_b);
+unsigned int snd_pcm_rate_range_to_bits(unsigned int rate_min,
+					unsigned int rate_max);
 
 /**
  * snd_pcm_set_runtime_buffer - Set the PCM runtime buffer

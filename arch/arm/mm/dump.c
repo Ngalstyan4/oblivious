@@ -18,6 +18,7 @@
 #include <linux/seq_file.h>
 
 #include <asm/fixmap.h>
+#include <asm/memory.h>
 #include <asm/pgtable.h>
 
 struct addr_marker {
@@ -31,8 +32,8 @@ static struct addr_marker address_markers[] = {
 	{ 0,			"vmalloc() Area" },
 	{ VMALLOC_END,		"vmalloc() End" },
 	{ FIXADDR_START,	"Fixmap Area" },
-	{ CONFIG_VECTORS_BASE,	"Vectors" },
-	{ CONFIG_VECTORS_BASE + PAGE_SIZE * 2, "Vectors End" },
+	{ VECTORS_BASE,	"Vectors" },
+	{ VECTORS_BASE + PAGE_SIZE * 2, "Vectors End" },
 	{ -1,			NULL },
 };
 
@@ -126,8 +127,8 @@ static const struct prot_bits section_bits[] = {
 		.val	= PMD_SECT_USER,
 		.set	= "USR",
 	}, {
-		.mask	= L_PMD_SECT_RDONLY | PMD_SECT_AP2,
-		.val	= L_PMD_SECT_RDONLY | PMD_SECT_AP2,
+		.mask	= L_PMD_SECT_RDONLY,
+		.val	= L_PMD_SECT_RDONLY,
 		.set	= "ro",
 		.clear	= "RW",
 #elif __LINUX_ARM_ARCH__ >= 6

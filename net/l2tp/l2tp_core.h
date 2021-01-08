@@ -23,16 +23,6 @@
 #define L2TP_HASH_BITS_2	8
 #define L2TP_HASH_SIZE_2	(1 << L2TP_HASH_BITS_2)
 
-/* Debug message categories for the DEBUG socket option */
-enum {
-	L2TP_MSG_DEBUG		= (1 << 0),	/* verbose debug (if
-						 * compiled in) */
-	L2TP_MSG_CONTROL	= (1 << 1),	/* userspace - kernel
-						 * interface */
-	L2TP_MSG_SEQ		= (1 << 2),	/* sequence numbers */
-	L2TP_MSG_DATA		= (1 << 3),	/* data packets */
-};
-
 struct sk_buff;
 
 struct l2tp_stats {
@@ -139,7 +129,7 @@ struct l2tp_session {
 	void (*session_close)(struct l2tp_session *session);
 	void (*ref)(struct l2tp_session *session);
 	void (*deref)(struct l2tp_session *session);
-#if defined(CONFIG_L2TP_DEBUGFS) || defined(CONFIG_L2TP_DEBUGFS_MODULE)
+#if IS_ENABLED(CONFIG_L2TP_DEBUGFS)
 	void (*show)(struct seq_file *m, void *priv);
 #endif
 	uint8_t			priv[0];	/* private data */
@@ -169,9 +159,6 @@ struct l2tp_tunnel_cfg {
 
 struct l2tp_tunnel {
 	int			magic;		/* Should be L2TP_TUNNEL_MAGIC */
-
-	unsigned long		dead;
-
 	struct rcu_head rcu;
 	rwlock_t		hlist_lock;	/* protect session_hlist */
 	struct hlist_head	session_hlist[L2TP_HASH_SIZE];
@@ -243,12 +230,16 @@ out:
 	return tunnel;
 }
 
+struct l2tp_session *l2tp_session_get(struct net *net,
+				      struct l2tp_tunnel *tunnel,
+				      u32 session_id, bool do_ref);
 struct l2tp_session *l2tp_session_find(struct net *net,
 				       struct l2tp_tunnel *tunnel,
 				       u32 session_id);
 struct l2tp_session *l2tp_session_get_nth(struct l2tp_tunnel *tunnel, int nth,
 					  bool do_ref);
-struct l2tp_session *l2tp_session_find_by_ifname(struct net *net, char *ifname);
+struct l2tp_session *l2tp_session_get_by_ifname(struct net *net, char *ifname,
+						bool do_ref);
 struct l2tp_tunnel *l2tp_tunnel_find(struct net *net, u32 tunnel_id);
 struct l2tp_tunnel *l2tp_tunnel_find_nth(struct net *net, int nth);
 
@@ -256,7 +247,7 @@ int l2tp_tunnel_create(struct net *net, int fd, int version, u32 tunnel_id,
 		       u32 peer_tunnel_id, struct l2tp_tunnel_cfg *cfg,
 		       struct l2tp_tunnel **tunnelp);
 void l2tp_tunnel_closeall(struct l2tp_tunnel *tunnel);
-void l2tp_tunnel_delete(struct l2tp_tunnel *tunnel);
+int l2tp_tunnel_delete(struct l2tp_tunnel *tunnel);
 struct l2tp_session *l2tp_session_create(int priv_size,
 					 struct l2tp_tunnel *tunnel,
 					 u32 session_id, u32 peer_session_id,

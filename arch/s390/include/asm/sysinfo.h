@@ -56,7 +56,12 @@ struct sysinfo_1_2_2 {
 	char format;
 	char reserved_0[1];
 	unsigned short acc_offset;
-	char reserved_1[20];
+	unsigned char mt_installed :1;
+	unsigned char :2;
+	unsigned char mt_stid :5;
+	unsigned char :3;
+	unsigned char mt_gtid :5;
+	char reserved_1[18];
 	unsigned int nominal_cap;
 	unsigned int secondary_cap;
 	unsigned int capability;
@@ -92,12 +97,21 @@ struct sysinfo_2_2_2 {
 	char name[8];
 	unsigned int caf;
 	char reserved_2[8];
-	unsigned char mt_installed;
-	unsigned char mt_general;
-	unsigned char mt_psmtid;
+	unsigned char mt_installed :1;
+	unsigned char :2;
+	unsigned char mt_stid :5;
+	unsigned char :3;
+	unsigned char mt_gtid :5;
+	unsigned char :3;
+	unsigned char mt_psmtid :5;
 	char reserved_3[5];
 	unsigned short cpus_dedicated;
 	unsigned short cpus_shared;
+	char reserved_4[3];
+	unsigned char vsne;
+	uuid_be uuid;
+	char reserved_5[160];
+	char ext_name[256];
 };
 
 #define LPAR_CHAR_DEDICATED	(1 << 7)
@@ -118,7 +132,7 @@ struct sysinfo_3_2_2 {
 		unsigned int caf;
 		char cpi[16];
 		char reserved_1[3];
-		char ext_name_encoding;
+		unsigned char evmne;
 		unsigned int reserved_2;
 		uuid_be uuid;
 	} vm[8];

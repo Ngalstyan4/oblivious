@@ -20,7 +20,6 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/platform_device.h>
-#include <linux/dma-mapping.h>
 #include <linux/clk.h>
 #include <linux/usb/otg.h>
 #include <linux/usb/usb_phy_generic.h>
@@ -117,15 +116,6 @@ static int dwc3_exynos_probe(struct platform_device *pdev)
 	if (!exynos)
 		return -ENOMEM;
 
-	/*
-	 * Right now device-tree probed devices don't get dma_mask set.
-	 * Since shared usb code relies on it, set it here for now.
-	 * Once we move to full device tree support this will vanish off.
-	 */
-	ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(32));
-	if (ret)
-		return ret;
-
 	platform_set_drvdata(pdev, exynos);
 
 	exynos->dev	= dev;
@@ -138,10 +128,8 @@ static int dwc3_exynos_probe(struct platform_device *pdev)
 	clk_prepare_enable(exynos->clk);
 
 	exynos->susp_clk = devm_clk_get(dev, "usbdrd30_susp_clk");
-	if (IS_ERR(exynos->susp_clk)) {
-		dev_info(dev, "no suspend clk specified\n");
+	if (IS_ERR(exynos->susp_clk))
 		exynos->susp_clk = NULL;
-	}
 	clk_prepare_enable(exynos->susp_clk);
 
 	if (of_device_is_compatible(node, "samsung,exynos7-dwusb3")) {
@@ -300,7 +288,6 @@ static struct platform_driver dwc3_exynos_driver = {
 
 module_platform_driver(dwc3_exynos_driver);
 
-MODULE_ALIAS("platform:exynos-dwc3");
 MODULE_AUTHOR("Anton Tikhomirov <av.tikhomirov@samsung.com>");
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("DesignWare USB3 EXYNOS Glue Layer");

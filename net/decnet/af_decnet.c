@@ -106,7 +106,7 @@ Version 0.0.6    2.1.110   07-aug-98   Eduardo Marcelo Serrat
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
@@ -1070,7 +1070,8 @@ static struct sk_buff *dn_wait_for_connect(struct sock *sk, long *timeo)
 	return skb == NULL ? ERR_PTR(err) : skb;
 }
 
-static int dn_accept(struct socket *sock, struct socket *newsock, int flags)
+static int dn_accept(struct socket *sock, struct socket *newsock, int flags,
+		     bool kern)
 {
 	struct sock *sk = sock->sk, *newsk;
 	struct sk_buff *skb = NULL;
@@ -1099,7 +1100,7 @@ static int dn_accept(struct socket *sock, struct socket *newsock, int flags)
 
 	cb = DN_SKB_CB(skb);
 	sk->sk_ack_backlog--;
-	newsk = dn_alloc_sock(sock_net(sk), newsock, sk->sk_allocation, 0);
+	newsk = dn_alloc_sock(sock_net(sk), newsock, sk->sk_allocation, kern);
 	if (newsk == NULL) {
 		release_sock(sk);
 		kfree_skb(skb);
@@ -1337,12 +1338,6 @@ static int dn_setsockopt(struct socket *sock, int level, int optname, char __use
 	lock_sock(sk);
 	err = __dn_setsockopt(sock, level, optname, optval, optlen, 0);
 	release_sock(sk);
-#ifdef CONFIG_NETFILTER
-	/* we need to exclude all possible ENOPROTOOPTs except default case */
-	if (err == -ENOPROTOOPT && optname != DSO_LINKINFO &&
-	    optname != DSO_STREAM && optname != DSO_SEQPACKET)
-		err = nf_setsockopt(sk, PF_DECnet, optname, optval, optlen);
-#endif
 
 	return err;
 }
@@ -1450,6 +1445,15 @@ static int __dn_setsockopt(struct socket *sock, int level,int optname, char __us
 		dn_nsp_send_disc(sk, 0x38, 0, sk->sk_allocation);
 		break;
 
+	default:
+#ifdef CONFIG_NETFILTER
+		return nf_setsockopt(sk, PF_DECnet, optname, optval, optlen);
+#endif
+	case DSO_LINKINFO:
+	case DSO_STREAM:
+	case DSO_SEQPACKET:
+		return -ENOPROTOOPT;
+
 	case DSO_MAXWINDOW:
 		if (optlen != sizeof(unsigned long))
 			return -EINVAL;
@@ -1497,12 +1501,6 @@ static int __dn_setsockopt(struct socket *sock, int level,int optname, char __us
 			return -EINVAL;
 		scp->info_loc = u.info;
 		break;
-
-	case DSO_LINKINFO:
-	case DSO_STREAM:
-	case DSO_SEQPACKET:
-	default:
-		return -ENOPROTOOPT;
 	}
 
 	return 0;
@@ -1516,20 +1514,6 @@ static int dn_getsockopt(struct socket *sock, int level, int optname, char __use
 	lock_sock(sk);
 	err = __dn_getsockopt(sock, level, optname, optval, optlen, 0);
 	release_sock(sk);
-#ifdef CONFIG_NETFILTER
-	if (err == -ENOPROTOOPT && optname != DSO_STREAM &&
-	    optname != DSO_SEQPACKET && optname != DSO_CONACCEPT &&
-	    optname != DSO_CONREJECT) {
-		int len;
-
-		if (get_user(len, optlen))
-			return -EFAULT;
-
-		err = nf_getsockopt(sk, PF_DECnet, optname, optval, &len);
-		if (err >= 0)
-			err = put_user(len, optlen);
-	}
-#endif
 
 	return err;
 }
@@ -1595,6 +1579,26 @@ static int __dn_getsockopt(struct socket *sock, int level,int optname, char __us
 		r_data = &link;
 		break;
 
+	default:
+#ifdef CONFIG_NETFILTER
+	{
+		int ret, len;
+
+		if (get_user(len, optlen))
+			return -EFAULT;
+
+		ret = nf_getsockopt(sk, PF_DECnet, optname, optval, &len);
+		if (ret >= 0)
+			ret = put_user(len, optlen);
+		return ret;
+	}
+#endif
+	case DSO_STREAM:
+	case DSO_SEQPACKET:
+	case DSO_CONACCEPT:
+	case DSO_CONREJECT:
+		return -ENOPROTOOPT;
+
 	case DSO_MAXWINDOW:
 		if (r_len > sizeof(unsigned long))
 			r_len = sizeof(unsigned long);
@@ -1626,13 +1630,6 @@ static int __dn_getsockopt(struct socket *sock, int level,int optname, char __us
 			r_len = sizeof(unsigned char);
 		r_data = &scp->info_rem;
 		break;
-
-	case DSO_STREAM:
-	case DSO_SEQPACKET:
-	case DSO_CONACCEPT:
-	case DSO_CONREJECT:
-	default:
-		return -ENOPROTOOPT;
 	}
 
 	if (r_data) {
@@ -1722,7 +1719,7 @@ static int dn_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 	 * See if there is data ready to read, sleep if there isn't
 	 */
 	for(;;) {
-		DEFINE_WAIT(wait);
+		DEFINE_WAIT_FUNC(wait, woken_wake_function);
 
 		if (sk->sk_err)
 			goto out;
@@ -1753,11 +1750,11 @@ static int dn_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 			goto out;
 		}
 
-		prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
+		add_wait_queue(sk_sleep(sk), &wait);
 		sk_set_bit(SOCKWQ_ASYNC_WAITDATA, sk);
-		sk_wait_event(sk, &timeo, dn_data_ready(sk, queue, flags, target));
+		sk_wait_event(sk, &timeo, dn_data_ready(sk, queue, flags, target), &wait);
 		sk_clear_bit(SOCKWQ_ASYNC_WAITDATA, sk);
-		finish_wait(sk_sleep(sk), &wait);
+		remove_wait_queue(sk_sleep(sk), &wait);
 	}
 
 	skb_queue_walk_safe(queue, skb, n) {
@@ -2003,19 +2000,19 @@ static int dn_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 		 * size.
 		 */
 		if (dn_queue_too_long(scp, queue, flags)) {
-			DEFINE_WAIT(wait);
+			DEFINE_WAIT_FUNC(wait, woken_wake_function);
 
 			if (flags & MSG_DONTWAIT) {
 				err = -EWOULDBLOCK;
 				goto out;
 			}
 
-			prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
+			add_wait_queue(sk_sleep(sk), &wait);
 			sk_set_bit(SOCKWQ_ASYNC_WAITDATA, sk);
 			sk_wait_event(sk, &timeo,
-				      !dn_queue_too_long(scp, queue, flags));
+				      !dn_queue_too_long(scp, queue, flags), &wait);
 			sk_clear_bit(SOCKWQ_ASYNC_WAITDATA, sk);
-			finish_wait(sk_sleep(sk), &wait);
+			remove_wait_queue(sk_sleep(sk), &wait);
 			continue;
 		}
 

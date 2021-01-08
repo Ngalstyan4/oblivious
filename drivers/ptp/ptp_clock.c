@@ -97,26 +97,30 @@ static s32 scaled_ppm_to_ppb(long ppm)
 
 /* posix clock implementation */
 
-static int ptp_clock_getres(struct posix_clock *pc, struct timespec64 *tp)
+static int ptp_clock_getres(struct posix_clock *pc, struct timespec *tp)
 {
 	tp->tv_sec = 0;
 	tp->tv_nsec = 1;
 	return 0;
 }
 
-static int ptp_clock_settime(struct posix_clock *pc, const struct timespec64 *tp)
+static int ptp_clock_settime(struct posix_clock *pc, const struct timespec *tp)
 {
 	struct ptp_clock *ptp = container_of(pc, struct ptp_clock, clock);
+	struct timespec64 ts = timespec_to_timespec64(*tp);
 
-	return  ptp->info->settime64(ptp->info, tp);
+	return  ptp->info->settime64(ptp->info, &ts);
 }
 
-static int ptp_clock_gettime(struct posix_clock *pc, struct timespec64 *tp)
+static int ptp_clock_gettime(struct posix_clock *pc, struct timespec *tp)
 {
 	struct ptp_clock *ptp = container_of(pc, struct ptp_clock, clock);
+	struct timespec64 ts;
 	int err;
 
-	err = ptp->info->gettime64(ptp->info, tp);
+	err = ptp->info->gettime64(ptp->info, &ts);
+	if (!err)
+		*tp = timespec64_to_timespec(ts);
 	return err;
 }
 
@@ -129,7 +133,7 @@ static int ptp_clock_adjtime(struct posix_clock *pc, struct timex *tx)
 	ops = ptp->info;
 
 	if (tx->modes & ADJ_SETOFFSET) {
-		struct timespec64 ts;
+		struct timespec ts;
 		ktime_t kt;
 		s64 delta;
 
@@ -142,14 +146,17 @@ static int ptp_clock_adjtime(struct posix_clock *pc, struct timex *tx)
 		if ((unsigned long) ts.tv_nsec >= NSEC_PER_SEC)
 			return -EINVAL;
 
-		kt = timespec64_to_ktime(ts);
+		kt = timespec_to_ktime(ts);
 		delta = ktime_to_ns(kt);
 		err = ops->adjtime(ops, delta);
 	} else if (tx->modes & ADJ_FREQUENCY) {
 		s32 ppb = scaled_ppm_to_ppb(tx->freq);
 		if (ppb > ops->max_adj || ppb < -ops->max_adj)
 			return -ERANGE;
-		err = ops->adjfreq(ops, ppb);
+		if (ops->adjfine)
+			err = ops->adjfine(ops, tx->freq);
+		else
+			err = ops->adjfreq(ops, ppb);
 		ptp->dialed_frequency = tx->freq;
 	} else if (tx->modes == 0) {
 		tx->freq = ptp->dialed_frequency;
@@ -214,17 +221,16 @@ struct ptp_clock *ptp_clock_register(struct ptp_clock_info *info,
 	mutex_init(&ptp->pincfg_mux);
 	init_waitqueue_head(&ptp->tsev_wq);
 
+	err = ptp_populate_pin_groups(ptp);
+	if (err)
+		goto no_pin_groups;
+
 	/* Create a new device in our class. */
-	ptp->dev = device_create(ptp_class, parent, ptp->devid, ptp,
-				 "ptp%d", ptp->index);
+	ptp->dev = device_create_with_groups(ptp_class, parent, ptp->devid,
+					     ptp, ptp->pin_attr_groups,
+					     "ptp%d", ptp->index);
 	if (IS_ERR(ptp->dev))
 		goto no_device;
-
-	dev_set_drvdata(ptp->dev, ptp);
-
-	err = ptp_populate_sysfs(ptp);
-	if (err)
-		goto no_sysfs;
 
 	/* Register a new PPS source. */
 	if (info->pps) {
@@ -253,12 +259,13 @@ no_clock:
 	if (ptp->pps_source)
 		pps_unregister_source(ptp->pps_source);
 no_pps:
-	ptp_cleanup_sysfs(ptp);
-no_sysfs:
 	device_destroy(ptp_class, ptp->devid);
 no_device:
+	ptp_cleanup_pin_groups(ptp);
+no_pin_groups:
 	mutex_destroy(&ptp->tsevq_mux);
 	mutex_destroy(&ptp->pincfg_mux);
+	ida_simple_remove(&ptp_clocks_map, index);
 no_slot:
 	kfree(ptp);
 no_memory:
@@ -274,8 +281,9 @@ int ptp_clock_unregister(struct ptp_clock *ptp)
 	/* Release the clock's resources. */
 	if (ptp->pps_source)
 		pps_unregister_source(ptp->pps_source);
-	ptp_cleanup_sysfs(ptp);
+
 	device_destroy(ptp_class, ptp->devid);
+	ptp_cleanup_pin_groups(ptp);
 
 	posix_clock_unregister(&ptp->clock);
 	return 0;

@@ -20,7 +20,7 @@
 #ifndef __ASM_SYSREG_H
 #define __ASM_SYSREG_H
 
-#include <asm/opcodes.h>
+#include <linux/stringify.h>
 
 /*
  * ARMv8 ARM reserves the following encoding for system registers:
@@ -32,8 +32,54 @@
  *	[11-8]  : CRm
  *	[7-5]   : Op2
  */
+#define Op0_shift	19
+#define Op0_mask	0x3
+#define Op1_shift	16
+#define Op1_mask	0x7
+#define CRn_shift	12
+#define CRn_mask	0xf
+#define CRm_shift	8
+#define CRm_mask	0xf
+#define Op2_shift	5
+#define Op2_mask	0x7
+
 #define sys_reg(op0, op1, crn, crm, op2) \
-	((((op0)&3)<<19)|((op1)<<16)|((crn)<<12)|((crm)<<8)|((op2)<<5))
+	(((op0) << Op0_shift) | ((op1) << Op1_shift) | \
+	 ((crn) << CRn_shift) | ((crm) << CRm_shift) | \
+	 ((op2) << Op2_shift))
+
+#define sys_reg_Op0(id)	(((id) >> Op0_shift) & Op0_mask)
+#define sys_reg_Op1(id)	(((id) >> Op1_shift) & Op1_mask)
+#define sys_reg_CRn(id)	(((id) >> CRn_shift) & CRn_mask)
+#define sys_reg_CRm(id)	(((id) >> CRm_shift) & CRm_mask)
+#define sys_reg_Op2(id)	(((id) >> Op2_shift) & Op2_mask)
+
+#ifndef CONFIG_BROKEN_GAS_INST
+
+#ifdef __ASSEMBLY__
+#define __emit_inst(x)			.inst (x)
+#else
+#define __emit_inst(x)			".inst " __stringify((x)) "\n\t"
+#endif
+
+#else  /* CONFIG_BROKEN_GAS_INST */
+
+#ifndef CONFIG_CPU_BIG_ENDIAN
+#define __INSTR_BSWAP(x)		(x)
+#else  /* CONFIG_CPU_BIG_ENDIAN */
+#define __INSTR_BSWAP(x)		((((x) << 24) & 0xff000000)	| \
+					 (((x) <<  8) & 0x00ff0000)	| \
+					 (((x) >>  8) & 0x0000ff00)	| \
+					 (((x) >> 24) & 0x000000ff))
+#endif	/* CONFIG_CPU_BIG_ENDIAN */
+
+#ifdef __ASSEMBLY__
+#define __emit_inst(x)			.long __INSTR_BSWAP(x)
+#else  /* __ASSEMBLY__ */
+#define __emit_inst(x)			".long " __stringify(__INSTR_BSWAP(x)) "\n\t"
+#endif	/* __ASSEMBLY__ */
+
+#endif	/* CONFIG_BROKEN_GAS_INST */
 
 #define SYS_MIDR_EL1			sys_reg(3, 0, 0, 0, 0)
 #define SYS_MPIDR_EL1			sys_reg(3, 0, 0, 0, 5)
@@ -70,21 +116,37 @@
 
 #define SYS_ID_AA64MMFR0_EL1		sys_reg(3, 0, 0, 7, 0)
 #define SYS_ID_AA64MMFR1_EL1		sys_reg(3, 0, 0, 7, 1)
+#define SYS_ID_AA64MMFR2_EL1		sys_reg(3, 0, 0, 7, 2)
 
 #define SYS_CNTFRQ_EL0			sys_reg(3, 3, 14, 0, 0)
 #define SYS_CTR_EL0			sys_reg(3, 3, 0, 0, 1)
 #define SYS_DCZID_EL0			sys_reg(3, 3, 0, 0, 7)
 
 #define REG_PSTATE_PAN_IMM		sys_reg(0, 0, 4, 0, 4)
+#define REG_PSTATE_UAO_IMM		sys_reg(0, 0, 4, 0, 3)
 
-#define SET_PSTATE_PAN(x) __inst_arm(0xd5000000 | REG_PSTATE_PAN_IMM |\
-				     (!!x)<<8 | 0x1f)
+#define SET_PSTATE_PAN(x) __emit_inst(0xd5000000 | REG_PSTATE_PAN_IMM |	\
+				      (!!x)<<8 | 0x1f)
+#define SET_PSTATE_UAO(x) __emit_inst(0xd5000000 | REG_PSTATE_UAO_IMM |	\
+				      (!!x)<<8 | 0x1f)
 
-/* SCTLR_EL1 */
-#define SCTLR_EL1_CP15BEN	(0x1 << 5)
-#define SCTLR_EL1_SED		(0x1 << 8)
-#define SCTLR_EL1_SPAN		(0x1 << 23)
+/* Common SCTLR_ELx flags. */
+#define SCTLR_ELx_EE    (1 << 25)
+#define SCTLR_ELx_I	(1 << 12)
+#define SCTLR_ELx_SA	(1 << 3)
+#define SCTLR_ELx_C	(1 << 2)
+#define SCTLR_ELx_A	(1 << 1)
+#define SCTLR_ELx_M	1
 
+#define SCTLR_ELx_FLAGS	(SCTLR_ELx_M | SCTLR_ELx_A | SCTLR_ELx_C | \
+			 SCTLR_ELx_SA | SCTLR_ELx_I)
+
+/* SCTLR_EL1 specific flags. */
+#define SCTLR_EL1_UCI		(1 << 26)
+#define SCTLR_EL1_SPAN		(1 << 23)
+#define SCTLR_EL1_UCT		(1 << 15)
+#define SCTLR_EL1_SED		(1 << 8)
+#define SCTLR_EL1_CP15BEN	(1 << 5)
 
 /* id_aa64isar0 */
 #define ID_AA64ISAR0_RDM_SHIFT		28
@@ -109,6 +171,7 @@
 #define ID_AA64PFR0_ASIMD_SUPPORTED	0x0
 #define ID_AA64PFR0_EL1_64BIT_ONLY	0x1
 #define ID_AA64PFR0_EL0_64BIT_ONLY	0x1
+#define ID_AA64PFR0_EL0_32BIT_64BIT	0x2
 
 /* id_aa64mmfr0 */
 #define ID_AA64MMFR0_TGRAN4_SHIFT	28
@@ -135,7 +198,18 @@
 #define ID_AA64MMFR1_VMIDBITS_SHIFT	4
 #define ID_AA64MMFR1_HADBS_SHIFT	0
 
+#define ID_AA64MMFR1_VMIDBITS_8		0
+#define ID_AA64MMFR1_VMIDBITS_16	2
+
+/* id_aa64mmfr2 */
+#define ID_AA64MMFR2_LVA_SHIFT		16
+#define ID_AA64MMFR2_IESB_SHIFT		12
+#define ID_AA64MMFR2_LSM_SHIFT		8
+#define ID_AA64MMFR2_UAO_SHIFT		4
+#define ID_AA64MMFR2_CNP_SHIFT		0
+
 /* id_aa64dfr0 */
+#define ID_AA64DFR0_PMSVER_SHIFT	32
 #define ID_AA64DFR0_CTX_CMPS_SHIFT	28
 #define ID_AA64DFR0_WRPS_SHIFT		20
 #define ID_AA64DFR0_BRPS_SHIFT		12
@@ -191,47 +265,89 @@
 #define ID_AA64MMFR0_TGRAN_SUPPORTED	ID_AA64MMFR0_TGRAN64_SUPPORTED
 #endif
 
+
+/* Safe value for MPIDR_EL1: Bit31:RES1, Bit30:U:0, Bit24:MT:0 */
+#define SYS_MPIDR_SAFE_VAL		(1UL << 31)
+
 #ifdef __ASSEMBLY__
 
 	.irp	num,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30
-	.equ	__reg_num_x\num, \num
+	.equ	.L__reg_num_x\num, \num
 	.endr
-	.equ	__reg_num_xzr, 31
+	.equ	.L__reg_num_xzr, 31
 
 	.macro	mrs_s, rt, sreg
-	.inst	0xd5200000|(\sreg)|(__reg_num_\rt)
+	 __emit_inst(0xd5200000|(\sreg)|(.L__reg_num_\rt))
 	.endm
 
 	.macro	msr_s, sreg, rt
-	.inst	0xd5000000|(\sreg)|(__reg_num_\rt)
+	__emit_inst(0xd5000000|(\sreg)|(.L__reg_num_\rt))
 	.endm
 
 #else
 
+#include <linux/types.h>
+
 asm(
 "	.irp	num,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30\n"
-"	.equ	__reg_num_x\\num, \\num\n"
+"	.equ	.L__reg_num_x\\num, \\num\n"
 "	.endr\n"
-"	.equ	__reg_num_xzr, 31\n"
+"	.equ	.L__reg_num_xzr, 31\n"
 "\n"
 "	.macro	mrs_s, rt, sreg\n"
-"	.inst	0xd5200000|(\\sreg)|(__reg_num_\\rt)\n"
+	__emit_inst(0xd5200000|(\\sreg)|(.L__reg_num_\\rt))
 "	.endm\n"
 "\n"
 "	.macro	msr_s, sreg, rt\n"
-"	.inst	0xd5000000|(\\sreg)|(__reg_num_\\rt)\n"
+	__emit_inst(0xd5000000|(\\sreg)|(.L__reg_num_\\rt))
 "	.endm\n"
 );
+
+/*
+ * Unlike read_cpuid, calls to read_sysreg are never expected to be
+ * optimized away or replaced with synthetic values.
+ */
+#define read_sysreg(r) ({					\
+	u64 __val;						\
+	asm volatile("mrs %0, " __stringify(r) : "=r" (__val));	\
+	__val;							\
+})
+
+/*
+ * The "Z" constraint normally means a zero immediate, but when combined with
+ * the "%x0" template means XZR.
+ */
+#define write_sysreg(v, r) do {					\
+	u64 __val = (u64)v;					\
+	asm volatile("msr " __stringify(r) ", %x0"		\
+		     : : "rZ" (__val));				\
+} while (0)
+
+/*
+ * For registers without architectural names, or simply unsupported by
+ * GAS.
+ */
+#define read_sysreg_s(r) ({						\
+	u64 __val;							\
+	asm volatile("mrs_s %0, " __stringify(r) : "=r" (__val));	\
+	__val;								\
+})
+
+#define write_sysreg_s(v, r) do {					\
+	u64 __val = (u64)v;						\
+	asm volatile("msr_s " __stringify(r) ", %x0" : : "rZ" (__val));	\
+} while (0)
 
 static inline void config_sctlr_el1(u32 clear, u32 set)
 {
 	u32 val;
 
-	asm volatile("mrs %0, sctlr_el1" : "=r" (val));
+	val = read_sysreg(sctlr_el1);
 	val &= ~clear;
 	val |= set;
-	asm volatile("msr sctlr_el1, %0" : : "r" (val));
+	write_sysreg(val, sctlr_el1);
 }
+
 #endif
 
 #endif	/* __ASM_SYSREG_H */

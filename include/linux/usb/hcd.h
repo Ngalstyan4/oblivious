@@ -23,6 +23,7 @@
 
 #include <linux/rwsem.h>
 #include <linux/interrupt.h>
+#include <linux/idr.h>
 
 #define MAX_TOPO_LEVEL		6
 
@@ -560,26 +561,27 @@ extern void usb_ep0_reinit(struct usb_device *);
 	((USB_DIR_IN|USB_TYPE_STANDARD|USB_RECIP_INTERFACE)<<8)
 
 #define EndpointRequest \
-	((USB_DIR_IN|USB_TYPE_STANDARD|USB_RECIP_ENDPOINT)<<8)
+	((USB_DIR_IN|USB_TYPE_STANDARD|USB_RECIP_INTERFACE)<<8)
 #define EndpointOutRequest \
-	((USB_DIR_OUT|USB_TYPE_STANDARD|USB_RECIP_ENDPOINT)<<8)
+	((USB_DIR_OUT|USB_TYPE_STANDARD|USB_RECIP_INTERFACE)<<8)
 
 /* class requests from the USB 2.0 hub spec, table 11-15 */
+#define HUB_CLASS_REQ(dir, type, request) ((((dir) | (type)) << 8) | (request))
 /* GetBusState and SetHubDescriptor are optional, omitted */
-#define ClearHubFeature		(0x2000 | USB_REQ_CLEAR_FEATURE)
-#define ClearPortFeature	(0x2300 | USB_REQ_CLEAR_FEATURE)
-#define GetHubDescriptor	(0xa000 | USB_REQ_GET_DESCRIPTOR)
-#define GetHubStatus		(0xa000 | USB_REQ_GET_STATUS)
-#define GetPortStatus		(0xa300 | USB_REQ_GET_STATUS)
-#define SetHubFeature		(0x2000 | USB_REQ_SET_FEATURE)
-#define SetPortFeature		(0x2300 | USB_REQ_SET_FEATURE)
+#define ClearHubFeature		HUB_CLASS_REQ(USB_DIR_OUT, USB_RT_HUB, USB_REQ_CLEAR_FEATURE)
+#define ClearPortFeature	HUB_CLASS_REQ(USB_DIR_OUT, USB_RT_PORT, USB_REQ_CLEAR_FEATURE)
+#define GetHubDescriptor	HUB_CLASS_REQ(USB_DIR_IN, USB_RT_HUB, USB_REQ_GET_DESCRIPTOR)
+#define GetHubStatus		HUB_CLASS_REQ(USB_DIR_IN, USB_RT_HUB, USB_REQ_GET_STATUS)
+#define GetPortStatus		HUB_CLASS_REQ(USB_DIR_IN, USB_RT_PORT, USB_REQ_GET_STATUS)
+#define SetHubFeature		HUB_CLASS_REQ(USB_DIR_OUT, USB_RT_HUB, USB_REQ_SET_FEATURE)
+#define SetPortFeature		HUB_CLASS_REQ(USB_DIR_OUT, USB_RT_PORT, USB_REQ_SET_FEATURE)
 
 
 /*-------------------------------------------------------------------------*/
 
 /* class requests from USB 3.1 hub spec, table 10-7 */
-#define SetHubDepth		(0x2000 | HUB_SET_DEPTH)
-#define GetPortErrorCount	(0xa300 | HUB_GET_PORT_ERR_COUNT)
+#define SetHubDepth		HUB_CLASS_REQ(USB_DIR_OUT, USB_RT_HUB, HUB_SET_DEPTH)
+#define GetPortErrorCount	HUB_CLASS_REQ(USB_DIR_IN, USB_RT_PORT, HUB_GET_PORT_ERR_COUNT)
 
 /*
  * Generic bandwidth allocation constants/support
@@ -631,8 +633,8 @@ extern void usb_set_device_state(struct usb_device *udev,
 
 /* exported only within usbcore */
 
-extern struct list_head usb_bus_list;
-extern struct mutex usb_bus_list_lock;
+extern struct idr usb_bus_idr;
+extern struct mutex usb_bus_idr_lock;
 extern wait_queue_head_t usb_kill_urb_queue;
 
 
@@ -661,7 +663,7 @@ struct usb_mon_operations {
 	/* void (*urb_unlink)(struct usb_bus *bus, struct urb *urb); */
 };
 
-extern struct usb_mon_operations *mon_ops;
+extern const struct usb_mon_operations *mon_ops;
 
 static inline void usbmon_urb_submit(struct usb_bus *bus, struct urb *urb)
 {
@@ -683,7 +685,7 @@ static inline void usbmon_urb_complete(struct usb_bus *bus, struct urb *urb,
 		(*mon_ops->urb_complete)(bus, urb, status);
 }
 
-int usb_mon_register(struct usb_mon_operations *ops);
+int usb_mon_register(const struct usb_mon_operations *ops);
 void usb_mon_deregister(void);
 
 #else

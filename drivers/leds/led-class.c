@@ -20,6 +20,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
+#include <uapi/linux/uleds.h>
 #include "leds.h"
 
 static struct class *leds_class;
@@ -102,6 +103,68 @@ static const struct attribute_group *led_groups[] = {
 	NULL,
 };
 
+#ifdef CONFIG_LEDS_BRIGHTNESS_HW_CHANGED
+static ssize_t brightness_hw_changed_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct led_classdev *led_cdev = dev_get_drvdata(dev);
+
+	if (led_cdev->brightness_hw_changed == -1)
+		return -ENODATA;
+
+	return sprintf(buf, "%u\n", led_cdev->brightness_hw_changed);
+}
+
+static DEVICE_ATTR_RO(brightness_hw_changed);
+
+static int led_add_brightness_hw_changed(struct led_classdev *led_cdev)
+{
+	struct device *dev = led_cdev->dev;
+	int ret;
+
+	ret = device_create_file(dev, &dev_attr_brightness_hw_changed);
+	if (ret) {
+		dev_err(dev, "Error creating brightness_hw_changed\n");
+		return ret;
+	}
+
+	led_cdev->brightness_hw_changed_kn =
+		sysfs_get_dirent(dev->kobj.sd, "brightness_hw_changed");
+	if (!led_cdev->brightness_hw_changed_kn) {
+		dev_err(dev, "Error getting brightness_hw_changed kn\n");
+		device_remove_file(dev, &dev_attr_brightness_hw_changed);
+		return -ENXIO;
+	}
+
+	return 0;
+}
+
+static void led_remove_brightness_hw_changed(struct led_classdev *led_cdev)
+{
+	sysfs_put(led_cdev->brightness_hw_changed_kn);
+	device_remove_file(led_cdev->dev, &dev_attr_brightness_hw_changed);
+}
+
+void led_classdev_notify_brightness_hw_changed(struct led_classdev *led_cdev,
+					       enum led_brightness brightness)
+{
+	if (WARN_ON(!led_cdev->brightness_hw_changed_kn))
+		return;
+
+	led_cdev->brightness_hw_changed = brightness;
+	sysfs_notify_dirent(led_cdev->brightness_hw_changed_kn);
+}
+EXPORT_SYMBOL_GPL(led_classdev_notify_brightness_hw_changed);
+#else
+static int led_add_brightness_hw_changed(struct led_classdev *led_cdev)
+{
+	return 0;
+}
+static void led_remove_brightness_hw_changed(struct led_classdev *led_cdev)
+{
+}
+#endif
+
 /**
  * led_classdev_suspend - suspend an led_classdev.
  * @led_cdev: the led_classdev to suspend.
@@ -109,7 +172,7 @@ static const struct attribute_group *led_groups[] = {
 void led_classdev_suspend(struct led_classdev *led_cdev)
 {
 	led_cdev->flags |= LED_SUSPENDED;
-	led_cdev->brightness_set(led_cdev, 0);
+	led_set_brightness_nopm(led_cdev, 0);
 }
 EXPORT_SYMBOL_GPL(led_classdev_suspend);
 
@@ -119,7 +182,7 @@ EXPORT_SYMBOL_GPL(led_classdev_suspend);
  */
 void led_classdev_resume(struct led_classdev *led_cdev)
 {
-	led_cdev->brightness_set(led_cdev, led_cdev->brightness);
+	led_set_brightness_nopm(led_cdev, led_cdev->brightness);
 
 	if (led_cdev->flash_resume)
 		led_cdev->flash_resume(led_cdev);
@@ -187,7 +250,7 @@ static int led_classdev_next_name(const char *init_name, char *name,
  */
 int led_classdev_register(struct device *parent, struct led_classdev *led_cdev)
 {
-	char name[64];
+	char name[LED_MAX_NAME_SIZE];
 	int ret;
 
 	ret = led_classdev_next_name(led_cdev->name, name, sizeof(name));
@@ -203,8 +266,20 @@ int led_classdev_register(struct device *parent, struct led_classdev *led_cdev)
 		dev_warn(parent, "Led %s renamed to %s due to name collision",
 				led_cdev->name, dev_name(led_cdev->dev));
 
+	if (led_cdev->flags & LED_BRIGHT_HW_CHANGED) {
+		ret = led_add_brightness_hw_changed(led_cdev);
+		if (ret) {
+			device_unregister(led_cdev->dev);
+			return ret;
+		}
+	}
+
+	led_cdev->work_flags = 0;
 #ifdef CONFIG_LEDS_TRIGGERS
 	init_rwsem(&led_cdev->trigger_lock);
+#endif
+#ifdef CONFIG_LEDS_BRIGHTNESS_HW_CHANGED
+	led_cdev->brightness_hw_changed = -1;
 #endif
 	mutex_init(&led_cdev->led_access);
 	/* add to the list of leds */
@@ -214,8 +289,6 @@ int led_classdev_register(struct device *parent, struct led_classdev *led_cdev)
 
 	if (!led_cdev->max_brightness)
 		led_cdev->max_brightness = LED_FULL;
-
-	led_cdev->flags |= SET_BRIGHTNESS_ASYNC;
 
 	led_update_brightness(led_cdev);
 
@@ -247,11 +320,17 @@ void led_classdev_unregister(struct led_classdev *led_cdev)
 	up_write(&led_cdev->trigger_lock);
 #endif
 
-	cancel_work_sync(&led_cdev->set_brightness_work);
+	led_cdev->flags |= LED_UNREGISTERING;
 
 	/* Stop blinking */
 	led_stop_software_blink(led_cdev);
+
 	led_set_brightness(led_cdev, LED_OFF);
+
+	flush_work(&led_cdev->set_brightness_work);
+
+	if (led_cdev->flags & LED_BRIGHT_HW_CHANGED)
+		led_remove_brightness_hw_changed(led_cdev);
 
 	device_unregister(led_cdev->dev);
 

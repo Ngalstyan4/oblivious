@@ -212,7 +212,7 @@ struct pci_mmap_map {
 	unsigned long prot_mask;
 };
 
-static struct fb_fix_screeninfo atyfb_fix = {
+static const struct fb_fix_screeninfo atyfb_fix = {
 	.id		= "ATY Mach64",
 	.type		= FB_TYPE_PACKED_PIXELS,
 	.visual		= FB_VISUAL_PSEUDOCOLOR,
@@ -1861,7 +1861,7 @@ static int atyfb_ioctl(struct fb_info *info, u_int cmd, u_long arg)
 #if defined(DEBUG) && defined(CONFIG_FB_ATY_CT)
 	case ATYIO_CLKR:
 		if (M64_HAS(INTEGRATED)) {
-			struct atyclk clk = { 0 };
+			struct atyclk clk;
 			union aty_pll *pll = &par->pll;
 			u32 dsp_config = pll->ct.dsp_config;
 			u32 dsp_on_off = pll->ct.dsp_on_off;

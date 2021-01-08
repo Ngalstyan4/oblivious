@@ -7,6 +7,7 @@
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
+#include <linux/sched/mm.h>
 #include <linux/hugetlb.h>
 #include <linux/pagemap.h>
 #include <linux/err.h>
@@ -144,7 +145,7 @@ hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 		addr = ALIGN(addr, huge_page_size(h));
 		vma = find_vma(mm, addr);
 		if (TASK_SIZE - len >= addr &&
-		    (!vma || addr + len <= vm_start_gap(vma)))
+		    (!vma || addr + len <= vma->vm_start))
 			return addr;
 	}
 	if (mm->get_unmapped_area == arch_get_unmapped_area)
@@ -162,9 +163,10 @@ static __init int setup_hugepagesz(char *opt)
 	unsigned long ps = memparse(opt, &opt);
 	if (ps == PMD_SIZE) {
 		hugetlb_add_hstate(PMD_SHIFT - PAGE_SHIFT);
-	} else if (ps == PUD_SIZE && cpu_has_gbpages) {
+	} else if (ps == PUD_SIZE && boot_cpu_has(X86_FEATURE_GBPAGES)) {
 		hugetlb_add_hstate(PUD_SHIFT - PAGE_SHIFT);
 	} else {
+		hugetlb_bad_size();
 		printk(KERN_ERR "hugepagesz: Unsupported page size %lu M\n",
 			ps >> 20);
 		return 0;
@@ -173,11 +175,11 @@ static __init int setup_hugepagesz(char *opt)
 }
 __setup("hugepagesz=", setup_hugepagesz);
 
-#ifdef CONFIG_CMA
+#if (defined(CONFIG_MEMORY_ISOLATION) && defined(CONFIG_COMPACTION)) || defined(CONFIG_CMA)
 static __init int gigantic_pages_init(void)
 {
-	/* With CMA we can allocate gigantic pages at runtime */
-	if (cpu_has_gbpages && !size_to_hstate(1UL << PUD_SHIFT))
+	/* With compaction or CMA we can allocate gigantic pages at runtime */
+	if (boot_cpu_has(X86_FEATURE_GBPAGES) && !size_to_hstate(1UL << PUD_SHIFT))
 		hugetlb_add_hstate(PUD_SHIFT - PAGE_SHIFT);
 	return 0;
 }

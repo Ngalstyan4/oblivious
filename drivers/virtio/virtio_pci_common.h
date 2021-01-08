@@ -35,12 +35,6 @@ struct virtio_pci_vq_info {
 	/* the actual virtqueue */
 	struct virtqueue *vq;
 
-	/* the number of entries in the queue */
-	int num;
-
-	/* the virtual address of the ring queue */
-	void *queue;
-
 	/* the list node for the virtqueues list */
 	struct list_head node;
 
@@ -91,7 +85,6 @@ struct virtio_pci_device {
 	/* MSI-X support */
 	int msix_enabled;
 	int intx_enabled;
-	struct msix_entry *msix_entries;
 	cpumask_var_t *msix_affinity_masks;
 	/* Name strings for interrupts. This size should be enough,
 	 * and I'm too lazy to allocate each name separately. */
@@ -137,9 +130,8 @@ bool vp_notify(struct virtqueue *vq);
 void vp_del_vqs(struct virtio_device *vdev);
 /* the config->find_vqs() implementation */
 int vp_find_vqs(struct virtio_device *vdev, unsigned nvqs,
-		       struct virtqueue *vqs[],
-		       vq_callback_t *callbacks[],
-		       const char *names[]);
+		struct virtqueue *vqs[], vq_callback_t *callbacks[],
+		const char * const names[], struct irq_affinity *desc);
 const char *vp_bus_name(struct virtio_device *vdev);
 
 /* Setup the affinity for a virtqueue:
@@ -148,6 +140,8 @@ const char *vp_bus_name(struct virtio_device *vdev);
  * - ignore the affinity request if we're using INTX
  */
 int vp_set_vq_affinity(struct virtqueue *vq, int cpu);
+
+const struct cpumask *vp_get_vq_affinity(struct virtio_device *vdev, int index);
 
 #if IS_ENABLED(CONFIG_VIRTIO_PCI_LEGACY)
 int virtio_pci_legacy_probe(struct virtio_pci_device *);

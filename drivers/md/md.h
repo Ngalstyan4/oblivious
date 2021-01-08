@@ -17,6 +17,7 @@
 
 #include <linux/blkdev.h>
 #include <linux/backing-dev.h>
+#include <linux/badblocks.h>
 #include <linux/kobject.h>
 #include <linux/list.h>
 #include <linux/mm.h>
@@ -28,13 +29,16 @@
 
 #define MaxSector (~(sector_t)0)
 
-/* Bad block numbers are stored sorted in a single page.
- * 64bits is used for each block or extent.
- * 54 bits are sector number, 9 bits are extent size,
- * 1 bit is an 'acknowledged' flag.
+/*
+ * These flags should really be called "NO_RETRY" rather than
+ * "FAILFAST" because they don't make any promise about time lapse,
+ * only about the number of retries, which will be zero.
+ * REQ_FAILFAST_DRIVER is not included because
+ * Commit: 4a27446f3e39 ("[SCSI] modify scsi to handle new fail fast flags.")
+ * seems to suggest that the errors it avoids retrying should usually
+ * be retried.
  */
-#define MD_MAX_BADBLOCKS	(PAGE_SIZE/8)
-
+#define	MD_FAILFAST	(REQ_FAILFAST_DEV | REQ_FAILFAST_TRANSPORT)
 /*
  * MD's 'extended' device
  */
@@ -105,7 +109,7 @@ struct md_rdev {
 	atomic_t	read_errors;	/* number of consecutive read errors that
 					 * we have tried to ignore.
 					 */
-	struct timespec last_read_error;	/* monotonic time since our
+	time64_t	last_read_error;	/* monotonic time since our
 						 * last read error
 						 */
 	atomic_t	corrected_errors; /* number of corrected read errors,
@@ -117,22 +121,7 @@ struct md_rdev {
 	struct kernfs_node *sysfs_state; /* handle for 'state'
 					   * sysfs entry */
 
-	struct badblocks {
-		int	count;		/* count of bad blocks */
-		int	unacked_exist;	/* there probably are unacknowledged
-					 * bad blocks.  This is only cleared
-					 * when a read discovers none
-					 */
-		int	shift;		/* shift from sectors to block size
-					 * a -ve shift means badblocks are
-					 * disabled.*/
-		u64	*page;		/* badblock list */
-		int	changed;
-		seqlock_t lock;
-
-		sector_t sector;
-		sector_t size;		/* in sectors */
-	} badblocks;
+	struct badblocks badblocks;
 };
 enum flag_bits {
 	Faulty,			/* device is known to have a fault */
@@ -183,24 +172,32 @@ enum flag_bits {
 				 * Usually, this device should be faster
 				 * than other devices in the array
 				 */
+	ClusterRemove,
+	RemoveSynchronized,	/* synchronize_rcu() was called after
+				 * this device was known to be faulty,
+				 * so it is safe to remove without
+				 * another synchronize_rcu() call.
+				 */
+	ExternalBbl,            /* External metadata provides bad
+				 * block management for a disk
+				 */
+	FailFast,		/* Minimal retries should be attempted on
+				 * this device, so use REQ_FAILFAST_DEV.
+				 * Also don't try to repair failed reads.
+				 * It is expects that no bad block log
+				 * is present.
+				 */
+	LastDev,		/* Seems to be the last working dev as
+				 * it didn't fail, so don't use FailFast
+				 * any more for metadata
+				 */
 };
 
-#define BB_LEN_MASK	(0x00000000000001FFULL)
-#define BB_OFFSET_MASK	(0x7FFFFFFFFFFFFE00ULL)
-#define BB_ACK_MASK	(0x8000000000000000ULL)
-#define BB_MAX_LEN	512
-#define BB_OFFSET(x)	(((x) & BB_OFFSET_MASK) >> 9)
-#define BB_LEN(x)	(((x) & BB_LEN_MASK) + 1)
-#define BB_ACK(x)	(!!((x) & BB_ACK_MASK))
-#define BB_MAKE(a, l, ack) (((a)<<9) | ((l)-1) | ((u64)(!!(ack)) << 63))
-
-extern int md_is_badblock(struct badblocks *bb, sector_t s, int sectors,
-			  sector_t *first_bad, int *bad_sectors);
 static inline int is_badblock(struct md_rdev *rdev, sector_t s, int sectors,
 			      sector_t *first_bad, int *bad_sectors)
 {
 	if (unlikely(rdev->badblocks.count)) {
-		int rv = md_is_badblock(&rdev->badblocks, rdev->data_offset + s,
+		int rv = badblocks_check(&rdev->badblocks, rdev->data_offset + s,
 					sectors,
 					first_bad, bad_sectors);
 		if (rv)
@@ -213,9 +210,33 @@ extern int rdev_set_badblocks(struct md_rdev *rdev, sector_t s, int sectors,
 			      int is_new);
 extern int rdev_clear_badblocks(struct md_rdev *rdev, sector_t s, int sectors,
 				int is_new);
-extern void md_ack_all_badblocks(struct badblocks *bb);
-
 struct md_cluster_info;
+
+/* change UNSUPPORTED_MDDEV_FLAGS for each array type if new flag is added */
+enum mddev_flags {
+	MD_ARRAY_FIRST_USE,	/* First use of array, needs initialization */
+	MD_CLOSING,		/* If set, we are closing the array, do not open
+				 * it then */
+	MD_JOURNAL_CLEAN,	/* A raid with journal is already clean */
+	MD_HAS_JOURNAL,		/* The raid array has journal feature set */
+	MD_RELOAD_SB,		/* Reload the superblock because another node
+				 * updated it.
+				 */
+	MD_CLUSTER_RESYNC_LOCKED, /* cluster raid only, which means node
+				   * already took resync lock, need to
+				   * release the lock */
+	MD_FAILFAST_SUPPORTED,	/* Using MD_FAILFAST on metadata writes is
+				 * supported as calls to md_error() will
+				 * never cause the array to become failed.
+				 */
+};
+
+enum mddev_sb_flags {
+	MD_SB_CHANGE_DEVS,		/* Some device status has changed */
+	MD_SB_CHANGE_CLEAN,	/* transition to or from 'clean' */
+	MD_SB_CHANGE_PENDING,	/* switch from 'clean' to 'active' in progress */
+	MD_SB_NEED_REWRITE,	/* metadata write needs to be repeated */
+};
 
 struct mddev {
 	void				*private;
@@ -224,16 +245,7 @@ struct mddev {
 	int				md_minor;
 	struct list_head		disks;
 	unsigned long			flags;
-#define MD_CHANGE_DEVS	0	/* Some device status has changed */
-#define MD_CHANGE_CLEAN 1	/* transition to or from 'clean' */
-#define MD_CHANGE_PENDING 2	/* switch from 'clean' to 'active' in progress */
-#define MD_UPDATE_SB_FLAGS (1 | 2 | 4)	/* If these are set, md_update_sb needed */
-#define MD_ARRAY_FIRST_USE 3    /* First use of array, needs initialization */
-#define MD_STILL_CLOSED	4	/* If set, then array has not been opened since
-				 * md_ioctl checked on it.
-				 */
-#define MD_JOURNAL_CLEAN 5	/* A raid with journal is already clean */
-#define MD_HAS_JOURNAL	6	/* The raid array has journal feature set */
+	unsigned long			sb_flags;
 
 	int				suspended;
 	atomic_t			active_io;
@@ -242,8 +254,6 @@ struct mddev {
 						       * are happening, so run/
 						       * takeover/stop are not safe
 						       */
-	int				ready; /* See when safe to pass
-						* IO requests down */
 	struct gendisk			*gendisk;
 
 	struct kobject			kobj;
@@ -260,7 +270,7 @@ struct mddev {
 							 * managed externally */
 	char				metadata_type[17]; /* externally set*/
 	int				chunk_sectors;
-	time_t				ctime, utime;
+	time64_t			ctime, utime;
 	int				level, layout;
 	char				clevel[16];
 	int				raid_disks;
@@ -329,31 +339,6 @@ struct mddev {
 	int				parallel_resync;
 
 	int				ok_start_degraded;
-	/* recovery/resync flags
-	 * NEEDED:   we might need to start a resync/recover
-	 * RUNNING:  a thread is running, or about to be started
-	 * SYNC:     actually doing a resync, not a recovery
-	 * RECOVER:  doing recovery, or need to try it.
-	 * INTR:     resync needs to be aborted for some reason
-	 * DONE:     thread is done and is waiting to be reaped
-	 * REQUEST:  user-space has requested a sync (used with SYNC)
-	 * CHECK:    user-space request for check-only, no repair
-	 * RESHAPE:  A reshape is happening
-	 * ERROR:    sync-action interrupted because io-error
-	 *
-	 * If neither SYNC or RESHAPE are set, then it is a recovery.
-	 */
-#define	MD_RECOVERY_RUNNING	0
-#define	MD_RECOVERY_SYNC	1
-#define	MD_RECOVERY_RECOVER	2
-#define	MD_RECOVERY_INTR	3
-#define	MD_RECOVERY_DONE	4
-#define	MD_RECOVERY_NEEDED	5
-#define	MD_RECOVERY_REQUESTED	6
-#define	MD_RECOVERY_CHECK	7
-#define MD_RECOVERY_RESHAPE	8
-#define	MD_RECOVERY_FROZEN	9
-#define	MD_RECOVERY_ERROR	10
 
 	unsigned long			recovery;
 	/* If a RAID personality determines that recovery (of a particular
@@ -456,7 +441,7 @@ struct mddev {
 
 	/* Generic flush handling.
 	 * The last to finish preflush schedules a worker to submit
-	 * the rest of the request (without the REQ_FLUSH flag).
+	 * the rest of the request (without the REQ_PREFLUSH flag).
 	 */
 	struct bio *flush_bio;
 	atomic_t flush_pending;
@@ -464,6 +449,24 @@ struct mddev {
 	struct work_struct event_work;	/* used by dm to report failure event */
 	void (*sync_super)(struct mddev *mddev, struct md_rdev *rdev);
 	struct md_cluster_info		*cluster_info;
+	unsigned int			good_device_nr;	/* good device num within cluster raid */
+};
+
+enum recovery_flags {
+	/*
+	 * If neither SYNC or RESHAPE are set, then it is a recovery.
+	 */
+	MD_RECOVERY_RUNNING,	/* a thread is running, or about to be started */
+	MD_RECOVERY_SYNC,	/* actually doing a resync, not a recovery */
+	MD_RECOVERY_RECOVER,	/* doing recovery, or need to try it. */
+	MD_RECOVERY_INTR,	/* resync needs to be aborted for some reason */
+	MD_RECOVERY_DONE,	/* thread is done and is waiting to be reaped */
+	MD_RECOVERY_NEEDED,	/* we might need to start a resync/recover */
+	MD_RECOVERY_REQUESTED,	/* user-space has requested a sync (used with SYNC) */
+	MD_RECOVERY_CHECK,	/* user-space request for check-only, no repair */
+	MD_RECOVERY_RESHAPE,	/* A reshape is happening */
+	MD_RECOVERY_FROZEN,	/* User request to abort, and not restart, any action */
+	MD_RECOVERY_ERROR,	/* sync-action interrupted because io-error */
 };
 
 static inline int __must_check mddev_lock(struct mddev *mddev)
@@ -647,9 +650,10 @@ extern int mddev_congested(struct mddev *mddev, int bits);
 extern void md_flush_request(struct mddev *mddev, struct bio *bio);
 extern void md_super_write(struct mddev *mddev, struct md_rdev *rdev,
 			   sector_t sector, int size, struct page *page);
-extern void md_super_wait(struct mddev *mddev);
+extern int md_super_wait(struct mddev *mddev);
 extern int sync_page_io(struct md_rdev *rdev, sector_t sector, int size,
-			struct page *page, int rw, bool metadata_op);
+			struct page *page, int op, int op_flags,
+			bool metadata_op);
 extern void md_do_sync(struct md_thread *thread);
 extern void md_new_event(struct mddev *mddev);
 extern int md_allow_write(struct mddev *mddev);
@@ -669,21 +673,13 @@ extern void md_rdev_clear(struct md_rdev *rdev);
 
 extern void mddev_suspend(struct mddev *mddev);
 extern void mddev_resume(struct mddev *mddev);
-extern struct bio *bio_clone_mddev(struct bio *bio, gfp_t gfp_mask,
-				   struct mddev *mddev);
 extern struct bio *bio_alloc_mddev(gfp_t gfp_mask, int nr_iovecs,
 				   struct mddev *mddev);
 
-extern void md_unplug(struct blk_plug_cb *cb, bool from_schedule);
 extern void md_reload_sb(struct mddev *mddev, int raid_disk);
 extern void md_update_sb(struct mddev *mddev, int force);
 extern void md_kick_rdev_from_array(struct md_rdev * rdev);
 struct md_rdev *md_find_rdev_nr_rcu(struct mddev *mddev, int nr);
-static inline int mddev_check_plugged(struct mddev *mddev)
-{
-	return !!blk_check_plugged(md_unplug, mddev,
-				   sizeof(struct blk_plug_cb));
-}
 
 static inline void rdev_dec_pending(struct md_rdev *rdev, struct mddev *mddev)
 {
@@ -698,5 +694,19 @@ extern struct md_cluster_operations *md_cluster_ops;
 static inline int mddev_is_clustered(struct mddev *mddev)
 {
 	return mddev->cluster_info && mddev->bitmap_info.nodes > 1;
+}
+
+/* clear unsupported mddev_flags */
+static inline void mddev_clear_unsupported_flags(struct mddev *mddev,
+	unsigned long unsupported_flags)
+{
+	mddev->flags &= ~unsupported_flags;
+}
+
+static inline void mddev_check_writesame(struct mddev *mddev, struct bio *bio)
+{
+	if (bio_op(bio) == REQ_OP_WRITE_SAME &&
+	    !bdev_get_queue(bio->bi_bdev)->limits.max_write_same_sectors)
+		mddev->queue->limits.max_write_same_sectors = 0;
 }
 #endif /* _MD_MD_H */

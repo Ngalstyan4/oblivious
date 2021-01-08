@@ -17,7 +17,7 @@
  ******************************************************************************/
 
 #include <linux/slab.h>
-
+#include <linux/uio.h> /* struct kvec */
 #include <target/iscsi/iscsi_target_core.h>
 #include "iscsi_target_util.h"
 #include "iscsi_target_parameters.h"
@@ -680,6 +680,7 @@ struct iscsi_param *iscsi_find_param_from_key(
 	pr_err("Unable to locate key \"%s\".\n", key);
 	return NULL;
 }
+EXPORT_SYMBOL(iscsi_find_param_from_key);
 
 int iscsi_extract_key_value(char *textbuf, char **key, char **value)
 {
@@ -764,8 +765,7 @@ static int iscsi_check_for_auth_key(char *key)
 	return 0;
 }
 
-static void iscsi_check_proposer_for_optional_reply(struct iscsi_param *param,
-						    bool keys_workaround)
+static void iscsi_check_proposer_for_optional_reply(struct iscsi_param *param)
 {
 	if (IS_TYPE_BOOL_AND(param)) {
 		if (!strcmp(param->value, NO))
@@ -773,31 +773,19 @@ static void iscsi_check_proposer_for_optional_reply(struct iscsi_param *param,
 	} else if (IS_TYPE_BOOL_OR(param)) {
 		if (!strcmp(param->value, YES))
 			SET_PSTATE_REPLY_OPTIONAL(param);
-
-		if (keys_workaround) {
-			/*
-			 * Required for gPXE iSCSI boot client
-			 */
-			if (!strcmp(param->name, IMMEDIATEDATA))
-				SET_PSTATE_REPLY_OPTIONAL(param);
-		}
+		 /*
+		  * Required for gPXE iSCSI boot client
+		  */
+		if (!strcmp(param->name, IMMEDIATEDATA))
+			SET_PSTATE_REPLY_OPTIONAL(param);
 	} else if (IS_TYPE_NUMBER(param)) {
 		if (!strcmp(param->name, MAXRECVDATASEGMENTLENGTH))
 			SET_PSTATE_REPLY_OPTIONAL(param);
-
-		if (keys_workaround) {
-			/*
-			 * Required for Mellanox Flexboot PXE boot ROM
-			 */
-			if (!strcmp(param->name, FIRSTBURSTLENGTH))
-				SET_PSTATE_REPLY_OPTIONAL(param);
-
-			/*
-			 * Required for gPXE iSCSI boot client
-			 */
-			if (!strcmp(param->name, MAXCONNECTIONS))
-				SET_PSTATE_REPLY_OPTIONAL(param);
-		}
+		/*
+		 * Required for gPXE iSCSI boot client
+		 */
+		if (!strcmp(param->name, MAXCONNECTIONS))
+			SET_PSTATE_REPLY_OPTIONAL(param);
 	} else if (IS_PHASE_DECLARATIVE(param))
 		SET_PSTATE_REPLY_OPTIONAL(param);
 }
@@ -1434,8 +1422,7 @@ int iscsi_encode_text_output(
 	u8 sender,
 	char *textbuf,
 	u32 *length,
-	struct iscsi_param_list *param_list,
-	bool keys_workaround)
+	struct iscsi_param_list *param_list)
 {
 	char *output_buf = NULL;
 	struct iscsi_extra_response *er;
@@ -1471,8 +1458,7 @@ int iscsi_encode_text_output(
 			*length += 1;
 			output_buf = textbuf + *length;
 			SET_PSTATE_PROPOSER(param);
-			iscsi_check_proposer_for_optional_reply(param,
-							        keys_workaround);
+			iscsi_check_proposer_for_optional_reply(param);
 			pr_debug("Sending key: %s=%s\n",
 				param->name, param->value);
 		}
@@ -1667,7 +1653,7 @@ void iscsi_set_session_parameters(
 				param->value);
 		} else if (!strcmp(param->name, INITIALR2T)) {
 			ops->InitialR2T = !strcmp(param->value, YES);
-			 pr_debug("InitialR2T:                   %s\n",
+			pr_debug("InitialR2T:                   %s\n",
 				param->value);
 		} else if (!strcmp(param->name, IMMEDIATEDATA)) {
 			ops->ImmediateData = !strcmp(param->value, YES);

@@ -1,8 +1,5 @@
 /*
- *	w1.c
- *
  * Copyright (c) 2004 Evgeniy Polyakov <zbr@ioremap.net>
- *
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -13,10 +10,6 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/delay.h>
@@ -53,8 +46,8 @@ int w1_max_slave_ttl = 10;
 module_param_named(timeout, w1_timeout, int, 0);
 MODULE_PARM_DESC(timeout, "time in seconds between automatic slave searches");
 module_param_named(timeout_us, w1_timeout_us, int, 0);
-MODULE_PARM_DESC(timeout, "time in microseconds between automatic slave"
-		          " searches");
+MODULE_PARM_DESC(timeout_us,
+		 "time in microseconds between automatic slave searches");
 /* A search stops when w1_max_slave_count devices have been found in that
  * search.  The next search will start over and detect the same set of devices
  * on a static 1-wire bus.  Memory is not allocated based on this number, just
@@ -335,7 +328,7 @@ static ssize_t w1_master_attribute_store_max_slave_count(struct device *dev,
 	int tmp;
 	struct w1_master *md = dev_to_w1_master(dev);
 
-	if (kstrtoint(buf, 0, &tmp) == -EINVAL || tmp < 1)
+	if (kstrtoint(buf, 0, &tmp) || tmp < 1)
 		return -EINVAL;
 
 	mutex_lock(&md->mutex);
@@ -1148,7 +1141,6 @@ int w1_process(void *data)
 			jremain = 1;
 		}
 
-		try_to_freeze();
 		__set_current_state(TASK_INTERRUPTIBLE);
 
 		/* hold list_mutex until after interruptible to prevent loosing

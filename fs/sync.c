@@ -192,7 +192,7 @@ int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
 		spin_unlock(&inode->i_lock);
 		mark_inode_dirty_sync(inode);
 	}
-	return file->f_op->fsync(file, start, end, datasync);
+	return call_fsync(file, start, end, datasync);
 }
 EXPORT_SYMBOL(vfs_fsync_range);
 
@@ -302,7 +302,7 @@ SYSCALL_DEFINE4(sync_file_range, int, fd, loff_t, offset, loff_t, nbytes,
 		goto out;
 
 	if (sizeof(pgoff_t) == 4) {
-		if (offset >= (0x100000000ULL << PAGE_CACHE_SHIFT)) {
+		if (offset >= (0x100000000ULL << PAGE_SHIFT)) {
 			/*
 			 * The range starts outside a 32 bit machine's
 			 * pagecache addressing capabilities.  Let it "succeed"
@@ -310,7 +310,7 @@ SYSCALL_DEFINE4(sync_file_range, int, fd, loff_t, offset, loff_t, nbytes,
 			ret = 0;
 			goto out;
 		}
-		if (endbyte >= (0x100000000ULL << PAGE_CACHE_SHIFT)) {
+		if (endbyte >= (0x100000000ULL << PAGE_SHIFT)) {
 			/*
 			 * Out to EOF
 			 */

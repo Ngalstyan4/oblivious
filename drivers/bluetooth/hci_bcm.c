@@ -287,9 +287,6 @@ static int bcm_open(struct hci_uart *hu)
 
 	hu->priv = bcm;
 
-	if (!hu->tty->dev)
-		goto out;
-
 	mutex_lock(&bcm_device_lock);
 	list_for_each(p, &bcm_device_list) {
 		struct bcm_device *dev = list_entry(p, struct bcm_device, list);
@@ -310,7 +307,7 @@ static int bcm_open(struct hci_uart *hu)
 	}
 
 	mutex_unlock(&bcm_device_lock);
-out:
+
 	return 0;
 }
 
@@ -475,7 +472,7 @@ static int bcm_enqueue(struct hci_uart *hu, struct sk_buff *skb)
 	bt_dev_dbg(hu->hdev, "hu %p skb %p", hu, skb);
 
 	/* Prepend skb with frame type */
-	memcpy(skb_push(skb, 1), &bt_cb(skb)->pkt_type, 1);
+	memcpy(skb_push(skb, 1), &hci_skb_pkt_type(skb), 1);
 	skb_queue_tail(&bcm->txq, skb);
 
 	return 0;
@@ -621,14 +618,25 @@ unlock:
 }
 #endif
 
-static const struct acpi_gpio_params device_wakeup_gpios = { 0, 0, false };
-static const struct acpi_gpio_params shutdown_gpios = { 1, 0, false };
-static const struct acpi_gpio_params host_wakeup_gpios = { 2, 0, false };
+static const struct acpi_gpio_params int_last_device_wakeup_gpios = { 0, 0, false };
+static const struct acpi_gpio_params int_last_shutdown_gpios = { 1, 0, false };
+static const struct acpi_gpio_params int_last_host_wakeup_gpios = { 2, 0, false };
 
-static const struct acpi_gpio_mapping acpi_bcm_default_gpios[] = {
-	{ "device-wakeup-gpios", &device_wakeup_gpios, 1 },
-	{ "shutdown-gpios", &shutdown_gpios, 1 },
-	{ "host-wakeup-gpios", &host_wakeup_gpios, 1 },
+static const struct acpi_gpio_mapping acpi_bcm_int_last_gpios[] = {
+	{ "device-wakeup-gpios", &int_last_device_wakeup_gpios, 1 },
+	{ "shutdown-gpios", &int_last_shutdown_gpios, 1 },
+	{ "host-wakeup-gpios", &int_last_host_wakeup_gpios, 1 },
+	{ },
+};
+
+static const struct acpi_gpio_params int_first_host_wakeup_gpios = { 0, 0, false };
+static const struct acpi_gpio_params int_first_device_wakeup_gpios = { 1, 0, false };
+static const struct acpi_gpio_params int_first_shutdown_gpios = { 2, 0, false };
+
+static const struct acpi_gpio_mapping acpi_bcm_int_first_gpios[] = {
+	{ "device-wakeup-gpios", &int_first_device_wakeup_gpios, 1 },
+	{ "shutdown-gpios", &int_first_shutdown_gpios, 1 },
+	{ "host-wakeup-gpios", &int_first_host_wakeup_gpios, 1 },
 	{ },
 };
 
@@ -643,6 +651,14 @@ static const struct dmi_system_id bcm_wrong_irq_dmi_table[] = {
 			DMI_EXACT_MATCH(DMI_SYS_VENDOR,
 					"ASUSTeK COMPUTER INC."),
 			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "T100TA"),
+		},
+		.driver_data = &acpi_active_low,
+	},
+	{	/* Handle ThinkPad 8 tablets with BCM2E55 chipset ACPI ID */
+		.ident = "Lenovo ThinkPad 8",
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "ThinkPad 8"),
 		},
 		.driver_data = &acpi_active_low,
 	},
@@ -687,12 +703,19 @@ static int bcm_acpi_probe(struct bcm_device *dev)
 	struct platform_device *pdev = dev->pdev;
 	LIST_HEAD(resources);
 	const struct dmi_system_id *dmi_id;
+	const struct acpi_gpio_mapping *gpio_mapping = acpi_bcm_int_last_gpios;
+	const struct acpi_device_id *id;
 	int ret;
 
-	/* Retrieve GPIO data */
 	dev->name = dev_name(&pdev->dev);
+
+	/* Retrieve GPIO data */
+	id = acpi_match_device(pdev->dev.driver->acpi_match_table, &pdev->dev);
+	if (id)
+		gpio_mapping = (const struct acpi_gpio_mapping *) id->driver_data;
+
 	ret = acpi_dev_add_driver_gpios(ACPI_COMPANION(&pdev->dev),
-					acpi_bcm_default_gpios);
+					gpio_mapping);
 	if (ret)
 		return ret;
 
@@ -801,7 +824,7 @@ static int bcm_remove(struct platform_device *pdev)
 
 static const struct hci_uart_proto bcm_proto = {
 	.id		= HCI_UART_BCM,
-	.name		= "BCM",
+	.name		= "Broadcom",
 	.manufacturer	= 15,
 	.init_speed	= 115200,
 	.oper_speed	= 4000000,
@@ -817,8 +840,22 @@ static const struct hci_uart_proto bcm_proto = {
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id bcm_acpi_match[] = {
-	{ "BCM2E39", 0 },
-	{ "BCM2E67", 0 },
+	{ "BCM2E1A", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E39", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E3A", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E3D", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E3F", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E40", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E54", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E55", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E64", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E65", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E67", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E71", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E7B", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E7C", (kernel_ulong_t)&acpi_bcm_int_last_gpios },
+	{ "BCM2E95", (kernel_ulong_t)&acpi_bcm_int_first_gpios },
+	{ "BCM2E96", (kernel_ulong_t)&acpi_bcm_int_first_gpios },
 	{ },
 };
 MODULE_DEVICE_TABLE(acpi, bcm_acpi_match);

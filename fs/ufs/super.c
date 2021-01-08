@@ -71,7 +71,7 @@
 
 #include <stdarg.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <linux/errno.h>
 #include <linux/fs.h>
@@ -132,7 +132,7 @@ static struct dentry *ufs_get_parent(struct dentry *child)
 	ino = ufs_inode_by_name(d_inode(child), &dot_dot);
 	if (!ino)
 		return ERR_PTR(-ENOENT);
-	return d_obtain_alias(ufs_iget(d_inode(child)->i_sb, ino));
+	return d_obtain_alias(ufs_iget(child->d_sb, ino));
 }
 
 static const struct export_operations ufs_export_ops = {
@@ -746,23 +746,6 @@ static void ufs_put_super(struct super_block *sb)
 	return;
 }
 
-static u64 ufs_max_bytes(struct super_block *sb)
-{
-	struct ufs_sb_private_info *uspi = UFS_SB(sb)->s_uspi;
-	int bits = uspi->s_apbshift;
-	u64 res;
-
-	if (bits > 21)
-		res = ~0ULL;
-	else
-		res = UFS_NDADDR + (1LL << bits) + (1LL << (2*bits)) +
-			(1LL << (3*bits));
-
-	if (res >= (MAX_LFS_FILESIZE >> uspi->s_bshift))
-		return MAX_LFS_FILESIZE;
-	return res << uspi->s_bshift;
-}
-
 static int ufs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct ufs_sb_info * sbi;
@@ -1229,7 +1212,6 @@ magic_found:
 			    "fast symlink size (%u)\n", uspi->s_maxsymlinklen);
 		uspi->s_maxsymlinklen = maxsymlen;
 	}
-	sb->s_maxbytes = ufs_max_bytes(sb);
 	sb->s_max_links = UFS_LINK_MAX;
 
 	inode = ufs_iget(sb, UFS_ROOTINO);
@@ -1445,7 +1427,7 @@ static int __init init_inodecache(void)
 	ufs_inode_cachep = kmem_cache_create("ufs_inode_cache",
 					     sizeof(struct ufs_inode_info),
 					     0, (SLAB_RECLAIM_ACCOUNT|
-						SLAB_MEM_SPREAD),
+						SLAB_MEM_SPREAD|SLAB_ACCOUNT),
 					     init_once);
 	if (ufs_inode_cachep == NULL)
 		return -ENOMEM;

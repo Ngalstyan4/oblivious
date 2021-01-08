@@ -29,6 +29,7 @@
 #include <linux/mii.h>
 #include <linux/ethtool.h>
 #include <linux/phy.h>
+#include <linux/phy_led_triggers.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/mdio.h>
@@ -143,13 +144,14 @@ static int phy_config_interrupt(struct phy_device *phydev, u32 interrupts)
  * Returns > 0 on success or < 0 on error. 0 means that auto-negotiation
  * is still pending.
  */
-static inline int phy_aneg_done(struct phy_device *phydev)
+int phy_aneg_done(struct phy_device *phydev)
 {
-	if (phydev->drv->aneg_done)
+	if (phydev->drv && phydev->drv->aneg_done)
 		return phydev->drv->aneg_done(phydev);
 
 	return genphy_aneg_done(phydev);
 }
+EXPORT_SYMBOL(phy_aneg_done);
 
 /* A structure for mapping a particular speed and duplex
  * combination to a particular SUPPORTED and ADVERTISED value
@@ -261,6 +263,41 @@ static inline unsigned int phy_find_valid(unsigned int idx, u32 features)
 }
 
 /**
+ * phy_supported_speeds - return all speeds currently supported by a phy device
+ * @phy: The phy device to return supported speeds of.
+ * @speeds: buffer to store supported speeds in.
+ * @size:   size of speeds buffer.
+ *
+ * Description: Returns the number of supported speeds, and fills the speeds
+ * buffer with the supported speeds. If speeds buffer is too small to contain
+ * all currently supported speeds, will return as many speeds as can fit.
+ */
+unsigned int phy_supported_speeds(struct phy_device *phy,
+				  unsigned int *speeds,
+				  unsigned int size)
+{
+	unsigned int count = 0;
+	unsigned int idx = 0;
+
+	while (idx < MAX_NUM_SETTINGS && count < size) {
+		idx = phy_find_valid(idx, phy->supported);
+
+		if (!(settings[idx].setting & phy->supported))
+			break;
+
+		/* Assumes settings are grouped by speed */
+		if ((count == 0) ||
+		    (speeds[count - 1] != settings[idx].speed)) {
+			speeds[count] = settings[idx].speed;
+			count++;
+		}
+		idx++;
+	}
+
+	return count;
+}
+
+/**
  * phy_check_valid - check if there is a valid PHY setting which matches
  *		     speed, duplex, and feature mask
  * @speed: speed to match
@@ -319,7 +356,7 @@ int phy_ethtool_sset(struct phy_device *phydev, struct ethtool_cmd *cmd)
 {
 	u32 speed = ethtool_cmd_speed(cmd);
 
-	if (cmd->phy_address != phydev->addr)
+	if (cmd->phy_address != phydev->mdio.addr)
 		return -EINVAL;
 
 	/* We make sure that we don't pass unsupported values in to the PHY */
@@ -353,7 +390,7 @@ int phy_ethtool_sset(struct phy_device *phydev, struct ethtool_cmd *cmd)
 
 	phydev->duplex = cmd->duplex;
 
-	phydev->mdix = cmd->eth_tp_mdix_ctrl;
+	phydev->mdix_ctrl = cmd->eth_tp_mdix_ctrl;
 
 	/* Restart the PHY */
 	phy_start_aneg(phydev);
@@ -361,6 +398,60 @@ int phy_ethtool_sset(struct phy_device *phydev, struct ethtool_cmd *cmd)
 	return 0;
 }
 EXPORT_SYMBOL(phy_ethtool_sset);
+
+int phy_ethtool_ksettings_set(struct phy_device *phydev,
+			      const struct ethtool_link_ksettings *cmd)
+{
+	u8 autoneg = cmd->base.autoneg;
+	u8 duplex = cmd->base.duplex;
+	u32 speed = cmd->base.speed;
+	u32 advertising;
+
+	if (cmd->base.phy_address != phydev->mdio.addr)
+		return -EINVAL;
+
+	ethtool_convert_link_mode_to_legacy_u32(&advertising,
+						cmd->link_modes.advertising);
+
+	/* We make sure that we don't pass unsupported values in to the PHY */
+	advertising &= phydev->supported;
+
+	/* Verify the settings we care about. */
+	if (autoneg != AUTONEG_ENABLE && autoneg != AUTONEG_DISABLE)
+		return -EINVAL;
+
+	if (autoneg == AUTONEG_ENABLE && advertising == 0)
+		return -EINVAL;
+
+	if (autoneg == AUTONEG_DISABLE &&
+	    ((speed != SPEED_1000 &&
+	      speed != SPEED_100 &&
+	      speed != SPEED_10) ||
+	     (duplex != DUPLEX_HALF &&
+	      duplex != DUPLEX_FULL)))
+		return -EINVAL;
+
+	phydev->autoneg = autoneg;
+
+	phydev->speed = speed;
+
+	phydev->advertising = advertising;
+
+	if (autoneg == AUTONEG_ENABLE)
+		phydev->advertising |= ADVERTISED_Autoneg;
+	else
+		phydev->advertising &= ~ADVERTISED_Autoneg;
+
+	phydev->duplex = duplex;
+
+	phydev->mdix_ctrl = cmd->base.eth_tp_mdix_ctrl;
+
+	/* Restart the PHY */
+	phy_start_aneg(phydev);
+
+	return 0;
+}
+EXPORT_SYMBOL(phy_ethtool_ksettings_set);
 
 int phy_ethtool_gset(struct phy_device *phydev, struct ethtool_cmd *cmd)
 {
@@ -375,15 +466,44 @@ int phy_ethtool_gset(struct phy_device *phydev, struct ethtool_cmd *cmd)
 		cmd->port = PORT_BNC;
 	else
 		cmd->port = PORT_MII;
-	cmd->phy_address = phydev->addr;
+	cmd->phy_address = phydev->mdio.addr;
 	cmd->transceiver = phy_is_internal(phydev) ?
 		XCVR_INTERNAL : XCVR_EXTERNAL;
 	cmd->autoneg = phydev->autoneg;
-	cmd->eth_tp_mdix_ctrl = phydev->mdix;
+	cmd->eth_tp_mdix_ctrl = phydev->mdix_ctrl;
+	cmd->eth_tp_mdix = phydev->mdix;
 
 	return 0;
 }
 EXPORT_SYMBOL(phy_ethtool_gset);
+
+int phy_ethtool_ksettings_get(struct phy_device *phydev,
+			      struct ethtool_link_ksettings *cmd)
+{
+	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.supported,
+						phydev->supported);
+
+	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.advertising,
+						phydev->advertising);
+
+	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.lp_advertising,
+						phydev->lp_advertising);
+
+	cmd->base.speed = phydev->speed;
+	cmd->base.duplex = phydev->duplex;
+	if (phydev->interface == PHY_INTERFACE_MODE_MOCA)
+		cmd->base.port = PORT_BNC;
+	else
+		cmd->base.port = PORT_MII;
+
+	cmd->base.phy_address = phydev->mdio.addr;
+	cmd->base.autoneg = phydev->autoneg;
+	cmd->base.eth_tp_mdix_ctrl = phydev->mdix_ctrl;
+	cmd->base.eth_tp_mdix = phydev->mdix;
+
+	return 0;
+}
+EXPORT_SYMBOL(phy_ethtool_ksettings_get);
 
 /**
  * phy_mii_ioctl - generic PHY MII ioctl interface
@@ -403,16 +523,17 @@ int phy_mii_ioctl(struct phy_device *phydev, struct ifreq *ifr, int cmd)
 
 	switch (cmd) {
 	case SIOCGMIIPHY:
-		mii_data->phy_id = phydev->addr;
+		mii_data->phy_id = phydev->mdio.addr;
 		/* fall through */
 
 	case SIOCGMIIREG:
-		mii_data->val_out = mdiobus_read(phydev->bus, mii_data->phy_id,
+		mii_data->val_out = mdiobus_read(phydev->mdio.bus,
+						 mii_data->phy_id,
 						 mii_data->reg_num);
 		return 0;
 
 	case SIOCSMIIREG:
-		if (mii_data->phy_id == phydev->addr) {
+		if (mii_data->phy_id == phydev->mdio.addr) {
 			switch (mii_data->reg_num) {
 			case MII_BMCR:
 				if ((val & (BMCR_RESET | BMCR_ANENABLE)) == 0) {
@@ -445,10 +566,10 @@ int phy_mii_ioctl(struct phy_device *phydev, struct ifreq *ifr, int cmd)
 			}
 		}
 
-		mdiobus_write(phydev->bus, mii_data->phy_id,
+		mdiobus_write(phydev->mdio.bus, mii_data->phy_id,
 			      mii_data->reg_num, val);
 
-		if (mii_data->phy_id == phydev->addr &&
+		if (mii_data->phy_id == phydev->mdio.addr &&
 		    mii_data->reg_num == MII_BMCR &&
 		    val & BMCR_RESET)
 			return phy_init_hw(phydev);
@@ -459,7 +580,7 @@ int phy_mii_ioctl(struct phy_device *phydev, struct ifreq *ifr, int cmd)
 		return 0;
 
 	case SIOCSHWTSTAMP:
-		if (phydev->drv->hwtstamp)
+		if (phydev->drv && phydev->drv->hwtstamp)
 			return phydev->drv->hwtstamp(phydev, ifr);
 		/* fall through */
 
@@ -470,17 +591,22 @@ int phy_mii_ioctl(struct phy_device *phydev, struct ifreq *ifr, int cmd)
 EXPORT_SYMBOL(phy_mii_ioctl);
 
 /**
- * phy_start_aneg - start auto-negotiation for this PHY device
+ * phy_start_aneg_priv - start auto-negotiation for this PHY device
  * @phydev: the phy_device struct
+ * @sync: indicate whether we should wait for the workqueue cancelation
  *
  * Description: Sanitizes the settings (if we're not autonegotiating
  *   them), and then calls the driver's config_aneg function.
  *   If the PHYCONTROL Layer is operating, we change the state to
  *   reflect the beginning of Auto-negotiation or forcing.
  */
-int phy_start_aneg(struct phy_device *phydev)
+static int phy_start_aneg_priv(struct phy_device *phydev, bool sync)
 {
+	bool trigger = 0;
 	int err;
+
+	if (!phydev->drv)
+		return -EIO;
 
 	mutex_lock(&phydev->lock);
 
@@ -504,9 +630,39 @@ int phy_start_aneg(struct phy_device *phydev)
 		}
 	}
 
+	/* Re-schedule a PHY state machine to check PHY status because
+	 * negotiation may already be done and aneg interrupt may not be
+	 * generated.
+	 */
+	if (phy_interrupt_is_valid(phydev) && (phydev->state == PHY_AN)) {
+		err = phy_aneg_done(phydev);
+		if (err > 0) {
+			trigger = true;
+			err = 0;
+		}
+	}
+
 out_unlock:
 	mutex_unlock(&phydev->lock);
+
+	if (trigger)
+		phy_trigger_machine(phydev, sync);
+
 	return err;
+}
+
+/**
+ * phy_start_aneg - start auto-negotiation for this PHY device
+ * @phydev: the phy_device struct
+ *
+ * Description: Sanitizes the settings (if we're not autonegotiating
+ *   them), and then calls the driver's config_aneg function.
+ *   If the PHYCONTROL Layer is operating, we change the state to
+ *   reflect the beginning of Auto-negotiation or forcing.
+ */
+int phy_start_aneg(struct phy_device *phydev)
+{
+	return phy_start_aneg_priv(phydev, true);
 }
 EXPORT_SYMBOL(phy_start_aneg);
 
@@ -523,6 +679,25 @@ EXPORT_SYMBOL(phy_start_aneg);
 void phy_start_machine(struct phy_device *phydev)
 {
 	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue, HZ);
+}
+
+/**
+ * phy_trigger_machine - trigger the state machine to run
+ *
+ * @phydev: the phy_device struct
+ * @sync: indicate whether we should wait for the workqueue cancelation
+ *
+ * Description: There has been a change in state which requires that the
+ *   state machine runs.
+ */
+
+void phy_trigger_machine(struct phy_device *phydev, bool sync)
+{
+	if (sync)
+		cancel_delayed_work_sync(&phydev->state_queue);
+	else
+		cancel_delayed_work(&phydev->state_queue);
+	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue, 0);
 }
 
 /**
@@ -557,6 +732,8 @@ static void phy_error(struct phy_device *phydev)
 	mutex_lock(&phydev->lock);
 	phydev->state = PHY_HALTED;
 	mutex_unlock(&phydev->lock);
+
+	phy_trigger_machine(phydev, false);
 }
 
 /**
@@ -565,7 +742,7 @@ static void phy_error(struct phy_device *phydev)
  * @phy_dat: phy_device pointer
  *
  * Description: When a PHY interrupt occurs, the handler disables
- * interrupts, and schedules a work task to clear the interrupt.
+ * interrupts, and uses phy_change to handle the interrupt.
  */
 static irqreturn_t phy_interrupt(int irq, void *phy_dat)
 {
@@ -574,15 +751,10 @@ static irqreturn_t phy_interrupt(int irq, void *phy_dat)
 	if (PHY_HALTED == phydev->state)
 		return IRQ_NONE;		/* It can't be ours.  */
 
-	/* The MDIO bus is not allowed to be written in interrupt
-	 * context, so we need to disable the irq here.  A work
-	 * queue will write the PHY to disable and clear the
-	 * interrupt, and then reenable the irq line.
-	 */
 	disable_irq_nosync(irq);
 	atomic_inc(&phydev->irq_disable);
 
-	queue_work(system_power_efficient_wq, &phydev->phy_queue);
+	phy_change(phydev);
 
 	return IRQ_HANDLED;
 }
@@ -640,12 +812,11 @@ phy_err:
 int phy_start_interrupts(struct phy_device *phydev)
 {
 	atomic_set(&phydev->irq_disable, 0);
-	if (request_irq(phydev->irq, phy_interrupt,
-				IRQF_SHARED,
-				"phy_interrupt",
-				phydev) < 0) {
+	if (request_threaded_irq(phydev->irq, NULL, phy_interrupt,
+				 IRQF_ONESHOT | IRQF_SHARED,
+				 phydev_name(phydev), phydev) < 0) {
 		pr_warn("%s: Can't get IRQ %d (PHY)\n",
-			phydev->bus->name, phydev->irq);
+			phydev->mdio.bus->name, phydev->irq);
 		phydev->irq = PHY_POLL;
 		return 0;
 	}
@@ -667,12 +838,6 @@ int phy_stop_interrupts(struct phy_device *phydev)
 
 	free_irq(phydev->irq, phydev);
 
-	/* Cannot call flush_scheduled_work() here as desired because
-	 * of rtnl_lock(), but we do not really care about what would
-	 * be done, except from enable_irq(), so cancel any work
-	 * possibly pending and take care of the matter below.
-	 */
-	cancel_work_sync(&phydev->phy_queue);
 	/* If work indeed has been cancelled, disable_irq() will have
 	 * been left unbalanced from phy_interrupt() and enable_irq()
 	 * has to be called so that other devices on the line work.
@@ -685,37 +850,37 @@ int phy_stop_interrupts(struct phy_device *phydev)
 EXPORT_SYMBOL(phy_stop_interrupts);
 
 /**
- * phy_change - Scheduled by the phy_interrupt/timer to handle PHY changes
- * @work: work_struct that describes the work to be done
+ * phy_change - Called by the phy_interrupt to handle PHY changes
+ * @phydev: phy_device struct that interrupted
  */
-void phy_change(struct work_struct *work)
+void phy_change(struct phy_device *phydev)
 {
-	struct phy_device *phydev =
-		container_of(work, struct phy_device, phy_queue);
+	if (phy_interrupt_is_valid(phydev)) {
+		if (phydev->drv->did_interrupt &&
+		    !phydev->drv->did_interrupt(phydev))
+			goto ignore;
 
-	if (phydev->drv->did_interrupt &&
-	    !phydev->drv->did_interrupt(phydev))
-		goto ignore;
-
-	if (phy_disable_interrupts(phydev))
-		goto phy_err;
+		if (phy_disable_interrupts(phydev))
+			goto phy_err;
+	}
 
 	mutex_lock(&phydev->lock);
 	if ((PHY_RUNNING == phydev->state) || (PHY_NOLINK == phydev->state))
 		phydev->state = PHY_CHANGELINK;
 	mutex_unlock(&phydev->lock);
 
-	atomic_dec(&phydev->irq_disable);
-	enable_irq(phydev->irq);
+	if (phy_interrupt_is_valid(phydev)) {
+		atomic_dec(&phydev->irq_disable);
+		enable_irq(phydev->irq);
 
-	/* Reenable interrupts */
-	if (PHY_HALTED != phydev->state &&
-	    phy_config_interrupt(phydev, PHY_INTERRUPT_ENABLED))
-		goto irq_enable_err;
+		/* Reenable interrupts */
+		if (PHY_HALTED != phydev->state &&
+		    phy_config_interrupt(phydev, PHY_INTERRUPT_ENABLED))
+			goto irq_enable_err;
+	}
 
 	/* reschedule state queue work to run as soon as possible */
-	cancel_delayed_work_sync(&phydev->state_queue);
-	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue, 0);
+	phy_trigger_machine(phydev, true);
 	return;
 
 ignore:
@@ -728,6 +893,18 @@ irq_enable_err:
 	atomic_inc(&phydev->irq_disable);
 phy_err:
 	phy_error(phydev);
+}
+
+/**
+ * phy_change_work - Scheduled by the phy_mac_interrupt to handle PHY changes
+ * @work: work_struct that describes the work to be done
+ */
+void phy_change_work(struct work_struct *work)
+{
+	struct phy_device *phydev =
+		container_of(work, struct phy_device, phy_queue);
+
+	phy_change(phydev);
 }
 
 /**
@@ -787,9 +964,11 @@ void phy_start(struct phy_device *phydev)
 		break;
 	case PHY_HALTED:
 		/* make sure interrupts are re-enabled for the PHY */
-		err = phy_enable_interrupts(phydev);
-		if (err < 0)
-			break;
+		if (phydev->irq != PHY_POLL) {
+			err = phy_enable_interrupts(phydev);
+			if (err < 0)
+				break;
+		}
 
 		phydev->state = PHY_RESUMING;
 		do_resume = true;
@@ -802,8 +981,16 @@ void phy_start(struct phy_device *phydev)
 	/* if phy was suspended, bring the physical link up again */
 	if (do_resume)
 		phy_resume(phydev);
+
+	phy_trigger_machine(phydev, true);
 }
 EXPORT_SYMBOL(phy_start);
+
+static void phy_adjust_link(struct phy_device *phydev)
+{
+	phydev->adjust_link(phydev->attached_dev);
+	phy_led_trigger_change_speed(phydev);
+}
 
 /**
  * phy_state_machine - Handle the state machine
@@ -823,7 +1010,7 @@ void phy_state_machine(struct work_struct *work)
 
 	old_state = phydev->state;
 
-	if (phydev->drv->link_change_notify)
+	if (phydev->drv && phydev->drv->link_change_notify)
 		phydev->drv->link_change_notify(phydev);
 
 	switch (phydev->state) {
@@ -847,7 +1034,7 @@ void phy_state_machine(struct work_struct *work)
 		if (!phydev->link) {
 			phydev->state = PHY_NOLINK;
 			netif_carrier_off(phydev->attached_dev);
-			phydev->adjust_link(phydev->attached_dev);
+			phy_adjust_link(phydev);
 			break;
 		}
 
@@ -860,7 +1047,7 @@ void phy_state_machine(struct work_struct *work)
 		if (err > 0) {
 			phydev->state = PHY_RUNNING;
 			netif_carrier_on(phydev->attached_dev);
-			phydev->adjust_link(phydev->attached_dev);
+			phy_adjust_link(phydev);
 
 		} else if (0 == phydev->link_timeout--)
 			needs_aneg = true;
@@ -887,7 +1074,7 @@ void phy_state_machine(struct work_struct *work)
 			}
 			phydev->state = PHY_RUNNING;
 			netif_carrier_on(phydev->attached_dev);
-			phydev->adjust_link(phydev->attached_dev);
+			phy_adjust_link(phydev);
 		}
 		break;
 	case PHY_FORCING:
@@ -903,13 +1090,13 @@ void phy_state_machine(struct work_struct *work)
 				needs_aneg = true;
 		}
 
-		phydev->adjust_link(phydev->attached_dev);
+		phy_adjust_link(phydev);
 		break;
 	case PHY_RUNNING:
-		/* Only register a CHANGE if we are polling or ignoring
-		 * interrupts and link changed since latest checking.
+		/* Only register a CHANGE if we are polling and link changed
+		 * since latest checking.
 		 */
-		if (!phy_interrupt_is_valid(phydev)) {
+		if (phydev->irq == PHY_POLL) {
 			old_link = phydev->link;
 			err = phy_read_status(phydev);
 			if (err)
@@ -925,7 +1112,7 @@ void phy_state_machine(struct work_struct *work)
 		 */
 		if (!phydev->link && phydev->state == PHY_RUNNING) {
 			phydev->state = PHY_CHANGELINK;
-			dev_err(&phydev->dev, "no link in PHY_RUNNING\n");
+			phydev_err(phydev, "no link in PHY_RUNNING\n");
 		}
 		break;
 	case PHY_CHANGELINK:
@@ -941,7 +1128,7 @@ void phy_state_machine(struct work_struct *work)
 			netif_carrier_off(phydev->attached_dev);
 		}
 
-		phydev->adjust_link(phydev->attached_dev);
+		phy_adjust_link(phydev);
 
 		if (phy_interrupt_is_valid(phydev))
 			err = phy_config_interrupt(phydev,
@@ -951,7 +1138,7 @@ void phy_state_machine(struct work_struct *work)
 		if (phydev->link) {
 			phydev->link = 0;
 			netif_carrier_off(phydev->attached_dev);
-			phydev->adjust_link(phydev->attached_dev);
+			phy_adjust_link(phydev);
 			do_suspend = true;
 		}
 		break;
@@ -975,7 +1162,7 @@ void phy_state_machine(struct work_struct *work)
 				} else	{
 					phydev->state = PHY_NOLINK;
 				}
-				phydev->adjust_link(phydev->attached_dev);
+				phy_adjust_link(phydev);
 			} else {
 				phydev->state = PHY_AN;
 				phydev->link_timeout = PHY_AN_TIMEOUT;
@@ -991,7 +1178,7 @@ void phy_state_machine(struct work_struct *work)
 			} else	{
 				phydev->state = PHY_NOLINK;
 			}
-			phydev->adjust_link(phydev->attached_dev);
+			phy_adjust_link(phydev);
 		}
 		break;
 	}
@@ -999,25 +1186,41 @@ void phy_state_machine(struct work_struct *work)
 	mutex_unlock(&phydev->lock);
 
 	if (needs_aneg)
-		err = phy_start_aneg(phydev);
+		err = phy_start_aneg_priv(phydev, false);
 	else if (do_suspend)
 		phy_suspend(phydev);
 
 	if (err < 0)
 		phy_error(phydev);
 
-	dev_dbg(&phydev->dev, "PHY state change %s -> %s\n",
-		phy_state_to_str(old_state), phy_state_to_str(phydev->state));
+	phydev_dbg(phydev, "PHY state change %s -> %s\n",
+		   phy_state_to_str(old_state),
+		   phy_state_to_str(phydev->state));
 
-	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue,
-			   PHY_STATE_TIME * HZ);
+	/* Only re-schedule a PHY state machine change if we are polling the
+	 * PHY, if PHY_IGNORE_INTERRUPT is set, then we will be moving
+	 * between states from phy_mac_interrupt()
+	 */
+	if (phydev->irq == PHY_POLL)
+		queue_delayed_work(system_power_efficient_wq, &phydev->state_queue,
+				   PHY_STATE_TIME * HZ);
 }
 
+/**
+ * phy_mac_interrupt - MAC says the link has changed
+ * @phydev: phy_device struct with changed link
+ * @new_link: Link is Up/Down.
+ *
+ * Description: The MAC layer is able indicate there has been a change
+ *   in the PHY link status. Set the new link status, and trigger the
+ *   state machine, work a work queue.
+ */
 void phy_mac_interrupt(struct phy_device *phydev, int new_link)
 {
-	cancel_work_sync(&phydev->phy_queue);
 	phydev->link = new_link;
-	schedule_work(&phydev->phy_queue);
+
+	/* Trigger a state machine change */
+	queue_work(system_power_efficient_wq, &phydev->phy_queue);
 }
 EXPORT_SYMBOL(phy_mac_interrupt);
 
@@ -1039,7 +1242,6 @@ static inline void mmd_phy_indirect(struct mii_bus *bus, int prtad, int devad,
  * @phydev: The PHY device bus
  * @prtad: MMD Address
  * @devad: MMD DEVAD
- * @addr: PHY address on the MII bus
  *
  * Description: it reads data from the MMD registers (clause 22 to access to
  * clause 45) of the specified phy address.
@@ -1049,14 +1251,14 @@ static inline void mmd_phy_indirect(struct mii_bus *bus, int prtad, int devad,
  * 3) Write reg 13 // MMD Data Command for MMD DEVAD
  * 3) Read  reg 14 // Read MMD data
  */
-int phy_read_mmd_indirect(struct phy_device *phydev, int prtad,
-				 int devad, int addr)
+int phy_read_mmd_indirect(struct phy_device *phydev, int prtad, int devad)
 {
 	struct phy_driver *phydrv = phydev->drv;
+	int addr = phydev->mdio.addr;
 	int value = -1;
 
 	if (!phydrv->read_mmd_indirect) {
-		struct mii_bus *bus = phydev->bus;
+		struct mii_bus *bus = phydev->mdio.bus;
 
 		mutex_lock(&bus->mdio_lock);
 		mmd_phy_indirect(bus, prtad, devad, addr);
@@ -1076,7 +1278,6 @@ EXPORT_SYMBOL(phy_read_mmd_indirect);
  * @phydev: The PHY device
  * @prtad: MMD Address
  * @devad: MMD DEVAD
- * @addr: PHY address on the MII bus
  * @data: data to write in the MMD register
  *
  * Description: Write data from the MMD registers of the specified
@@ -1088,12 +1289,13 @@ EXPORT_SYMBOL(phy_read_mmd_indirect);
  * 3) Write reg 14 // Write MMD data
  */
 void phy_write_mmd_indirect(struct phy_device *phydev, int prtad,
-				   int devad, int addr, u32 data)
+				   int devad, u32 data)
 {
 	struct phy_driver *phydrv = phydev->drv;
+	int addr = phydev->mdio.addr;
 
 	if (!phydrv->write_mmd_indirect) {
-		struct mii_bus *bus = phydev->bus;
+		struct mii_bus *bus = phydev->mdio.bus;
 
 		mutex_lock(&bus->mdio_lock);
 		mmd_phy_indirect(bus, prtad, devad, addr);
@@ -1119,6 +1321,9 @@ EXPORT_SYMBOL(phy_write_mmd_indirect);
  */
 int phy_init_eee(struct phy_device *phydev, bool clk_stop_enable)
 {
+	if (!phydev->drv)
+		return -EIO;
+
 	/* According to 802.3az,the EEE is supported only in full duplex-mode.
 	 * Also EEE feature is active when core is operating with MII, GMII
 	 * or RGMII (all kinds). Internal PHYs are also allowed to proceed and
@@ -1140,7 +1345,7 @@ int phy_init_eee(struct phy_device *phydev, bool clk_stop_enable)
 
 		/* First check if the EEE ability is supported */
 		eee_cap = phy_read_mmd_indirect(phydev, MDIO_PCS_EEE_ABLE,
-						MDIO_MMD_PCS, phydev->addr);
+						MDIO_MMD_PCS);
 		if (eee_cap <= 0)
 			goto eee_exit_err;
 
@@ -1152,12 +1357,12 @@ int phy_init_eee(struct phy_device *phydev, bool clk_stop_enable)
 		 * the EEE advertising registers.
 		 */
 		eee_lp = phy_read_mmd_indirect(phydev, MDIO_AN_EEE_LPABLE,
-					       MDIO_MMD_AN, phydev->addr);
+					       MDIO_MMD_AN);
 		if (eee_lp <= 0)
 			goto eee_exit_err;
 
 		eee_adv = phy_read_mmd_indirect(phydev, MDIO_AN_EEE_ADV,
-						MDIO_MMD_AN, phydev->addr);
+						MDIO_MMD_AN);
 		if (eee_adv <= 0)
 			goto eee_exit_err;
 
@@ -1171,15 +1376,13 @@ int phy_init_eee(struct phy_device *phydev, bool clk_stop_enable)
 			 * clock while it is signaling LPI.
 			 */
 			int val = phy_read_mmd_indirect(phydev, MDIO_CTRL1,
-							MDIO_MMD_PCS,
-							phydev->addr);
+							MDIO_MMD_PCS);
 			if (val < 0)
 				return val;
 
 			val |= MDIO_PCS_CTRL1_CLKSTOP_EN;
 			phy_write_mmd_indirect(phydev, MDIO_CTRL1,
-					       MDIO_MMD_PCS, phydev->addr,
-					       val);
+					       MDIO_MMD_PCS, val);
 		}
 
 		return 0; /* EEE supported */
@@ -1198,8 +1401,10 @@ EXPORT_SYMBOL(phy_init_eee);
  */
 int phy_get_eee_err(struct phy_device *phydev)
 {
-	return phy_read_mmd_indirect(phydev, MDIO_PCS_EEE_WK_ERR,
-				     MDIO_MMD_PCS, phydev->addr);
+	if (!phydev->drv)
+		return -EIO;
+
+	return phy_read_mmd_indirect(phydev, MDIO_PCS_EEE_WK_ERR, MDIO_MMD_PCS);
 }
 EXPORT_SYMBOL(phy_get_eee_err);
 
@@ -1215,23 +1420,23 @@ int phy_ethtool_get_eee(struct phy_device *phydev, struct ethtool_eee *data)
 {
 	int val;
 
+	if (!phydev->drv)
+		return -EIO;
+
 	/* Get Supported EEE */
-	val = phy_read_mmd_indirect(phydev, MDIO_PCS_EEE_ABLE,
-				    MDIO_MMD_PCS, phydev->addr);
+	val = phy_read_mmd_indirect(phydev, MDIO_PCS_EEE_ABLE, MDIO_MMD_PCS);
 	if (val < 0)
 		return val;
 	data->supported = mmd_eee_cap_to_ethtool_sup_t(val);
 
 	/* Get advertisement EEE */
-	val = phy_read_mmd_indirect(phydev, MDIO_AN_EEE_ADV,
-				    MDIO_MMD_AN, phydev->addr);
+	val = phy_read_mmd_indirect(phydev, MDIO_AN_EEE_ADV, MDIO_MMD_AN);
 	if (val < 0)
 		return val;
 	data->advertised = mmd_eee_adv_to_ethtool_adv_t(val);
 
 	/* Get LP advertisement EEE */
-	val = phy_read_mmd_indirect(phydev, MDIO_AN_EEE_LPABLE,
-				    MDIO_MMD_AN, phydev->addr);
+	val = phy_read_mmd_indirect(phydev, MDIO_AN_EEE_LPABLE, MDIO_MMD_AN);
 	if (val < 0)
 		return val;
 	data->lp_advertised = mmd_eee_adv_to_ethtool_adv_t(val);
@@ -1251,8 +1456,13 @@ int phy_ethtool_set_eee(struct phy_device *phydev, struct ethtool_eee *data)
 {
 	int val = ethtool_adv_to_mmd_eee_adv_t(data->advertised);
 
-	phy_write_mmd_indirect(phydev, MDIO_AN_EEE_ADV, MDIO_MMD_AN,
-			       phydev->addr, val);
+	if (!phydev->drv)
+		return -EIO;
+
+	/* Mask prohibited EEE modes */
+	val &= ~phydev->eee_broken_modes;
+
+	phy_write_mmd_indirect(phydev, MDIO_AN_EEE_ADV, MDIO_MMD_AN, val);
 
 	return 0;
 }
@@ -1260,7 +1470,7 @@ EXPORT_SYMBOL(phy_ethtool_set_eee);
 
 int phy_ethtool_set_wol(struct phy_device *phydev, struct ethtool_wolinfo *wol)
 {
-	if (phydev->drv->set_wol)
+	if (phydev->drv && phydev->drv->set_wol)
 		return phydev->drv->set_wol(phydev, wol);
 
 	return -EOPNOTSUPP;
@@ -1269,7 +1479,45 @@ EXPORT_SYMBOL(phy_ethtool_set_wol);
 
 void phy_ethtool_get_wol(struct phy_device *phydev, struct ethtool_wolinfo *wol)
 {
-	if (phydev->drv->get_wol)
+	if (phydev->drv && phydev->drv->get_wol)
 		phydev->drv->get_wol(phydev, wol);
 }
 EXPORT_SYMBOL(phy_ethtool_get_wol);
+
+int phy_ethtool_get_link_ksettings(struct net_device *ndev,
+				   struct ethtool_link_ksettings *cmd)
+{
+	struct phy_device *phydev = ndev->phydev;
+
+	if (!phydev)
+		return -ENODEV;
+
+	return phy_ethtool_ksettings_get(phydev, cmd);
+}
+EXPORT_SYMBOL(phy_ethtool_get_link_ksettings);
+
+int phy_ethtool_set_link_ksettings(struct net_device *ndev,
+				   const struct ethtool_link_ksettings *cmd)
+{
+	struct phy_device *phydev = ndev->phydev;
+
+	if (!phydev)
+		return -ENODEV;
+
+	return phy_ethtool_ksettings_set(phydev, cmd);
+}
+EXPORT_SYMBOL(phy_ethtool_set_link_ksettings);
+
+int phy_ethtool_nway_reset(struct net_device *ndev)
+{
+	struct phy_device *phydev = ndev->phydev;
+
+	if (!phydev)
+		return -ENODEV;
+
+	if (!phydev->drv)
+		return -EIO;
+
+	return genphy_restart_aneg(phydev);
+}
+EXPORT_SYMBOL(phy_ethtool_nway_reset);

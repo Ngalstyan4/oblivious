@@ -44,7 +44,6 @@ i40e_status i40e_set_mac_type(struct i40e_hw *hw)
 		switch (hw->device_id) {
 		case I40E_DEV_ID_SFP_XL710:
 		case I40E_DEV_ID_QEMU:
-		case I40E_DEV_ID_KX_A:
 		case I40E_DEV_ID_KX_B:
 		case I40E_DEV_ID_KX_C:
 		case I40E_DEV_ID_QSFP_A:
@@ -54,15 +53,17 @@ i40e_status i40e_set_mac_type(struct i40e_hw *hw)
 		case I40E_DEV_ID_10G_BASE_T4:
 		case I40E_DEV_ID_20G_KR2:
 		case I40E_DEV_ID_20G_KR2_A:
+		case I40E_DEV_ID_25G_B:
+		case I40E_DEV_ID_25G_SFP28:
 			hw->mac.type = I40E_MAC_XL710;
 			break;
 		case I40E_DEV_ID_SFP_X722:
 		case I40E_DEV_ID_1G_BASE_T_X722:
 		case I40E_DEV_ID_10G_BASE_T_X722:
+		case I40E_DEV_ID_SFP_I_X722:
 			hw->mac.type = I40E_MAC_X722;
 			break;
 		case I40E_DEV_ID_X722_VF:
-		case I40E_DEV_ID_X722_VF_HV:
 			hw->mac.type = I40E_MAC_X722_VF;
 			break;
 		case I40E_DEV_ID_VF:
@@ -302,9 +303,7 @@ void i40evf_debug_aq(struct i40e_hw *hw, enum i40e_debug_mask mask, void *desc,
 		   void *buffer, u16 buf_len)
 {
 	struct i40e_aq_desc *aq_desc = (struct i40e_aq_desc *)desc;
-	u16 len = le16_to_cpu(aq_desc->datalen);
 	u8 *buf = (u8 *)buffer;
-	u16 i = 0;
 
 	if ((!(mask & hw->debug_mask)) || (desc == NULL))
 		return;
@@ -326,16 +325,24 @@ void i40evf_debug_aq(struct i40e_hw *hw, enum i40e_debug_mask mask, void *desc,
 		   le32_to_cpu(aq_desc->params.external.addr_low));
 
 	if ((buffer != NULL) && (aq_desc->datalen != 0)) {
+		u16 len = le16_to_cpu(aq_desc->datalen);
+
 		i40e_debug(hw, mask, "AQ CMD Buffer:\n");
 		if (buf_len < len)
 			len = buf_len;
 		/* write the full 16-byte chunks */
-		for (i = 0; i < (len - 16); i += 16)
-			i40e_debug(hw, mask, "\t0x%04X  %16ph\n", i, buf + i);
-		/* write whatever's left over without overrunning the buffer */
-		if (i < len)
-			i40e_debug(hw, mask, "\t0x%04X  %*ph\n",
-					     i, len - i, buf + i);
+		if (hw->debug_mask & mask) {
+			char prefix[20];
+
+			snprintf(prefix, 20,
+				 "i40evf %02x:%02x.%x: \t0x",
+				 hw->bus.bus_id,
+				 hw->bus.device,
+				 hw->bus.func);
+
+			print_hex_dump(KERN_INFO, prefix, DUMP_PREFIX_OFFSET,
+				       16, 1, buf, len, false);
+		}
 	}
 }
 
@@ -903,6 +910,131 @@ struct i40e_rx_ptype_decoded i40evf_ptype_lookup[] = {
 	I40E_PTT_UNUSED_ENTRY(254),
 	I40E_PTT_UNUSED_ENTRY(255)
 };
+
+/**
+ * i40evf_aq_rx_ctl_read_register - use FW to read from an Rx control register
+ * @hw: pointer to the hw struct
+ * @reg_addr: register address
+ * @reg_val: ptr to register value
+ * @cmd_details: pointer to command details structure or NULL
+ *
+ * Use the firmware to read the Rx control register,
+ * especially useful if the Rx unit is under heavy pressure
+ **/
+i40e_status i40evf_aq_rx_ctl_read_register(struct i40e_hw *hw,
+				u32 reg_addr, u32 *reg_val,
+				struct i40e_asq_cmd_details *cmd_details)
+{
+	struct i40e_aq_desc desc;
+	struct i40e_aqc_rx_ctl_reg_read_write *cmd_resp =
+		(struct i40e_aqc_rx_ctl_reg_read_write *)&desc.params.raw;
+	i40e_status status;
+
+	if (!reg_val)
+		return I40E_ERR_PARAM;
+
+	i40evf_fill_default_direct_cmd_desc(&desc,
+					    i40e_aqc_opc_rx_ctl_reg_read);
+
+	cmd_resp->address = cpu_to_le32(reg_addr);
+
+	status = i40evf_asq_send_command(hw, &desc, NULL, 0, cmd_details);
+
+	if (status == 0)
+		*reg_val = le32_to_cpu(cmd_resp->value);
+
+	return status;
+}
+
+/**
+ * i40evf_read_rx_ctl - read from an Rx control register
+ * @hw: pointer to the hw struct
+ * @reg_addr: register address
+ **/
+u32 i40evf_read_rx_ctl(struct i40e_hw *hw, u32 reg_addr)
+{
+	i40e_status status = 0;
+	bool use_register;
+	int retry = 5;
+	u32 val = 0;
+
+	use_register = (hw->aq.api_maj_ver == 1) && (hw->aq.api_min_ver < 5);
+	if (!use_register) {
+do_retry:
+		status = i40evf_aq_rx_ctl_read_register(hw, reg_addr,
+							&val, NULL);
+		if (hw->aq.asq_last_status == I40E_AQ_RC_EAGAIN && retry) {
+			usleep_range(1000, 2000);
+			retry--;
+			goto do_retry;
+		}
+	}
+
+	/* if the AQ access failed, try the old-fashioned way */
+	if (status || use_register)
+		val = rd32(hw, reg_addr);
+
+	return val;
+}
+
+/**
+ * i40evf_aq_rx_ctl_write_register
+ * @hw: pointer to the hw struct
+ * @reg_addr: register address
+ * @reg_val: register value
+ * @cmd_details: pointer to command details structure or NULL
+ *
+ * Use the firmware to write to an Rx control register,
+ * especially useful if the Rx unit is under heavy pressure
+ **/
+i40e_status i40evf_aq_rx_ctl_write_register(struct i40e_hw *hw,
+				u32 reg_addr, u32 reg_val,
+				struct i40e_asq_cmd_details *cmd_details)
+{
+	struct i40e_aq_desc desc;
+	struct i40e_aqc_rx_ctl_reg_read_write *cmd =
+		(struct i40e_aqc_rx_ctl_reg_read_write *)&desc.params.raw;
+	i40e_status status;
+
+	i40evf_fill_default_direct_cmd_desc(&desc,
+					    i40e_aqc_opc_rx_ctl_reg_write);
+
+	cmd->address = cpu_to_le32(reg_addr);
+	cmd->value = cpu_to_le32(reg_val);
+
+	status = i40evf_asq_send_command(hw, &desc, NULL, 0, cmd_details);
+
+	return status;
+}
+
+/**
+ * i40evf_write_rx_ctl - write to an Rx control register
+ * @hw: pointer to the hw struct
+ * @reg_addr: register address
+ * @reg_val: register value
+ **/
+void i40evf_write_rx_ctl(struct i40e_hw *hw, u32 reg_addr, u32 reg_val)
+{
+	i40e_status status = 0;
+	bool use_register;
+	int retry = 5;
+
+	use_register = (hw->aq.api_maj_ver == 1) && (hw->aq.api_min_ver < 5);
+	if (!use_register) {
+do_retry:
+		status = i40evf_aq_rx_ctl_write_register(hw, reg_addr,
+							 reg_val, NULL);
+		if (hw->aq.asq_last_status == I40E_AQ_RC_EAGAIN && retry) {
+			usleep_range(1000, 2000);
+			retry--;
+			goto do_retry;
+		}
+	}
+
+	/* if the AQ access failed, try the old-fashioned way */
+	if (status || use_register)
+		wr32(hw, reg_addr, reg_val);
+}
 
 /**
  * i40e_aq_send_msg_to_pf

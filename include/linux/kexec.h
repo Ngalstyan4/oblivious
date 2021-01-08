@@ -14,6 +14,8 @@
 
 #if !defined(__ASSEMBLY__)
 
+#include <asm/io.h>
+
 #include <uapi/linux/kexec.h>
 
 #ifdef CONFIG_KEXEC_CORE
@@ -41,7 +43,7 @@
 #endif
 
 #ifndef KEXEC_CONTROL_MEMORY_GFP
-#define KEXEC_CONTROL_MEMORY_GFP GFP_KERNEL
+#define KEXEC_CONTROL_MEMORY_GFP (GFP_KERNEL | __GFP_NORETRY)
 #endif
 
 #ifndef KEXEC_CONTROL_PAGE_SIZE
@@ -109,11 +111,7 @@ struct compat_kexec_segment {
 };
 #endif
 
-struct kexec_sha_region {
-	unsigned long start;
-	unsigned long len;
-};
-
+#ifdef CONFIG_KEXEC_FILE
 struct purgatory_info {
 	/* Pointer to elf header of read only purgatory */
 	Elf_Ehdr *ehdr;
@@ -129,6 +127,57 @@ struct purgatory_info {
 	/* Address where purgatory is finally loaded and is executed from */
 	unsigned long purgatory_load_addr;
 };
+
+typedef int (kexec_probe_t)(const char *kernel_buf, unsigned long kernel_size);
+typedef void *(kexec_load_t)(struct kimage *image, char *kernel_buf,
+			     unsigned long kernel_len, char *initrd,
+			     unsigned long initrd_len, char *cmdline,
+			     unsigned long cmdline_len);
+typedef int (kexec_cleanup_t)(void *loader_data);
+
+#ifdef CONFIG_KEXEC_VERIFY_SIG
+typedef int (kexec_verify_sig_t)(const char *kernel_buf,
+				 unsigned long kernel_len);
+#endif
+
+struct kexec_file_ops {
+	kexec_probe_t *probe;
+	kexec_load_t *load;
+	kexec_cleanup_t *cleanup;
+#ifdef CONFIG_KEXEC_VERIFY_SIG
+	kexec_verify_sig_t *verify_sig;
+#endif
+};
+
+/**
+ * struct kexec_buf - parameters for finding a place for a buffer in memory
+ * @image:	kexec image in which memory to search.
+ * @buffer:	Contents which will be copied to the allocated memory.
+ * @bufsz:	Size of @buffer.
+ * @mem:	On return will have address of the buffer in memory.
+ * @memsz:	Size for the buffer in memory.
+ * @buf_align:	Minimum alignment needed.
+ * @buf_min:	The buffer can't be placed below this address.
+ * @buf_max:	The buffer can't be placed above this address.
+ * @top_down:	Allocate from top of memory.
+ */
+struct kexec_buf {
+	struct kimage *image;
+	void *buffer;
+	unsigned long bufsz;
+	unsigned long mem;
+	unsigned long memsz;
+	unsigned long buf_align;
+	unsigned long buf_min;
+	unsigned long buf_max;
+	bool top_down;
+};
+
+int __weak arch_kexec_walk_mem(struct kexec_buf *kbuf,
+			       int (*func)(u64, u64, void *));
+extern int kexec_add_buffer(struct kexec_buf *kbuf);
+int kexec_locate_mem_hole(struct kexec_buf *kbuf);
+#endif /* CONFIG_KEXEC_FILE */
 
 struct kimage {
 	kimage_entry_t head;
@@ -161,6 +210,7 @@ struct kimage {
 	struct kimage_arch arch;
 #endif
 
+#ifdef CONFIG_KEXEC_FILE
 	/* Additional fields for file based kexec syscall */
 	void *kernel_buf;
 	unsigned long kernel_buf_len;
@@ -179,38 +229,7 @@ struct kimage {
 
 	/* Information for loading purgatory */
 	struct purgatory_info purgatory_info;
-};
-
-/*
- * Keeps track of buffer parameters as provided by caller for requesting
- * memory placement of buffer.
- */
-struct kexec_buf {
-	struct kimage *image;
-	char *buffer;
-	unsigned long bufsz;
-	unsigned long mem;
-	unsigned long memsz;
-	unsigned long buf_align;
-	unsigned long buf_min;
-	unsigned long buf_max;
-	bool top_down;		/* allocate from top of memory hole */
-};
-
-typedef int (kexec_probe_t)(const char *kernel_buf, unsigned long kernel_size);
-typedef void *(kexec_load_t)(struct kimage *image, char *kernel_buf,
-			     unsigned long kernel_len, char *initrd,
-			     unsigned long initrd_len, char *cmdline,
-			     unsigned long cmdline_len);
-typedef int (kexec_cleanup_t)(void *loader_data);
-typedef int (kexec_verify_sig_t)(const char *kernel_buf,
-				 unsigned long kernel_len);
-
-struct kexec_file_ops {
-	kexec_probe_t *probe;
-	kexec_load_t *load;
-	kexec_cleanup_t *cleanup;
-	kexec_verify_sig_t *verify_sig;
+#endif
 };
 
 /* kexec interface functions */
@@ -222,11 +241,6 @@ extern asmlinkage long sys_kexec_load(unsigned long entry,
 					struct kexec_segment __user *segments,
 					unsigned long flags);
 extern int kernel_kexec(void);
-extern int kexec_add_buffer(struct kimage *image, char *buffer,
-			    unsigned long bufsz, unsigned long memsz,
-			    unsigned long buf_align, unsigned long buf_min,
-			    unsigned long buf_max, bool top_down,
-			    unsigned long *load_addr);
 extern struct page *kimage_alloc_control_pages(struct kimage *image,
 						unsigned int order);
 extern int kexec_load_purgatory(struct kimage *image, unsigned long min,
@@ -237,16 +251,16 @@ extern int kexec_purgatory_get_set_symbol(struct kimage *image,
 					  unsigned int size, bool get_value);
 extern void *kexec_purgatory_get_symbol_addr(struct kimage *image,
 					     const char *name);
+extern void __crash_kexec(struct pt_regs *);
 extern void crash_kexec(struct pt_regs *);
 int kexec_should_crash(struct task_struct *);
+int kexec_crash_loaded(void);
 void crash_save_cpu(struct pt_regs *regs, int cpu);
 void crash_save_vmcoreinfo(void);
-void crash_map_reserved_pages(void);
-void crash_unmap_reserved_pages(void);
 void arch_crash_save_vmcoreinfo(void);
 __printf(1, 2)
 void vmcoreinfo_append_str(const char *fmt, ...);
-unsigned long paddr_vmcoreinfo_note(void);
+phys_addr_t paddr_vmcoreinfo_note(void);
 
 #define VMCOREINFO_OSRELEASE(value) \
 	vmcoreinfo_append_str("OSRELEASE=%s\n", value)
@@ -328,12 +342,54 @@ int __weak arch_kexec_apply_relocations_add(const Elf_Ehdr *ehdr,
 					Elf_Shdr *sechdrs, unsigned int relsec);
 int __weak arch_kexec_apply_relocations(const Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
 					unsigned int relsec);
+void arch_kexec_protect_crashkres(void);
+void arch_kexec_unprotect_crashkres(void);
+
+#ifndef page_to_boot_pfn
+static inline unsigned long page_to_boot_pfn(struct page *page)
+{
+	return page_to_pfn(page);
+}
+#endif
+
+#ifndef boot_pfn_to_page
+static inline struct page *boot_pfn_to_page(unsigned long boot_pfn)
+{
+	return pfn_to_page(boot_pfn);
+}
+#endif
+
+#ifndef phys_to_boot_phys
+static inline unsigned long phys_to_boot_phys(phys_addr_t phys)
+{
+	return phys;
+}
+#endif
+
+#ifndef boot_phys_to_phys
+static inline phys_addr_t boot_phys_to_phys(unsigned long boot_phys)
+{
+	return boot_phys;
+}
+#endif
+
+static inline unsigned long virt_to_boot_phys(void *addr)
+{
+	return phys_to_boot_phys(__pa((unsigned long)addr));
+}
+
+static inline void *boot_phys_to_virt(unsigned long entry)
+{
+	return phys_to_virt(boot_phys_to_phys(entry));
+}
 
 #else /* !CONFIG_KEXEC_CORE */
 struct pt_regs;
 struct task_struct;
+static inline void __crash_kexec(struct pt_regs *regs) { }
 static inline void crash_kexec(struct pt_regs *regs) { }
 static inline int kexec_should_crash(struct task_struct *p) { return 0; }
+static inline int kexec_crash_loaded(void) { return 0; }
 #define kexec_in_progress false
 #endif /* CONFIG_KEXEC_CORE */
 

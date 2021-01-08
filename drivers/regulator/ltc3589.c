@@ -161,7 +161,7 @@ static int ltc3589_set_suspend_mode(struct regulator_dev *rdev,
 }
 
 /* SW1, SW2, SW3, LDO2 */
-static struct regulator_ops ltc3589_linear_regulator_ops = {
+static const struct regulator_ops ltc3589_linear_regulator_ops = {
 	.enable = regulator_enable_regmap,
 	.disable = regulator_disable_regmap,
 	.is_enabled = regulator_is_enabled_regmap,
@@ -175,18 +175,18 @@ static struct regulator_ops ltc3589_linear_regulator_ops = {
 };
 
 /* BB_OUT, LDO3 */
-static struct regulator_ops ltc3589_fixed_regulator_ops = {
+static const struct regulator_ops ltc3589_fixed_regulator_ops = {
 	.enable = regulator_enable_regmap,
 	.disable = regulator_disable_regmap,
 	.is_enabled = regulator_is_enabled_regmap,
 };
 
 /* LDO1 */
-static struct regulator_ops ltc3589_fixed_standby_regulator_ops = {
+static const struct regulator_ops ltc3589_fixed_standby_regulator_ops = {
 };
 
 /* LDO4 */
-static struct regulator_ops ltc3589_table_regulator_ops = {
+static const struct regulator_ops ltc3589_table_regulator_ops = {
 	.enable = regulator_enable_regmap,
 	.disable = regulator_disable_regmap,
 	.is_enabled = regulator_is_enabled_regmap,
@@ -520,12 +520,15 @@ static int ltc3589_probe(struct i2c_client *client,
 		}
 	}
 
-	ret = devm_request_threaded_irq(dev, client->irq, NULL, ltc3589_isr,
-					IRQF_TRIGGER_LOW | IRQF_ONESHOT,
-					client->name, ltc3589);
-	if (ret) {
-		dev_err(dev, "Failed to request IRQ: %d\n", ret);
-		return ret;
+	if (client->irq) {
+		ret = devm_request_threaded_irq(dev, client->irq, NULL,
+						ltc3589_isr,
+						IRQF_TRIGGER_LOW | IRQF_ONESHOT,
+						client->name, ltc3589);
+		if (ret) {
+			dev_err(dev, "Failed to request IRQ: %d\n", ret);
+			return ret;
+		}
 	}
 
 	return 0;

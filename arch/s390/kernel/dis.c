@@ -16,17 +16,16 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/kallsyms.h>
 #include <linux/reboot.h>
 #include <linux/kprobes.h>
 #include <linux/kdebug.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/dis.h>
 #include <asm/io.h>
 #include <linux/atomic.h>
-#include <asm/mathemu.h>
 #include <asm/cpcmd.h>
 #include <asm/lowcore.h>
 #include <asm/debug.h>
@@ -1549,7 +1548,6 @@ static struct s390_insn opcode_e7[] = {
 	{ "vfsq", 0xce, INSTR_VRR_VV000MM },
 	{ "vfs", 0xe2, INSTR_VRR_VVV00MM },
 	{ "vftci", 0x4a, INSTR_VRI_VVIMM },
-	{ "", 0, INSTR_INVALID }
 };
 
 static struct s390_insn opcode_eb[] = {
@@ -1921,23 +1919,16 @@ static int print_insn(char *buffer, unsigned char *code, unsigned long addr)
 			}
 			if (separator)
 				ptr += sprintf(ptr, "%c", separator);
-			/*
-			 * Use four '%' characters below because of the
-			 * following two conversions:
-			 *
-			 *  1) sprintf: %%%%r -> %%r
-			 *  2) printk : %%r   -> %r
-			 */
 			if (operand->flags & OPERAND_GPR)
-				ptr += sprintf(ptr, "%%%%r%i", value);
+				ptr += sprintf(ptr, "%%r%i", value);
 			else if (operand->flags & OPERAND_FPR)
-				ptr += sprintf(ptr, "%%%%f%i", value);
+				ptr += sprintf(ptr, "%%f%i", value);
 			else if (operand->flags & OPERAND_AR)
-				ptr += sprintf(ptr, "%%%%a%i", value);
+				ptr += sprintf(ptr, "%%a%i", value);
 			else if (operand->flags & OPERAND_CR)
-				ptr += sprintf(ptr, "%%%%c%i", value);
+				ptr += sprintf(ptr, "%%c%i", value);
 			else if (operand->flags & OPERAND_VR)
-				ptr += sprintf(ptr, "%%%%v%i", value);
+				ptr += sprintf(ptr, "%%v%i", value);
 			else if (operand->flags & OPERAND_PCREL)
 				ptr += sprintf(ptr, "%lx", (signed int) value
 								      + addr);
@@ -1962,7 +1953,7 @@ void show_code(struct pt_regs *regs)
 {
 	char *mode = user_mode(regs) ? "User" : "Krnl";
 	unsigned char code[64];
-	char buffer[128], *ptr;
+	char buffer[64], *ptr;
 	mm_segment_t old_fs;
 	unsigned long addr;
 	int start, end, opsize, hops, i;
@@ -2023,12 +2014,12 @@ void show_code(struct pt_regs *regs)
 			*ptr++ = '\t';
 		ptr += print_insn(ptr, code + start, addr);
 		start += opsize;
-		printk(buffer);
+		pr_cont("%s", buffer);
 		ptr = buffer;
-		ptr += sprintf(ptr, "\n\t  ");
+		ptr += sprintf(ptr, "\n          ");
 		hops++;
 	}
-	printk("\n");
+	pr_cont("\n");
 }
 
 void print_fn_code(unsigned char *code, unsigned long len)
@@ -2050,7 +2041,7 @@ void print_fn_code(unsigned char *code, unsigned long len)
 		ptr += print_insn(ptr, code, (unsigned long) code);
 		*ptr++ = '\n';
 		*ptr++ = 0;
-		printk(buffer);
+		printk("%s", buffer);
 		code += opsize;
 		len -= opsize;
 	}

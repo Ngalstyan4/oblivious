@@ -30,6 +30,7 @@
 
 #include <drm/drmP.h>
 #include <drm/drm_crtc_helper.h>
+#include <drm/drm_encoder.h>
 #include "vmwgfx_drv.h"
 
 /**
@@ -178,11 +179,9 @@ struct vmw_display_unit {
 	int gui_x;
 	int gui_y;
 	bool is_implicit;
-};
-
-struct vmw_validation_ctx {
-	struct vmw_resource *res;
-	struct vmw_dma_buffer *buf;
+	bool active_implicit;
+	int set_gui_x;
+	int set_gui_y;
 };
 
 #define vmw_crtc_to_du(x) \
@@ -197,9 +196,9 @@ struct vmw_validation_ctx {
 void vmw_du_cleanup(struct vmw_display_unit *du);
 void vmw_du_crtc_save(struct drm_crtc *crtc);
 void vmw_du_crtc_restore(struct drm_crtc *crtc);
-void vmw_du_crtc_gamma_set(struct drm_crtc *crtc,
+int vmw_du_crtc_gamma_set(struct drm_crtc *crtc,
 			   u16 *r, u16 *g, u16 *b,
-			   uint32_t start, uint32_t size);
+			   uint32_t size);
 int vmw_du_crtc_cursor_set2(struct drm_crtc *crtc, struct drm_file *file_priv,
 			    uint32_t handle, uint32_t width, uint32_t height,
 			    int32_t hot_x, int32_t hot_y);
@@ -235,10 +234,9 @@ void vmw_kms_helper_buffer_finish(struct vmw_private *dev_priv,
 				  struct drm_vmw_fence_rep __user *
 				  user_fence_rep);
 int vmw_kms_helper_resource_prepare(struct vmw_resource *res,
-				    bool interruptible,
-				    struct vmw_validation_ctx *ctx);
-void vmw_kms_helper_resource_revert(struct vmw_validation_ctx *ctx);
-void vmw_kms_helper_resource_finish(struct vmw_validation_ctx *ctx,
+				    bool interruptible);
+void vmw_kms_helper_resource_revert(struct vmw_resource *res);
+void vmw_kms_helper_resource_finish(struct vmw_resource *res,
 				    struct vmw_fence_obj **out_fence);
 int vmw_kms_readback(struct vmw_private *dev_priv,
 		     struct drm_file *file_priv,
@@ -251,7 +249,7 @@ vmw_kms_new_framebuffer(struct vmw_private *dev_priv,
 			struct vmw_dma_buffer *dmabuf,
 			struct vmw_surface *surface,
 			bool only_2d,
-			const struct drm_mode_fb_cmd *mode_cmd);
+			const struct drm_mode_fb_cmd2 *mode_cmd);
 int vmw_kms_fbdev_init_data(struct vmw_private *dev_priv,
 			    unsigned unit,
 			    u32 max_width,
@@ -260,6 +258,18 @@ int vmw_kms_fbdev_init_data(struct vmw_private *dev_priv,
 			    struct drm_crtc **p_crtc,
 			    struct drm_display_mode **p_mode);
 void vmw_guess_mode_timing(struct drm_display_mode *mode);
+void vmw_kms_del_active(struct vmw_private *dev_priv,
+			struct vmw_display_unit *du);
+void vmw_kms_add_active(struct vmw_private *dev_priv,
+			struct vmw_display_unit *du,
+			struct vmw_framebuffer *vfb);
+bool vmw_kms_crtc_flippable(struct vmw_private *dev_priv,
+			    struct drm_crtc *crtc);
+void vmw_kms_update_implicit_fb(struct vmw_private *dev_priv,
+				struct drm_crtc *crtc);
+void vmw_kms_create_implicit_placement_property(struct vmw_private *dev_priv,
+						bool immutable);
+
 
 /*
  * Legacy display unit functions - vmwgfx_ldu.c
@@ -293,6 +303,7 @@ int vmw_kms_sou_do_surface_dirty(struct vmw_private *dev_priv,
 int vmw_kms_sou_do_dmabuf_dirty(struct vmw_private *dev_priv,
 				struct vmw_framebuffer *framebuffer,
 				struct drm_clip_rect *clips,
+				struct drm_vmw_rect *vclips,
 				unsigned num_clips, int increment,
 				bool interruptible,
 				struct vmw_fence_obj **out_fence);

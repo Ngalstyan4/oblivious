@@ -29,6 +29,7 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
+#include <linux/cred.h>
 #include <linux/parser.h>
 #include <linux/idr.h>
 #include <linux/slab.h>
@@ -575,7 +576,7 @@ static int v9fs_init_inode_cache(void)
 	v9fs_inode_cache = kmem_cache_create("v9fs_inode_cache",
 					  sizeof(struct v9fs_inode),
 					  0, (SLAB_RECLAIM_ACCOUNT|
-					      SLAB_MEM_SPREAD),
+					      SLAB_MEM_SPREAD|SLAB_ACCOUNT),
 					  v9fs_inode_init_once);
 	if (!v9fs_inode_cache)
 		return -ENOMEM;

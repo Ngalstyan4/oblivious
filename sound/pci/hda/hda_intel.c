@@ -54,6 +54,7 @@
 /* for snoop control */
 #include <asm/pgtable.h>
 #include <asm/cacheflush.h>
+#include <asm/cpufeature.h>
 #endif
 #include <sound/core.h>
 #include <sound/initval.h>
@@ -127,7 +128,7 @@ static int bdl_pos_adj[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS-1)] = -1};
 static int probe_mask[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS-1)] = -1};
 static int probe_only[SNDRV_CARDS];
 static int jackpoll_ms[SNDRV_CARDS];
-static bool single_cmd;
+static int single_cmd = -1;
 static int enable_msi = -1;
 #ifdef CONFIG_SND_HDA_PATCH_LOADER
 static char *patch[SNDRV_CARDS];
@@ -156,7 +157,7 @@ module_param_array(probe_only, int, NULL, 0444);
 MODULE_PARM_DESC(probe_only, "Only probing and no codec initialization.");
 module_param_array(jackpoll_ms, int, NULL, 0444);
 MODULE_PARM_DESC(jackpoll_ms, "Ms between polling for jack events (default = 0, using unsol events only)");
-module_param(single_cmd, bool, 0444);
+module_param(single_cmd, bint, 0444);
 MODULE_PARM_DESC(single_cmd, "Use single command to communicate with codecs "
 		 "(for debugging only).");
 module_param(enable_msi, bint, 0444);
@@ -183,10 +184,6 @@ static int power_save = CONFIG_SND_HDA_POWER_SAVE_DEFAULT;
 module_param(power_save, xint, 0644);
 MODULE_PARM_DESC(power_save, "Automatic power-saving timeout "
 		 "(in second, 0 = disable).");
-
-static bool pm_blacklist = true;
-module_param(pm_blacklist, bool, 0644);
-MODULE_PARM_DESC(pm_blacklist, "Enable power-management blacklist");
 
 /* reset the HD-audio controller in power save mode.
  * this may give more power-saving, but will take longer time to
@@ -290,13 +287,19 @@ enum {
 	(AZX_DCAPS_OLD_SSYNC | AZX_DCAPS_NO_ALIGN_BUFSIZE)
 
 /* quirks for Intel PCH */
-#define AZX_DCAPS_INTEL_PCH_NOPM \
+#define AZX_DCAPS_INTEL_PCH_BASE \
 	(AZX_DCAPS_NO_ALIGN_BUFSIZE | AZX_DCAPS_COUNT_LPIB_DELAY |\
-	 AZX_DCAPS_REVERSE_ASSIGN | AZX_DCAPS_SNOOP_TYPE(SCH))
+	 AZX_DCAPS_SNOOP_TYPE(SCH))
 
+/* PCH up to IVB; no runtime PM */
+#define AZX_DCAPS_INTEL_PCH_NOPM \
+	(AZX_DCAPS_INTEL_PCH_BASE)
+
+/* PCH for HSW/BDW; with runtime PM */
 #define AZX_DCAPS_INTEL_PCH \
-	(AZX_DCAPS_INTEL_PCH_NOPM | AZX_DCAPS_PM_RUNTIME)
+	(AZX_DCAPS_INTEL_PCH_BASE | AZX_DCAPS_PM_RUNTIME)
 
+/* HSW HDMI */
 #define AZX_DCAPS_INTEL_HASWELL \
 	(/*AZX_DCAPS_ALIGN_BUFSIZE |*/ AZX_DCAPS_COUNT_LPIB_DELAY |\
 	 AZX_DCAPS_PM_RUNTIME | AZX_DCAPS_I915_POWERWELL |\
@@ -672,7 +675,7 @@ static int azx_position_ok(struct azx *chip, struct azx_dev *azx_dev)
 	if (wallclk < (azx_dev->core.period_wallclk * 5) / 4 &&
 	    pos % azx_dev->core.period_bytes > azx_dev->core.period_bytes / 2)
 		/* NG - it's below the first next period boundary */
-		return chip->bdl_pos_adj[chip->dev_index] ? 0 : -1;
+		return chip->bdl_pos_adj ? 0 : -1;
 	azx_dev->core.start_wallclk += wallclk;
 	return 1; /* OK, it's fine */
 }
@@ -742,7 +745,7 @@ static int azx_acquire_irq(struct azx *chip, int do_disconnect)
 
 	if (request_irq(chip->pci->irq, azx_interrupt,
 			chip->msi ? 0 : IRQF_SHARED,
-			KBUILD_MODNAME, chip)) {
+			chip->card->irq_descr, chip)) {
 		dev_err(chip->card->dev,
 			"unable to grab IRQ %d, disabling device\n",
 			chip->pci->irq);
@@ -858,50 +861,6 @@ static int param_set_xint(const char *val, const struct kernel_param *kp)
 #define azx_del_card_list(chip) /* NOP */
 #endif /* CONFIG_PM */
 
-/* Intel HSW/BDW display HDA controller is in GPU. Both its power and link BCLK
- * depends on GPU. Two Extended Mode registers EM4 (M value) and EM5 (N Value)
- * are used to convert CDClk (Core Display Clock) to 24MHz BCLK:
- * BCLK = CDCLK * M / N
- * The values will be lost when the display power well is disabled and need to
- * be restored to avoid abnormal playback speed.
- */
-static void haswell_set_bclk(struct hda_intel *hda)
-{
-	struct azx *chip = &hda->chip;
-	int cdclk_freq;
-	unsigned int bclk_m, bclk_n;
-
-	if (!hda->need_i915_power)
-		return;
-
-	cdclk_freq = snd_hdac_get_display_clk(azx_bus(chip));
-	switch (cdclk_freq) {
-	case 337500:
-		bclk_m = 16;
-		bclk_n = 225;
-		break;
-
-	case 450000:
-	default: /* default CDCLK 450MHz */
-		bclk_m = 4;
-		bclk_n = 75;
-		break;
-
-	case 540000:
-		bclk_m = 4;
-		bclk_n = 90;
-		break;
-
-	case 675000:
-		bclk_m = 8;
-		bclk_n = 225;
-		break;
-	}
-
-	azx_writew(chip, HSW_EM4, bclk_m);
-	azx_writew(chip, HSW_EM5, bclk_n);
-}
-
 #if defined(CONFIG_PM_SLEEP) || defined(SUPPORT_VGA_SWITCHEROO)
 /*
  * power management
@@ -961,7 +920,7 @@ static int azx_resume(struct device *dev)
 	if (chip->driver_caps & AZX_DCAPS_I915_POWERWELL) {
 		snd_hdac_display_power(bus, true);
 		if (hda->need_i915_power)
-			haswell_set_bclk(hda);
+			snd_hdac_i915_set_bclk(bus);
 	}
 
 	if (chip->msi)
@@ -1067,7 +1026,7 @@ static int azx_runtime_resume(struct device *dev)
 	if (chip->driver_caps & AZX_DCAPS_I915_POWERWELL) {
 		snd_hdac_display_power(bus, true);
 		if (hda->need_i915_power)
-			haswell_set_bclk(hda);
+			snd_hdac_i915_set_bclk(bus);
 	}
 
 	/* Read STATESTS before controller reset */
@@ -1404,7 +1363,7 @@ static int check_position_fix(struct azx *chip, int fix)
 	}
 
 	/* Check VIA/ATI HD Audio Controller exist */
-	if (chip->driver_caps & AZX_DCAPS_POSFIX_VIA) {
+	if (chip->driver_type == AZX_DRIVER_VIA) {
 		dev_dbg(chip->card->dev, "Using VIACOMBO position fix\n");
 		return POS_FIX_VIACOMBO;
 	}
@@ -1567,6 +1526,26 @@ static void azx_probe_work(struct work_struct *work)
 	azx_probe_continue(&hda->chip);
 }
 
+static int default_bdl_pos_adj(struct azx *chip)
+{
+	/* some exceptions: Atoms seem problematic with value 1 */
+	if (chip->pci->vendor == PCI_VENDOR_ID_INTEL) {
+		switch (chip->pci->device) {
+		case 0x0f04: /* Baytrail */
+		case 0x2284: /* Braswell */
+			return 32;
+		}
+	}
+
+	switch (chip->driver_type) {
+	case AZX_DRIVER_ICH:
+	case AZX_DRIVER_PCH:
+		return 1;
+	default:
+		return 32;
+	}
+}
+
 /*
  * constructor
  */
@@ -1617,21 +1596,17 @@ static int azx_create(struct snd_card *card, struct pci_dev *pci,
 
 	check_probe_mask(chip, dev);
 
-	chip->single_cmd = single_cmd;
+	if (single_cmd < 0) /* allow fallback to single_cmd at errors */
+		chip->fallback_to_single_cmd = 1;
+	else /* explicitly set to single_cmd or not */
+		chip->single_cmd = single_cmd;
+
 	azx_check_snoop_available(chip);
 
-	if (bdl_pos_adj[dev] < 0) {
-		switch (chip->driver_type) {
-		case AZX_DRIVER_ICH:
-		case AZX_DRIVER_PCH:
-			bdl_pos_adj[dev] = 1;
-			break;
-		default:
-			bdl_pos_adj[dev] = 32;
-			break;
-		}
-	}
-	chip->bdl_pos_adj = bdl_pos_adj;
+	if (bdl_pos_adj[dev] < 0)
+		chip->bdl_pos_adj = default_bdl_pos_adj(chip);
+	else
+		chip->bdl_pos_adj = bdl_pos_adj[dev];
 
 	err = azx_bus_init(chip, model[dev], &pci_hda_io_ops);
 	if (err < 0) {
@@ -1691,6 +1666,22 @@ static int azx_first_init(struct azx *chip)
 		dev_err(card->dev, "ioremap error\n");
 		return -ENXIO;
 	}
+
+	if (IS_SKL_PLUS(pci))
+		snd_hdac_bus_parse_capabilities(bus);
+
+	/*
+	 * Some Intel CPUs has always running timer (ART) feature and
+	 * controller may have Global time sync reporting capability, so
+	 * check both of these before declaring synchronized time reporting
+	 * capability SNDRV_PCM_INFO_HAS_LINK_SYNCHRONIZED_ATIME
+	 */
+	chip->gts_present = false;
+
+#ifdef CONFIG_X86
+	if (bus->ppcap && boot_cpu_has(X86_FEATURE_ART))
+		chip->gts_present = true;
+#endif
 
 	if (chip->msi) {
 		if (chip->driver_caps & AZX_DCAPS_NO_MSI64) {
@@ -1787,6 +1778,14 @@ static int azx_first_init(struct azx *chip)
 	chip->playback_index_offset = chip->capture_streams;
 	chip->num_streams = chip->playback_streams + chip->capture_streams;
 
+	/* sanity check for the SDxCTL.STRM field overflow */
+	if (chip->num_streams > 15 &&
+	    (chip->driver_caps & AZX_DCAPS_SEPARATE_STREAM_TAG) == 0) {
+		dev_warn(chip->card->dev, "number of I/O streams is %d, "
+			 "forcing separate stream tags", chip->num_streams);
+		chip->driver_caps |= AZX_DCAPS_SEPARATE_STREAM_TAG;
+	}
+
 	/* initialize streams */
 	err = azx_init_streams(chip);
 	if (err < 0)
@@ -1799,12 +1798,8 @@ static int azx_first_init(struct azx *chip)
 	/* initialize chip */
 	azx_init_pci(chip);
 
-	if (chip->driver_caps & AZX_DCAPS_I915_POWERWELL) {
-		struct hda_intel *hda;
-
-		hda = container_of(chip, struct hda_intel, chip);
-		haswell_set_bclk(hda);
-	}
+	if (chip->driver_caps & AZX_DCAPS_I915_POWERWELL)
+		snd_hdac_i915_set_bclk(bus);
 
 	hda_intel_init_chip(chip, (probe_only[dev] & 2) == 0);
 
@@ -2042,8 +2037,8 @@ static int azx_probe(struct pci_dev *pci,
 #endif /* CONFIG_SND_HDA_PATCH_LOADER */
 
 #ifndef CONFIG_SND_HDA_I915
-	if (chip->driver_caps & AZX_DCAPS_I915_POWERWELL)
-		dev_err(card->dev, "Haswell must build in CONFIG_SND_HDA_I915\n");
+	if (CONTROLLER_IN_GPU(pci))
+		dev_err(card->dev, "Haswell/Broadwell HDMI/DP must build in CONFIG_SND_HDA_I915\n");
 #endif
 
 	if (schedule_probe)
@@ -2059,24 +2054,6 @@ out_free:
 	return err;
 }
 
-#ifdef CONFIG_PM
-/* On some boards setting power_save to a non 0 value leads to clicking /
- * popping sounds when ever we enter/leave powersaving mode. Ideally we would
- * figure out how to avoid these sounds, but that is not always feasible.
- * So we keep a list of devices where we disable powersaving as its known
- * to causes problems on these devices.
- */
-static struct snd_pci_quirk power_save_blacklist[] = {
-	/* https://bugzilla.redhat.com/show_bug.cgi?id=1525104 */
-	SND_PCI_QUIRK(0x1849, 0x0c0c, "Asrock B85M-ITX", 0),
-	/* https://bugzilla.redhat.com/show_bug.cgi?id=1525104 */
-	SND_PCI_QUIRK(0x1043, 0x8733, "Asus Prime X370-Pro", 0),
-	/* https://bugzilla.kernel.org/show_bug.cgi?id=198611 */
-	SND_PCI_QUIRK(0x17aa, 0x2227, "Lenovo X1 Carbon 3rd Gen", 0),
-	{}
-};
-#endif /* CONFIG_PM */
-
 /* number of codec slots for each chipset: 0 = default slots (i.e. 4) */
 static unsigned int azx_max_codecs[AZX_NUM_DRIVERS] = {
 	[AZX_DRIVER_NVIDIA] = 8,
@@ -2089,7 +2066,6 @@ static int azx_probe_continue(struct azx *chip)
 	struct hdac_bus *bus = azx_bus(chip);
 	struct pci_dev *pci = chip->pci;
 	int dev = chip->dev_index;
-	int val;
 	int err;
 
 	hda->probe_continued = 1;
@@ -2165,23 +2141,9 @@ static int azx_probe_continue(struct azx *chip)
 
 	chip->running = 1;
 	azx_add_card_list(chip);
-
-	val = power_save;
-#ifdef CONFIG_PM
-	if (pm_blacklist) {
-		const struct snd_pci_quirk *q;
-
-		q = snd_pci_quirk_lookup(chip->pci, power_save_blacklist);
-		if (q && val) {
-			dev_info(chip->card->dev, "device %04x:%04x is on the power_save blacklist, forcing power_save to 0\n",
-				 q->subvendor, q->subdevice);
-			val = 0;
-		}
-	}
-#endif /* CONFIG_PM */
-	snd_hda_set_power_save(&chip->bus, val * 1000);
+	snd_hda_set_power_save(&chip->bus, power_save * 1000);
 	if (azx_has_pm_runtime(chip) || hda->use_vga_switcheroo)
-		pm_runtime_put_noidle(&pci->dev);
+		pm_runtime_put_autosuspend(&pci->dev);
 
 out_free:
 	if (chip->driver_caps & AZX_DCAPS_I915_POWERWELL
@@ -2293,6 +2255,9 @@ static const struct pci_device_id azx_ids[] = {
 	/* Broxton-T */
 	{ PCI_DEVICE(0x8086, 0x1a98),
 	  .driver_data = AZX_DRIVER_PCH | AZX_DCAPS_INTEL_BROXTON },
+	/* Gemini-Lake */
+	{ PCI_DEVICE(0x8086, 0x3198),
+	  .driver_data = AZX_DRIVER_PCH | AZX_DCAPS_INTEL_BROXTON },
 	/* Haswell */
 	{ PCI_DEVICE(0x8086, 0x0a0c),
 	  .driver_data = AZX_DRIVER_HDMI | AZX_DCAPS_INTEL_HASWELL },
@@ -2308,10 +2273,10 @@ static const struct pci_device_id azx_ids[] = {
 	  .driver_data = AZX_DRIVER_SCH | AZX_DCAPS_INTEL_PCH_NOPM },
 	/* Poulsbo */
 	{ PCI_DEVICE(0x8086, 0x811b),
-	  .driver_data = AZX_DRIVER_SCH | AZX_DCAPS_INTEL_PCH_NOPM },
+	  .driver_data = AZX_DRIVER_SCH | AZX_DCAPS_INTEL_PCH_BASE },
 	/* Oaktrail */
 	{ PCI_DEVICE(0x8086, 0x080a),
-	  .driver_data = AZX_DRIVER_SCH | AZX_DCAPS_INTEL_PCH_NOPM },
+	  .driver_data = AZX_DRIVER_SCH | AZX_DCAPS_INTEL_PCH_BASE },
 	/* BayTrail */
 	{ PCI_DEVICE(0x8086, 0x0f04),
 	  .driver_data = AZX_DRIVER_PCH | AZX_DCAPS_INTEL_BAYTRAIL },
@@ -2354,9 +2319,6 @@ static const struct pci_device_id azx_ids[] = {
 	  .driver_data = AZX_DRIVER_ATI | AZX_DCAPS_PRESET_ATI_SB },
 	/* AMD Hudson */
 	{ PCI_DEVICE(0x1022, 0x780d),
-	  .driver_data = AZX_DRIVER_GENERIC | AZX_DCAPS_PRESET_ATI_SB },
-	/* AMD Raven */
-	{ PCI_DEVICE(0x1022, 0x15e3),
 	  .driver_data = AZX_DRIVER_GENERIC | AZX_DCAPS_PRESET_ATI_SB },
 	/* ATI HDMI */
 	{ PCI_DEVICE(0x1002, 0x0002),
@@ -2434,8 +2396,7 @@ static const struct pci_device_id azx_ids[] = {
 	{ PCI_DEVICE(0x1002, 0xaaf0),
 	  .driver_data = AZX_DRIVER_ATIHDMI_NS | AZX_DCAPS_PRESET_ATI_HDMI_NS },
 	/* VIA VT8251/VT8237A */
-	{ PCI_DEVICE(0x1106, 0x3288),
-	  .driver_data = AZX_DRIVER_VIA | AZX_DCAPS_POSFIX_VIA },
+	{ PCI_DEVICE(0x1106, 0x3288), .driver_data = AZX_DRIVER_VIA },
 	/* VIA GFX VT7122/VX900 */
 	{ PCI_DEVICE(0x1106, 0x9170), .driver_data = AZX_DRIVER_GENERIC },
 	/* VIA GFX VT6122/VX11 */

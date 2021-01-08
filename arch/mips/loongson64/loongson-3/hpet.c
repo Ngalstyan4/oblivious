@@ -212,7 +212,7 @@ static void hpet_setup(void)
 	/* set hpet base address */
 	smbus_write(SMBUS_PCI_REGB4, HPET_ADDR);
 
-	/* enable decodeing of access to HPET MMIO*/
+	/* enable decoding of access to HPET MMIO*/
 	smbus_enable(SMBUS_PCI_REG40, (1 << 28));
 
 	/* HPET irq enable */
@@ -248,9 +248,9 @@ void __init setup_hpet_timer(void)
 	pr_info("hpet clock event device register\n");
 }
 
-static cycle_t hpet_read_counter(struct clocksource *cs)
+static u64 hpet_read_counter(struct clocksource *cs)
 {
-	return (cycle_t)hpet_read(HPET_COUNTER);
+	return (u64)hpet_read(HPET_COUNTER);
 }
 
 static void hpet_suspend(struct clocksource *cs)

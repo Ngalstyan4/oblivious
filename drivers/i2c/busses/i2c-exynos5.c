@@ -130,11 +130,31 @@
 /* I2C_TRANS_STATUS register bits */
 #define HSI2C_MASTER_BUSY			(1u << 17)
 #define HSI2C_SLAVE_BUSY			(1u << 16)
+
+/* I2C_TRANS_STATUS register bits for Exynos5 variant */
 #define HSI2C_TIMEOUT_AUTO			(1u << 4)
 #define HSI2C_NO_DEV				(1u << 3)
 #define HSI2C_NO_DEV_ACK			(1u << 2)
 #define HSI2C_TRANS_ABORT			(1u << 1)
 #define HSI2C_TRANS_DONE			(1u << 0)
+
+/* I2C_TRANS_STATUS register bits for Exynos7 variant */
+#define HSI2C_MASTER_ST_MASK			0xf
+#define HSI2C_MASTER_ST_IDLE			0x0
+#define HSI2C_MASTER_ST_START			0x1
+#define HSI2C_MASTER_ST_RESTART			0x2
+#define HSI2C_MASTER_ST_STOP			0x3
+#define HSI2C_MASTER_ST_MASTER_ID		0x4
+#define HSI2C_MASTER_ST_ADDR0			0x5
+#define HSI2C_MASTER_ST_ADDR1			0x6
+#define HSI2C_MASTER_ST_ADDR2			0x7
+#define HSI2C_MASTER_ST_ADDR_SR			0x8
+#define HSI2C_MASTER_ST_READ			0x9
+#define HSI2C_MASTER_ST_WRITE			0xa
+#define HSI2C_MASTER_ST_NO_ACK			0xb
+#define HSI2C_MASTER_ST_LOSE			0xc
+#define HSI2C_MASTER_ST_WAIT			0xd
+#define HSI2C_MASTER_ST_WAIT_CMD		0xe
 
 /* I2C_ADDR register bits */
 #define HSI2C_SLV_ADDR_SLV(x)			((x & 0x3ff) << 0)
@@ -460,6 +480,12 @@ static irqreturn_t exynos5_i2c_irq(int irqno, void *dev_id)
 			i2c->state = -ETIMEDOUT;
 			goto stop;
 		}
+
+		trans_status = readl(i2c->regs + HSI2C_TRANS_STATUS);
+		if ((trans_status & HSI2C_MASTER_ST_MASK) == HSI2C_MASTER_ST_LOSE) {
+			i2c->state = -EAGAIN;
+			goto stop;
+		}
 	} else if (int_status & HSI2C_INT_I2C) {
 		trans_status = readl(i2c->regs + HSI2C_TRANS_STATUS);
 		if (trans_status & HSI2C_NO_DEV_ACK) {
@@ -502,8 +528,13 @@ static irqreturn_t exynos5_i2c_irq(int irqno, void *dev_id)
 		fifo_level = HSI2C_TX_FIFO_LVL(fifo_status);
 
 		len = i2c->variant->fifo_depth - fifo_level;
-		if (len > (i2c->msg->len - i2c->msg_ptr))
+		if (len > (i2c->msg->len - i2c->msg_ptr)) {
+			u32 int_en = readl(i2c->regs + HSI2C_INT_ENABLE);
+
+			int_en &= ~HSI2C_INT_TX_ALMOSTEMPTY_EN;
+			writel(int_en, i2c->regs + HSI2C_INT_ENABLE);
 			len = i2c->msg->len - i2c->msg_ptr;
+		}
 
 		while (len > 0) {
 			byte = i2c->msg->buf[i2c->msg_ptr++];
@@ -796,10 +827,8 @@ static int exynos5_i2c_probe(struct platform_device *pdev)
 	exynos5_i2c_reset(i2c);
 
 	ret = i2c_add_adapter(&i2c->adap);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "failed to add bus to i2c core\n");
+	if (ret < 0)
 		goto err_clk;
-	}
 
 	platform_set_drvdata(pdev, i2c);
 
@@ -861,14 +890,8 @@ static int exynos5_i2c_resume_noirq(struct device *dev)
 #endif
 
 static const struct dev_pm_ops exynos5_i2c_dev_pm_ops = {
-#ifdef CONFIG_PM_SLEEP
-	.suspend_noirq = exynos5_i2c_suspend_noirq,
-	.resume_noirq = exynos5_i2c_resume_noirq,
-	.freeze_noirq = exynos5_i2c_suspend_noirq,
-	.thaw_noirq = exynos5_i2c_resume_noirq,
-	.poweroff_noirq = exynos5_i2c_suspend_noirq,
-	.restore_noirq = exynos5_i2c_resume_noirq,
-#endif
+	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(exynos5_i2c_suspend_noirq,
+				      exynos5_i2c_resume_noirq)
 };
 
 static struct platform_driver exynos5_i2c_driver = {

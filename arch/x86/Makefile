@@ -120,18 +120,6 @@ else
         # -funit-at-a-time shrinks the kernel .text considerably
         # unfortunately it makes reading oopses harder.
         KBUILD_CFLAGS += $(call cc-option,-funit-at-a-time)
-
-        # this works around some issues with generating unwind tables in older gccs
-        # newer gccs do it by default
-        KBUILD_CFLAGS += $(call cc-option,-maccumulate-outgoing-args)
-endif
-
-# Make sure compiler does not have buggy stack-protector support.
-ifdef CONFIG_CC_STACKPROTECTOR
-	cc_has_sp := $(srctree)/scripts/gcc-x86_$(BITS)-has-stack-protector.sh
-        ifneq ($(shell $(CONFIG_SHELL) $(cc_has_sp) $(CC) $(KBUILD_CPPFLAGS) $(biarch)),y)
-                $(warning stack-protector enabled but compiler support broken)
-        endif
 endif
 
 ifdef CONFIG_X86_X32
@@ -155,6 +143,45 @@ ifeq ($(CONFIG_KMEMCHECK),y)
 	KBUILD_CFLAGS += $(call cc-option,-fno-builtin-memcpy)
 endif
 
+#
+# If the function graph tracer is used with mcount instead of fentry,
+# '-maccumulate-outgoing-args' is needed to prevent a GCC bug
+# (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=42109)
+#
+ifdef CONFIG_FUNCTION_GRAPH_TRACER
+  ifndef CONFIG_HAVE_FENTRY
+	ACCUMULATE_OUTGOING_ARGS := 1
+  else
+    ifeq ($(call cc-option-yn, -mfentry), n)
+	ACCUMULATE_OUTGOING_ARGS := 1
+
+	# GCC ignores '-maccumulate-outgoing-args' when used with '-Os'.
+	# If '-Os' is enabled, disable it and print a warning.
+        ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
+          undefine CONFIG_CC_OPTIMIZE_FOR_SIZE
+	  $(warning Disabling CONFIG_CC_OPTIMIZE_FOR_SIZE.  Your compiler does not have -mfentry so you cannot optimize for size with CONFIG_FUNCTION_GRAPH_TRACER.)
+        endif
+
+    endif
+  endif
+endif
+
+#
+# Jump labels need '-maccumulate-outgoing-args' for gcc < 4.5.2 to prevent a
+# GCC bug (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=46226).  There's no way
+# to test for this bug at compile-time because the test case needs to execute,
+# which is a no-go for cross compilers.  So check the GCC version instead.
+#
+ifdef CONFIG_JUMP_LABEL
+  ifneq ($(ACCUMULATE_OUTGOING_ARGS), 1)
+	ACCUMULATE_OUTGOING_ARGS = $(call cc-if-fullversion, -lt, 040502, 1)
+  endif
+endif
+
+ifeq ($(ACCUMULATE_OUTGOING_ARGS), 1)
+	KBUILD_CFLAGS += -maccumulate-outgoing-args
+endif
+
 # Stackpointer is addressed different for 32 bit and 64 bit x86
 sp-$(CONFIG_X86_32) := esp
 sp-$(CONFIG_X86_64) := rsp
@@ -171,22 +198,14 @@ asinstr += $(call as-instr,pshufb %xmm0$(comma)%xmm0,-DCONFIG_AS_SSSE3=1)
 asinstr += $(call as-instr,crc32l %eax$(comma)%eax,-DCONFIG_AS_CRC32=1)
 avx_instr := $(call as-instr,vxorps %ymm0$(comma)%ymm1$(comma)%ymm2,-DCONFIG_AS_AVX=1)
 avx2_instr :=$(call as-instr,vpbroadcastb %xmm0$(comma)%ymm1,-DCONFIG_AS_AVX2=1)
+avx512_instr :=$(call as-instr,vpmovm2b %k1$(comma)%zmm5,-DCONFIG_AS_AVX512=1)
 sha1_ni_instr :=$(call as-instr,sha1msg1 %xmm0$(comma)%xmm1,-DCONFIG_AS_SHA1_NI=1)
 sha256_ni_instr :=$(call as-instr,sha256msg1 %xmm0$(comma)%xmm1,-DCONFIG_AS_SHA256_NI=1)
 
-KBUILD_AFLAGS += $(cfi) $(cfi-sigframe) $(cfi-sections) $(asinstr) $(avx_instr) $(avx2_instr) $(sha1_ni_instr) $(sha256_ni_instr)
-KBUILD_CFLAGS += $(cfi) $(cfi-sigframe) $(cfi-sections) $(asinstr) $(avx_instr) $(avx2_instr) $(sha1_ni_instr) $(sha256_ni_instr)
+KBUILD_AFLAGS += $(cfi) $(cfi-sigframe) $(cfi-sections) $(asinstr) $(avx_instr) $(avx2_instr) $(avx512_instr) $(sha1_ni_instr) $(sha256_ni_instr)
+KBUILD_CFLAGS += $(cfi) $(cfi-sigframe) $(cfi-sections) $(asinstr) $(avx_instr) $(avx2_instr) $(avx512_instr) $(sha1_ni_instr) $(sha256_ni_instr)
 
 LDFLAGS := -m elf_$(UTS_MACHINE)
-
-#
-# The 64-bit kernel must be aligned to 2MB.  Pass -z max-page-size=0x200000 to
-# the linker to force 2MB page size regardless of the default page size used
-# by the linker.
-#
-ifdef CONFIG_X86_64
-LDFLAGS += $(call ld-option, -z max-page-size=0x200000)
-endif
 
 # Speed up the build
 KBUILD_CFLAGS += -pipe
@@ -197,14 +216,6 @@ KBUILD_CFLAGS += -fno-asynchronous-unwind-tables
 
 KBUILD_CFLAGS += $(mflags-y)
 KBUILD_AFLAGS += $(mflags-y)
-
-# Avoid indirect branches in kernel to deal with Spectre
-ifdef CONFIG_RETPOLINE
-    RETPOLINE_CFLAGS += $(call cc-option,-mindirect-branch=thunk-extern -mindirect-branch-register)
-    ifneq ($(RETPOLINE_CFLAGS),)
-        KBUILD_CFLAGS += $(RETPOLINE_CFLAGS) -DRETPOLINE
-    endif
-endif
 
 archscripts: scripts_basic
 	$(Q)$(MAKE) $(build)=arch/x86/tools relocs
@@ -225,7 +236,8 @@ endif
 
 head-y := arch/x86/kernel/head_$(BITS).o
 head-y += arch/x86/kernel/head$(BITS).o
-head-y += arch/x86/kernel/head.o
+head-y += arch/x86/kernel/ebda.o
+head-y += arch/x86/kernel/platform-quirks.o
 
 libs-y  += arch/x86/lib/
 

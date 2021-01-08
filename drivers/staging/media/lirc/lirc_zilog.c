@@ -42,7 +42,7 @@
 #include <linux/module.h>
 #include <linux/kmod.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/fs.h>
 #include <linux/poll.h>
 #include <linux/string.h>
@@ -1157,8 +1157,8 @@ static ssize_t write(struct file *filep, const char __user *buf, size_t n,
 
 		/* Send the code */
 		if (ret == 0) {
-			ret = send_code(tx, (unsigned)command >> 16,
-					    (unsigned)command & 0xFFFF);
+			ret = send_code(tx, (unsigned int)command >> 16,
+					    (unsigned int)command & 0xFFFF);
 			if (ret == -EPROTO) {
 				mutex_unlock(&ir->ir_lock);
 				mutex_unlock(&tx->client_lock);
@@ -1680,9 +1680,7 @@ module_init(zilog_init);
 module_exit(zilog_exit);
 
 MODULE_DESCRIPTION("Zilog/Hauppauge infrared transmitter driver (i2c stack)");
-MODULE_AUTHOR("Gerd Knorr, Michal Kochanowicz, Christoph Bartelmus, "
-	      "Ulrich Mueller, Stefan Jahn, Jerome Brock, Mark Weaver, "
-	      "Andy Walls");
+MODULE_AUTHOR("Gerd Knorr, Michal Kochanowicz, Christoph Bartelmus, Ulrich Mueller, Stefan Jahn, Jerome Brock, Mark Weaver, Andy Walls");
 MODULE_LICENSE("GPL");
 /* for compat with old name, which isn't all that accurate anymore */
 MODULE_ALIAS("lirc_pvr150");

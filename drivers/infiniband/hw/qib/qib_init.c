@@ -42,6 +42,7 @@
 #ifdef CONFIG_INFINIBAND_QIB_DCA
 #include <linux/dca.h>
 #endif
+#include <rdma/rdma_vt.h>
 
 #include "qib.h"
 #include "qib_common.h"
@@ -132,11 +133,8 @@ int qib_create_ctxts(struct qib_devdata *dd)
 	 * cleanup iterates across all possible ctxts.
 	 */
 	dd->rcd = kcalloc(dd->ctxtcnt, sizeof(*dd->rcd), GFP_KERNEL);
-	if (!dd->rcd) {
-		qib_dev_err(dd,
-			"Unable to allocate ctxtdata array, failing\n");
+	if (!dd->rcd)
 		return -ENOMEM;
-	}
 
 	/* create (one or more) kctxt */
 	for (i = 0; i < dd->first_user_ctxt; ++i) {
@@ -244,6 +242,13 @@ int qib_init_pportdata(struct qib_pportdata *ppd, struct qib_devdata *dd,
 		alloc_percpu(struct qib_pma_counters);
 	if (!ppd->ibport_data.pmastats)
 		return -ENOMEM;
+	ppd->ibport_data.rvp.rc_acks = alloc_percpu(u64);
+	ppd->ibport_data.rvp.rc_qacks = alloc_percpu(u64);
+	ppd->ibport_data.rvp.rc_delayed_comp = alloc_percpu(u64);
+	if (!(ppd->ibport_data.rvp.rc_acks) ||
+	    !(ppd->ibport_data.rvp.rc_qacks) ||
+	    !(ppd->ibport_data.rvp.rc_delayed_comp))
+		return -ENOMEM;
 
 	if (qib_cc_table_size < IB_CCT_MIN_ENTRIES)
 		goto bail;
@@ -257,39 +262,23 @@ int qib_init_pportdata(struct qib_pportdata *ppd, struct qib_devdata *dd,
 	size = IB_CC_TABLE_CAP_DEFAULT * sizeof(struct ib_cc_table_entry)
 		* IB_CCT_ENTRIES;
 	ppd->ccti_entries = kzalloc(size, GFP_KERNEL);
-	if (!ppd->ccti_entries) {
-		qib_dev_err(dd,
-		  "failed to allocate congestion control table for port %d!\n",
-		  port);
+	if (!ppd->ccti_entries)
 		goto bail;
-	}
 
 	size = IB_CC_CCS_ENTRIES * sizeof(struct ib_cc_congestion_entry);
 	ppd->congestion_entries = kzalloc(size, GFP_KERNEL);
-	if (!ppd->congestion_entries) {
-		qib_dev_err(dd,
-		 "failed to allocate congestion setting list for port %d!\n",
-		 port);
+	if (!ppd->congestion_entries)
 		goto bail_1;
-	}
 
 	size = sizeof(struct cc_table_shadow);
 	ppd->ccti_entries_shadow = kzalloc(size, GFP_KERNEL);
-	if (!ppd->ccti_entries_shadow) {
-		qib_dev_err(dd,
-		 "failed to allocate shadow ccti list for port %d!\n",
-		 port);
+	if (!ppd->ccti_entries_shadow)
 		goto bail_2;
-	}
 
 	size = sizeof(struct ib_cc_congestion_setting_attr);
 	ppd->congestion_entries_shadow = kzalloc(size, GFP_KERNEL);
-	if (!ppd->congestion_entries_shadow) {
-		qib_dev_err(dd,
-		 "failed to allocate shadow congestion setting list for port %d!\n",
-		 port);
+	if (!ppd->congestion_entries_shadow)
 		goto bail_3;
-	}
 
 	return 0;
 
@@ -383,18 +372,12 @@ static void init_shadow_tids(struct qib_devdata *dd)
 	dma_addr_t *addrs;
 
 	pages = vzalloc(dd->cfgctxts * dd->rcvtidcnt * sizeof(struct page *));
-	if (!pages) {
-		qib_dev_err(dd,
-			"failed to allocate shadow page * array, no expected sends!\n");
+	if (!pages)
 		goto bail;
-	}
 
 	addrs = vzalloc(dd->cfgctxts * dd->rcvtidcnt * sizeof(dma_addr_t));
-	if (!addrs) {
-		qib_dev_err(dd,
-			"failed to allocate shadow dma handle array, no expected sends!\n");
+	if (!addrs)
 		goto bail_free;
-	}
 
 	dd->pageshadow = pages;
 	dd->physshadow = addrs;
@@ -449,8 +432,6 @@ static int loadtime_init(struct qib_devdata *dd)
 	init_timer(&dd->intrchk_timer);
 	dd->intrchk_timer.function = verify_interrupt;
 	dd->intrchk_timer.data = (unsigned long) dd;
-
-	ret = qib_cq_init(dd);
 done:
 	return ret;
 }
@@ -608,8 +589,8 @@ static int qib_create_workqueues(struct qib_devdata *dd)
 
 			snprintf(wq_name, sizeof(wq_name), "qib%d_%d",
 				dd->unit, pidx);
-			ppd->qib_wq =
-				create_singlethread_workqueue(wq_name);
+			ppd->qib_wq = alloc_ordered_workqueue(wq_name,
+							      WQ_MEM_RECLAIM);
 			if (!ppd->qib_wq)
 				goto wq_error;
 		}
@@ -631,6 +612,9 @@ wq_error:
 static void qib_free_pportdata(struct qib_pportdata *ppd)
 {
 	free_percpu(ppd->ibport_data.pmastats);
+	free_percpu(ppd->ibport_data.rvp.rc_acks);
+	free_percpu(ppd->ibport_data.rvp.rc_qacks);
+	free_percpu(ppd->ibport_data.rvp.rc_delayed_comp);
 	ppd->ibport_data.pmastats = NULL;
 }
 
@@ -1017,11 +1001,8 @@ static void qib_verify_pioperf(struct qib_devdata *dd)
 	cnt = 1024;
 
 	addr = vmalloc(cnt);
-	if (!addr) {
-		qib_devinfo(dd->pcidev,
-			 "Couldn't get memory for checking PIO perf, skipping\n");
+	if (!addr)
 		goto done;
-	}
 
 	preempt_disable();  /* we want reasonably accurate elapsed time */
 	msecs = 1 + jiffies_to_msecs(jiffies);
@@ -1081,7 +1062,7 @@ void qib_free_devdata(struct qib_devdata *dd)
 	qib_dbg_ibdev_exit(&dd->verbs_dev);
 #endif
 	free_percpu(dd->int_counter);
-	ib_dealloc_device(&dd->verbs_dev.ibdev);
+	rvt_dealloc_device(&dd->verbs_dev.rdi);
 }
 
 u64 qib_int_counter(struct qib_devdata *dd)
@@ -1120,9 +1101,12 @@ struct qib_devdata *qib_alloc_devdata(struct pci_dev *pdev, size_t extra)
 {
 	unsigned long flags;
 	struct qib_devdata *dd;
-	int ret;
+	int ret, nports;
 
-	dd = (struct qib_devdata *) ib_alloc_device(sizeof(*dd) + extra);
+	/* extra is * number of ports */
+	nports = extra / sizeof(struct qib_pportdata);
+	dd = (struct qib_devdata *)rvt_alloc_device(sizeof(*dd) + extra,
+						    nports);
 	if (!dd)
 		return ERR_PTR(-ENOMEM);
 
@@ -1160,9 +1144,6 @@ struct qib_devdata *qib_alloc_devdata(struct pci_dev *pdev, size_t extra)
 				      sizeof(long), GFP_KERNEL);
 		if (qib_cpulist)
 			qib_cpulist_count = count;
-		else
-			qib_early_err(&pdev->dev,
-				"Could not alloc cpulist info, cpu affinity might be wrong\n");
 	}
 #ifdef CONFIG_DEBUG_FS
 	qib_dbg_ibdev_init(&dd->verbs_dev);
@@ -1171,7 +1152,7 @@ struct qib_devdata *qib_alloc_devdata(struct pci_dev *pdev, size_t extra)
 bail:
 	if (!list_empty(&dd->list))
 		list_del_init(&dd->list);
-	ib_dealloc_device(&dd->verbs_dev.ibdev);
+	rvt_dealloc_device(&dd->verbs_dev.rdi);
 	return ERR_PTR(ret);
 }
 
@@ -1421,7 +1402,6 @@ static void cleanup_device_data(struct qib_devdata *dd)
 	}
 	kfree(tmp);
 	kfree(dd->boardname);
-	qib_cq_exit(dd);
 }
 
 /*

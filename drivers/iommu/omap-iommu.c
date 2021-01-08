@@ -628,9 +628,11 @@ iopgtable_store_entry_core(struct omap_iommu *obj, struct iotlb_entry *e)
 		break;
 	default:
 		fn = NULL;
-		BUG();
 		break;
 	}
+
+	if (WARN_ON(!fn))
+		return -EINVAL;
 
 	prot = get_iopte_attr(e);
 
@@ -987,7 +989,6 @@ static int omap_iommu_remove(struct platform_device *pdev)
 {
 	struct omap_iommu *obj = platform_get_drvdata(pdev);
 
-	iopgtable_clear_entry_all(obj);
 	omap_iommu_debugfs_remove(obj);
 
 	pm_runtime_disable(obj->dev);
@@ -1161,7 +1162,8 @@ static struct iommu_domain *omap_iommu_domain_alloc(unsigned type)
 	 * should never fail, but please keep this around to ensure
 	 * we keep the hardware happy
 	 */
-	BUG_ON(!IS_ALIGNED((long)omap_domain->pgtable, IOPGD_TABLE_SIZE));
+	if (WARN_ON(!IS_ALIGNED((long)omap_domain->pgtable, IOPGD_TABLE_SIZE)))
+		goto fail_align;
 
 	clean_dcache_area(omap_domain->pgtable, IOPGD_TABLE_SIZE);
 	spin_lock_init(&omap_domain->lock);
@@ -1172,6 +1174,8 @@ static struct iommu_domain *omap_iommu_domain_alloc(unsigned type)
 
 	return &omap_domain->domain;
 
+fail_align:
+	kfree(omap_domain->pgtable);
 fail_nomem:
 	kfree(omap_domain);
 out:
@@ -1295,7 +1299,6 @@ static int __init omap_iommu_init(void)
 	const unsigned long flags = SLAB_HWCACHE_ALIGN;
 	size_t align = 1 << 10; /* L2 pagetable alignement */
 	struct device_node *np;
-	int ret;
 
 	np = of_find_matching_node(NULL, omap_iommu_of_match);
 	if (!np)
@@ -1309,25 +1312,11 @@ static int __init omap_iommu_init(void)
 		return -ENOMEM;
 	iopte_cachep = p;
 
+	bus_set_iommu(&platform_bus_type, &omap_iommu_ops);
+
 	omap_iommu_debugfs_init();
 
-	ret = platform_driver_register(&omap_iommu_driver);
-	if (ret) {
-		pr_err("%s: failed to register driver\n", __func__);
-		goto fail_driver;
-	}
-
-	ret = bus_set_iommu(&platform_bus_type, &omap_iommu_ops);
-	if (ret)
-		goto fail_bus;
-
-	return 0;
-
-fail_bus:
-	platform_driver_unregister(&omap_iommu_driver);
-fail_driver:
-	kmem_cache_destroy(iopte_cachep);
-	return ret;
+	return platform_driver_register(&omap_iommu_driver);
 }
 subsys_initcall(omap_iommu_init);
 /* must be ready before omap3isp is probed */

@@ -72,7 +72,9 @@
 
 int selinux_policycap_netpeer;
 int selinux_policycap_openperm;
+int selinux_policycap_extsockclass;
 int selinux_policycap_alwaysnetwork;
+int selinux_policycap_cgroupseclabel;
 
 static DEFINE_RWLOCK(policy_rwlock);
 
@@ -543,7 +545,7 @@ static void type_attribute_bounds_av(struct context *scontext,
 				     struct av_decision *avd)
 {
 	struct context lo_scontext;
-	struct context lo_tcontext;
+	struct context lo_tcontext, *tcontextp = tcontext;
 	struct av_decision lo_avd;
 	struct type_datum *source;
 	struct type_datum *target;
@@ -553,67 +555,41 @@ static void type_attribute_bounds_av(struct context *scontext,
 				    scontext->type - 1);
 	BUG_ON(!source);
 
+	if (!source->bounds)
+		return;
+
 	target = flex_array_get_ptr(policydb.type_val_to_struct_array,
 				    tcontext->type - 1);
 	BUG_ON(!target);
 
-	if (source->bounds) {
-		memset(&lo_avd, 0, sizeof(lo_avd));
+	memset(&lo_avd, 0, sizeof(lo_avd));
 
-		memcpy(&lo_scontext, scontext, sizeof(lo_scontext));
-		lo_scontext.type = source->bounds;
-
-		context_struct_compute_av(&lo_scontext,
-					  tcontext,
-					  tclass,
-					  &lo_avd,
-					  NULL);
-		if ((lo_avd.allowed & avd->allowed) == avd->allowed)
-			return;		/* no masked permission */
-		masked = ~lo_avd.allowed & avd->allowed;
-	}
+	memcpy(&lo_scontext, scontext, sizeof(lo_scontext));
+	lo_scontext.type = source->bounds;
 
 	if (target->bounds) {
-		memset(&lo_avd, 0, sizeof(lo_avd));
-
 		memcpy(&lo_tcontext, tcontext, sizeof(lo_tcontext));
 		lo_tcontext.type = target->bounds;
-
-		context_struct_compute_av(scontext,
-					  &lo_tcontext,
-					  tclass,
-					  &lo_avd,
-					  NULL);
-		if ((lo_avd.allowed & avd->allowed) == avd->allowed)
-			return;		/* no masked permission */
-		masked = ~lo_avd.allowed & avd->allowed;
+		tcontextp = &lo_tcontext;
 	}
 
-	if (source->bounds && target->bounds) {
-		memset(&lo_avd, 0, sizeof(lo_avd));
-		/*
-		 * lo_scontext and lo_tcontext are already
-		 * set up.
-		 */
+	context_struct_compute_av(&lo_scontext,
+				  tcontextp,
+				  tclass,
+				  &lo_avd,
+				  NULL);
 
-		context_struct_compute_av(&lo_scontext,
-					  &lo_tcontext,
-					  tclass,
-					  &lo_avd,
-					  NULL);
-		if ((lo_avd.allowed & avd->allowed) == avd->allowed)
-			return;		/* no masked permission */
-		masked = ~lo_avd.allowed & avd->allowed;
-	}
+	masked = ~lo_avd.allowed & avd->allowed;
 
-	if (masked) {
-		/* mask violated permissions */
-		avd->allowed &= ~masked;
+	if (likely(!masked))
+		return;		/* no masked permission */
 
-		/* audit masked permissions */
-		security_dump_masked_av(scontext, tcontext,
-					tclass, masked, "bounds");
-	}
+	/* mask violated permissions */
+	avd->allowed &= ~masked;
+
+	/* audit masked permissions */
+	security_dump_masked_av(scontext, tcontext,
+				tclass, masked, "bounds");
 }
 
 /*
@@ -778,8 +754,8 @@ out:
 	return -EPERM;
 }
 
-int security_validate_transition(u32 oldsid, u32 newsid, u32 tasksid,
-				 u16 orig_tclass)
+static int security_compute_validatetrans(u32 oldsid, u32 newsid, u32 tasksid,
+					  u16 orig_tclass, bool user)
 {
 	struct context *ocontext;
 	struct context *ncontext;
@@ -794,11 +770,12 @@ int security_validate_transition(u32 oldsid, u32 newsid, u32 tasksid,
 
 	read_lock(&policy_rwlock);
 
-	tclass = unmap_class(orig_tclass);
+	if (!user)
+		tclass = unmap_class(orig_tclass);
+	else
+		tclass = orig_tclass;
 
 	if (!tclass || tclass > policydb.p_classes.nprim) {
-		printk(KERN_ERR "SELinux: %s:  unrecognized class %d\n",
-			__func__, tclass);
 		rc = -EINVAL;
 		goto out;
 	}
@@ -832,8 +809,13 @@ int security_validate_transition(u32 oldsid, u32 newsid, u32 tasksid,
 	while (constraint) {
 		if (!constraint_expr_eval(ocontext, ncontext, tcontext,
 					  constraint->expr)) {
-			rc = security_validtrans_handle_fail(ocontext, ncontext,
-							     tcontext, tclass);
+			if (user)
+				rc = -EPERM;
+			else
+				rc = security_validtrans_handle_fail(ocontext,
+								     ncontext,
+								     tcontext,
+								     tclass);
 			goto out;
 		}
 		constraint = constraint->next;
@@ -842,6 +824,20 @@ int security_validate_transition(u32 oldsid, u32 newsid, u32 tasksid,
 out:
 	read_unlock(&policy_rwlock);
 	return rc;
+}
+
+int security_validate_transition_user(u32 oldsid, u32 newsid, u32 tasksid,
+					u16 tclass)
+{
+	return security_compute_validatetrans(oldsid, newsid, tasksid,
+						tclass, true);
+}
+
+int security_validate_transition(u32 oldsid, u32 newsid, u32 tasksid,
+				 u16 orig_tclass)
+{
+	return security_compute_validatetrans(oldsid, newsid, tasksid,
+						orig_tclass, false);
 }
 
 /*
@@ -859,9 +855,6 @@ int security_bounded_transition(u32 old_sid, u32 new_sid)
 	struct type_datum *type;
 	int index;
 	int rc;
-
-	if (!ss_initialized)
-		return 0;
 
 	read_lock(&policy_rwlock);
 
@@ -1409,24 +1402,26 @@ static int security_context_to_sid_core(const char *scontext, u32 scontext_len,
 	if (!scontext_len)
 		return -EINVAL;
 
-	/* Copy the string to allow changes and ensure a NUL terminator */
-	scontext2 = kmemdup_nul(scontext, scontext_len, gfp_flags);
-	if (!scontext2)
-		return -ENOMEM;
-
 	if (!ss_initialized) {
 		int i;
 
 		for (i = 1; i < SECINITSID_NUM; i++) {
-			if (!strcmp(initial_sid_to_string[i], scontext2)) {
+			if (!strcmp(initial_sid_to_string[i], scontext)) {
 				*sid = i;
-				goto out;
+				return 0;
 			}
 		}
 		*sid = SECINITSID_KERNEL;
-		goto out;
+		return 0;
 	}
 	*sid = SECSID_NULL;
+
+	/* Copy the string so that we can modify the copy as we parse it. */
+	scontext2 = kmalloc(scontext_len + 1, gfp_flags);
+	if (!scontext2)
+		return -ENOMEM;
+	memcpy(scontext2, scontext, scontext_len);
+	scontext2[scontext_len] = 0;
 
 	if (force) {
 		/* Save another copy for storing in uninterpreted form */
@@ -1995,8 +1990,13 @@ static void security_load_policycaps(void)
 						  POLICYDB_CAPABILITY_NETPEER);
 	selinux_policycap_openperm = ebitmap_get_bit(&policydb.policycaps,
 						  POLICYDB_CAPABILITY_OPENPERM);
+	selinux_policycap_extsockclass = ebitmap_get_bit(&policydb.policycaps,
+					  POLICYDB_CAPABILITY_EXTSOCKCLASS);
 	selinux_policycap_alwaysnetwork = ebitmap_get_bit(&policydb.policycaps,
 						  POLICYDB_CAPABILITY_ALWAYSNETWORK);
+	selinux_policycap_cgroupseclabel =
+		ebitmap_get_bit(&policydb.policycaps,
+				POLICYDB_CAPABILITY_CGROUPSECLABEL);
 }
 
 static int security_preserve_bools(struct policydb *p);
@@ -2677,7 +2677,7 @@ out:
 	return rc;
 }
 
-int security_get_bool_value(int bool)
+int security_get_bool_value(int index)
 {
 	int rc;
 	int len;
@@ -2686,10 +2686,10 @@ int security_get_bool_value(int bool)
 
 	rc = -EFAULT;
 	len = policydb.p_bools.nprim;
-	if (bool >= len)
+	if (index >= len)
 		goto out;
 
-	rc = policydb.bool_val_to_struct[bool]->state;
+	rc = policydb.bool_val_to_struct[index]->state;
 out:
 	read_unlock(&policy_rwlock);
 	return rc;

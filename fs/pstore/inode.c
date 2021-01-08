@@ -107,9 +107,11 @@ static int pstore_ftrace_seq_show(struct seq_file *s, void *v)
 	struct pstore_ftrace_seq_data *data = v;
 	struct pstore_ftrace_record *rec = (void *)(ps->data + data->off);
 
-	seq_printf(s, "%d %08lx  %08lx  %pf <- %pF\n",
-		pstore_ftrace_decode_cpu(rec), rec->ip, rec->parent_ip,
-		(void *)rec->ip, (void *)rec->parent_ip);
+	seq_printf(s, "CPU:%d ts:%llu %08lx  %08lx  %pf <- %pF\n",
+		   pstore_ftrace_decode_cpu(rec),
+		   pstore_ftrace_read_timestamp(rec),
+		   rec->ip, rec->parent_ip, (void *)rec->ip,
+		   (void *)rec->parent_ip);
 
 	return 0;
 }
@@ -197,11 +199,14 @@ static int pstore_unlink(struct inode *dir, struct dentry *dentry)
 	if (err)
 		return err;
 
-	if (p->psi->erase)
+	if (p->psi->erase) {
+		mutex_lock(&p->psi->read_mutex);
 		p->psi->erase(p->type, p->id, p->count,
 			      d_inode(dentry)->i_ctime, p->psi);
-	else
+		mutex_unlock(&p->psi->read_mutex);
+	} else {
 		return -EPERM;
+	}
 
 	return simple_unlink(dir, dentry);
 }
@@ -230,7 +235,7 @@ static struct inode *pstore_get_inode(struct super_block *sb)
 	struct inode *inode = new_inode(sb);
 	if (inode) {
 		inode->i_ino = get_next_ino();
-		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+		inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
 	}
 	return inode;
 }
@@ -376,7 +381,7 @@ int pstore_mkfile(enum pstore_type_id type, char *psname, u64 id, int count,
 		break;
 	}
 
-	mutex_lock(&d_inode(root)->i_mutex);
+	inode_lock(d_inode(root));
 
 	dentry = d_alloc_name(root, name);
 	if (!dentry)
@@ -396,12 +401,12 @@ int pstore_mkfile(enum pstore_type_id type, char *psname, u64 id, int count,
 	list_add(&private->list, &allpstore);
 	spin_unlock_irqrestore(&allpstore_lock, flags);
 
-	mutex_unlock(&d_inode(root)->i_mutex);
+	inode_unlock(d_inode(root));
 
 	return 0;
 
 fail_lockedalloc:
-	mutex_unlock(&d_inode(root)->i_mutex);
+	inode_unlock(d_inode(root));
 	kfree(private);
 fail_alloc:
 	iput(inode);
@@ -419,8 +424,8 @@ static int pstore_fill_super(struct super_block *sb, void *data, int silent)
 	pstore_sb = sb;
 
 	sb->s_maxbytes		= MAX_LFS_FILESIZE;
-	sb->s_blocksize		= PAGE_CACHE_SIZE;
-	sb->s_blocksize_bits	= PAGE_CACHE_SHIFT;
+	sb->s_blocksize		= PAGE_SIZE;
+	sb->s_blocksize_bits	= PAGE_SHIFT;
 	sb->s_magic		= PSTOREFS_MAGIC;
 	sb->s_op		= &pstore_ops;
 	sb->s_time_gran		= 1;

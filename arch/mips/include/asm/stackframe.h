@@ -296,7 +296,7 @@
 		.set	reorder
 		.set	noat
 		mfc0	a0, CP0_STATUS
-		li	v1, 0xff00
+		li	v1, ST0_CU1 | ST0_IM
 		ori	a0, STATMASK
 		xori	a0, STATMASK
 		mtc0	a0, CP0_STATUS
@@ -337,7 +337,7 @@
 		ori	a0, STATMASK
 		xori	a0, STATMASK
 		mtc0	a0, CP0_STATUS
-		li	v1, 0xff00
+		li	v1, ST0_CU1 | ST0_FR | ST0_IM
 		and	a0, v1
 		LONG_L	v0, PT_STATUS(sp)
 		nor	v1, $0, v1
@@ -364,9 +364,13 @@
 
 		.macro	RESTORE_SP_AND_RET
 		LONG_L	sp, PT_R29(sp)
+#ifdef CONFIG_CPU_MIPSR6
+		eretnc
+#else
 		.set	arch=r4000
 		eret
 		.set	mips0
+#endif
 		.endm
 
 #endif
@@ -381,14 +385,6 @@
 		RESTORE_AT
 		RESTORE_SOME
 		RESTORE_SP
-		.endm
-
-		.macro	RESTORE_ALL_AND_RET
-		RESTORE_TEMP
-		RESTORE_STATIC
-		RESTORE_AT
-		RESTORE_SOME
-		RESTORE_SP_AND_RET
 		.endm
 
 /*

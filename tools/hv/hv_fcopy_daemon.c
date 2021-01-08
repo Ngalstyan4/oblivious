@@ -18,21 +18,14 @@
 
 
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/poll.h>
-#include <linux/types.h>
-#include <linux/kdev_t.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <string.h>
-#include <ctype.h>
 #include <errno.h>
 #include <linux/hyperv.h>
 #include <syslog.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <dirent.h>
 #include <getopt.h>
 
 static int target_fd;
@@ -179,7 +172,7 @@ int main(int argc, char *argv[])
 	}
 
 	openlog("HV_FCOPY", 0, LOG_USER);
-	syslog(LOG_INFO, "HV_FCOPY starting; pid is:%d", getpid());
+	syslog(LOG_INFO, "starting; pid is:%d", getpid());
 
 	fcopy_fd = open("/dev/vmbus/hv_fcopy", O_RDWR);
 
@@ -215,7 +208,7 @@ int main(int argc, char *argv[])
 			}
 			kernel_modver = *(__u32 *)buffer;
 			in_handshake = 0;
-			syslog(LOG_INFO, "HV_FCOPY: kernel module version: %d",
+			syslog(LOG_INFO, "kernel module version: %d",
 			       kernel_modver);
 			continue;
 		}

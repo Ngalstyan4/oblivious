@@ -216,10 +216,8 @@ static void matrix_keypad_stop(struct input_dev *dev)
 {
 	struct matrix_keypad *keypad = input_get_drvdata(dev);
 
-	spin_lock_irq(&keypad->lock);
 	keypad->stopped = true;
-	spin_unlock_irq(&keypad->lock);
-
+	mb();
 	flush_work(&keypad->work.work);
 	/*
 	 * matrix_keypad_scan() will leave IRQs enabled;
@@ -546,8 +544,6 @@ err_free_mem:
 static int matrix_keypad_remove(struct platform_device *pdev)
 {
 	struct matrix_keypad *keypad = platform_get_drvdata(pdev);
-
-	device_init_wakeup(&pdev->dev, 0);
 
 	matrix_keypad_free_gpio(keypad);
 	input_unregister_device(keypad->input_dev);

@@ -26,9 +26,9 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/elf.h>
+#include <linux/sched/task_stack.h>
 
 #include <asm/asm.h>
-#include <asm/asm-eva.h>
 #include <asm/branch.h>
 #include <asm/cachectl.h>
 #include <asm/cacheflush.h>
@@ -37,7 +37,6 @@
 #include <asm/sim.h>
 #include <asm/shmparam.h>
 #include <asm/sysmips.h>
-#include <asm/uaccess.h>
 #include <asm/switch_to.h>
 
 /*
@@ -61,16 +60,9 @@ SYSCALL_DEFINE6(mips_mmap, unsigned long, addr, unsigned long, len,
 	unsigned long, prot, unsigned long, flags, unsigned long,
 	fd, off_t, offset)
 {
-	unsigned long result;
-
-	result = -EINVAL;
 	if (offset & ~PAGE_MASK)
-		goto out;
-
-	result = sys_mmap_pgoff(addr, len, prot, flags, fd, offset >> PAGE_SHIFT);
-
-out:
-	return result;
+		return -EINVAL;
+	return sys_mmap_pgoff(addr, len, prot, flags, fd, offset >> PAGE_SHIFT);
 }
 
 SYSCALL_DEFINE6(mips_mmap2, unsigned long, addr, unsigned long, len,
@@ -139,12 +131,10 @@ static inline int mips_atomic_set(unsigned long addr, unsigned long new)
 		__asm__ __volatile__ (
 		"	.set	"MIPS_ISA_ARCH_LEVEL"			\n"
 		"	li	%[err], 0				\n"
-		"1:							\n"
-		user_ll("%[old]", "(%[addr])")
+		"1:	ll	%[old], (%[addr])			\n"
 		"	move	%[tmp], %[new]				\n"
-		"2:							\n"
-		user_sc("%[tmp]", "(%[addr])")
-		"	beqz	%[tmp], 4f				\n"
+		"2:	sc	%[tmp], (%[addr])			\n"
+		"	bnez	%[tmp], 4f				\n"
 		"3:							\n"
 		"	.insn						\n"
 		"	.subsection 2					\n"
@@ -201,12 +191,6 @@ static inline int mips_atomic_set(unsigned long addr, unsigned long new)
 	/* unreached.  Honestly.  */
 	unreachable();
 }
-
-/*
- * mips_atomic_set() normally returns directly via syscall_exit potentially
- * clobbering static registers, so be sure to preserve them.
- */
-save_static_function(sys_sysmips);
 
 SYSCALL_DEFINE3(sysmips, long, cmd, long, arg1, long, arg2)
 {

@@ -26,7 +26,7 @@
 #include <asm/esr.h>
 #include <asm/fpsimd.h>
 #include <asm/signal32.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/unistd.h>
 
 struct compat_sigcontext {
@@ -166,7 +166,7 @@ int copy_siginfo_to_user32(compat_siginfo_t __user *to, const siginfo_t *from)
 #ifdef BUS_MCEERR_AO
 		/*
 		 * Other callers might not initialize the si_lsb field,
-		 * so check explicitely for the right codes here.
+		 * so check explicitly for the right codes here.
 		 */
 		if (from->si_signo == SIGBUS &&
 		    (from->si_code == BUS_MCEERR_AR || from->si_code == BUS_MCEERR_AO))

@@ -18,29 +18,7 @@
 
 #include "efistub.h"
 
-static int efi_secureboot_enabled(efi_system_table_t *sys_table_arg)
-{
-	static efi_guid_t const var_guid = EFI_GLOBAL_VARIABLE_GUID;
-	static efi_char16_t const var_name[] = {
-		'S', 'e', 'c', 'u', 'r', 'e', 'B', 'o', 'o', 't', 0 };
-
-	efi_get_variable_t *f_getvar = sys_table_arg->runtime->get_variable;
-	unsigned long size = sizeof(u8);
-	efi_status_t status;
-	u8 val;
-
-	status = f_getvar((efi_char16_t *)var_name, (efi_guid_t *)&var_guid,
-			  NULL, &size, &val);
-
-	switch (status) {
-	case EFI_SUCCESS:
-		return val;
-	case EFI_NOT_FOUND:
-		return 0;
-	default:
-		return 1;
-	}
-}
+bool __nokaslr;
 
 efi_status_t efi_open_volume(efi_system_table_t *sys_table_arg,
 			     void *__image, void **__fh)
@@ -67,75 +45,6 @@ efi_status_t efi_open_volume(efi_system_table_t *sys_table_arg,
 	return status;
 }
 
-efi_status_t efi_file_close(void *handle)
-{
-	efi_file_handle_t *fh = handle;
-
-	return fh->close(handle);
-}
-
-efi_status_t
-efi_file_read(void *handle, unsigned long *size, void *addr)
-{
-	efi_file_handle_t *fh = handle;
-
-	return fh->read(handle, size, addr);
-}
-
-
-efi_status_t
-efi_file_size(efi_system_table_t *sys_table_arg, void *__fh,
-	      efi_char16_t *filename_16, void **handle, u64 *file_sz)
-{
-	efi_file_handle_t *h, *fh = __fh;
-	efi_file_info_t *info;
-	efi_status_t status;
-	efi_guid_t info_guid = EFI_FILE_INFO_ID;
-	unsigned long info_sz;
-
-	status = fh->open(fh, &h, filename_16, EFI_FILE_MODE_READ, (u64)0);
-	if (status != EFI_SUCCESS) {
-		efi_printk(sys_table_arg, "Failed to open file: ");
-		efi_char16_printk(sys_table_arg, filename_16);
-		efi_printk(sys_table_arg, "\n");
-		return status;
-	}
-
-	*handle = h;
-
-	info_sz = 0;
-	status = h->get_info(h, &info_guid, &info_sz, NULL);
-	if (status != EFI_BUFFER_TOO_SMALL) {
-		efi_printk(sys_table_arg, "Failed to get file info size\n");
-		return status;
-	}
-
-grow:
-	status = sys_table_arg->boottime->allocate_pool(EFI_LOADER_DATA,
-				 info_sz, (void **)&info);
-	if (status != EFI_SUCCESS) {
-		efi_printk(sys_table_arg, "Failed to alloc mem for file info\n");
-		return status;
-	}
-
-	status = h->get_info(h, &info_guid, &info_sz,
-						   info);
-	if (status == EFI_BUFFER_TOO_SMALL) {
-		sys_table_arg->boottime->free_pool(info);
-		goto grow;
-	}
-
-	*file_sz = info->file_size;
-	sys_table_arg->boottime->free_pool(info);
-
-	if (status != EFI_SUCCESS)
-		efi_printk(sys_table_arg, "Failed to get initrd info\n");
-
-	return status;
-}
-
-
-
 void efi_char16_printk(efi_system_table_t *sys_table_arg,
 			      efi_char16_t *str)
 {
@@ -145,6 +54,25 @@ void efi_char16_printk(efi_system_table_t *sys_table_arg,
 	out->output_string(out, str);
 }
 
+static struct screen_info *setup_graphics(efi_system_table_t *sys_table_arg)
+{
+	efi_guid_t gop_proto = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+	efi_status_t status;
+	unsigned long size;
+	void **gop_handle = NULL;
+	struct screen_info *si = NULL;
+
+	size = 0;
+	status = efi_call_early(locate_handle, EFI_LOCATE_BY_PROTOCOL,
+				&gop_proto, NULL, &size, gop_handle);
+	if (status == EFI_BUFFER_TOO_SMALL) {
+		si = alloc_screen_info(sys_table_arg);
+		if (!si)
+			return NULL;
+		efi_setup_gop(sys_table_arg, si, &gop_proto, size);
+	}
+	return si;
+}
 
 /*
  * This function handles the architcture specific differences between arm and
@@ -183,12 +111,18 @@ unsigned long efi_entry(void *handle, efi_system_table_t *sys_table,
 	efi_guid_t loaded_image_proto = LOADED_IMAGE_PROTOCOL_GUID;
 	unsigned long reserve_addr = 0;
 	unsigned long reserve_size = 0;
+	enum efi_secureboot_mode secure_boot;
+	struct screen_info *si;
 
 	/* Check if we were booted by the EFI firmware */
 	if (sys_table->hdr.signature != EFI_SYSTEM_TABLE_SIGNATURE)
 		goto fail;
 
 	pr_efi(sys_table, "Booting Linux Kernel...\n");
+
+	status = check_platform_features(sys_table);
+	if (status != EFI_SUCCESS)
+		goto fail;
 
 	/*
 	 * Get a handle to the loaded image protocol.  This is used to get
@@ -207,14 +141,6 @@ unsigned long efi_entry(void *handle, efi_system_table_t *sys_table,
 		pr_efi_err(sys_table, "Failed to find DRAM base\n");
 		goto fail;
 	}
-	status = handle_kernel_image(sys_table, image_addr, &image_size,
-				     &reserve_addr,
-				     &reserve_size,
-				     dram_base, image);
-	if (status != EFI_SUCCESS) {
-		pr_efi_err(sys_table, "Failed to relocate kernel\n");
-		goto fail;
-	}
 
 	/*
 	 * Get the command line from EFI, using the LOADED_IMAGE
@@ -224,19 +150,46 @@ unsigned long efi_entry(void *handle, efi_system_table_t *sys_table,
 	cmdline_ptr = efi_convert_cmdline(sys_table, image, &cmdline_size);
 	if (!cmdline_ptr) {
 		pr_efi_err(sys_table, "getting command line via LOADED_IMAGE_PROTOCOL\n");
-		goto fail_free_image;
+		goto fail;
+	}
+
+	/* check whether 'nokaslr' was passed on the command line */
+	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE)) {
+		static const u8 default_cmdline[] = CONFIG_CMDLINE;
+		const u8 *str, *cmdline = cmdline_ptr;
+
+		if (IS_ENABLED(CONFIG_CMDLINE_FORCE))
+			cmdline = default_cmdline;
+		str = strstr(cmdline, "nokaslr");
+		if (str == cmdline || (str > cmdline && *(str - 1) == ' '))
+			__nokaslr = true;
+	}
+
+	si = setup_graphics(sys_table);
+
+	status = handle_kernel_image(sys_table, image_addr, &image_size,
+				     &reserve_addr,
+				     &reserve_size,
+				     dram_base, image);
+	if (status != EFI_SUCCESS) {
+		pr_efi_err(sys_table, "Failed to relocate kernel\n");
+		goto fail_free_cmdline;
 	}
 
 	status = efi_parse_options(cmdline_ptr);
 	if (status != EFI_SUCCESS)
 		pr_efi_err(sys_table, "Failed to parse EFI cmdline options\n");
 
+	secure_boot = efi_get_secureboot(sys_table);
+
 	/*
-	 * Unauthenticated device tree data is a security hazard, so
-	 * ignore 'dtb=' unless UEFI Secure Boot is disabled.
+	 * Unauthenticated device tree data is a security hazard, so ignore
+	 * 'dtb=' unless UEFI Secure Boot is disabled.  We assume that secure
+	 * boot is enabled if we can't determine its state.
 	 */
-	if (efi_secureboot_enabled(sys_table)) {
-		pr_efi(sys_table, "UEFI Secure Boot is enabled.\n");
+	if (secure_boot != efi_secureboot_mode_disabled &&
+	    strstr(cmdline_ptr, "dtb=")) {
+		pr_efi(sys_table, "Ignoring DTB from command line.\n");
 	} else {
 		status = handle_cmdline_files(sys_table, image, cmdline_ptr,
 					      "dtb=",
@@ -244,7 +197,7 @@ unsigned long efi_entry(void *handle, efi_system_table_t *sys_table,
 
 		if (status != EFI_SUCCESS) {
 			pr_efi_err(sys_table, "Failed to load device tree!\n");
-			goto fail_free_cmdline;
+			goto fail_free_image;
 		}
 	}
 
@@ -267,6 +220,8 @@ unsigned long efi_entry(void *handle, efi_system_table_t *sys_table,
 	if (status != EFI_SUCCESS)
 		pr_efi_err(sys_table, "Failed initrd from command line!\n");
 
+	efi_random_get_seed(sys_table);
+
 	new_fdt_addr = fdt_addr;
 	status = allocate_new_fdt_and_exit_boot(sys_table, handle,
 				&new_fdt_addr, dram_base + MAX_FDT_OFFSET,
@@ -286,12 +241,12 @@ unsigned long efi_entry(void *handle, efi_system_table_t *sys_table,
 	efi_free(sys_table, initrd_size, initrd_addr);
 	efi_free(sys_table, fdt_size, fdt_addr);
 
-fail_free_cmdline:
-	efi_free(sys_table, cmdline_size, (unsigned long)cmdline_ptr);
-
 fail_free_image:
 	efi_free(sys_table, image_size, *image_addr);
 	efi_free(sys_table, reserve_size, reserve_addr);
+fail_free_cmdline:
+	free_screen_info(sys_table, si);
+	efi_free(sys_table, cmdline_size, (unsigned long)cmdline_ptr);
 fail:
 	return EFI_ERROR;
 }
@@ -303,8 +258,10 @@ fail:
  * The value chosen is the largest non-zero power of 2 suitable for this purpose
  * both on 32-bit and 64-bit ARM CPUs, to maximize the likelihood that it can
  * be mapped efficiently.
+ * Since 32-bit ARM could potentially execute with a 1G/3G user/kernel split,
+ * map everything below 1 GB.
  */
-#define EFI_RT_VIRTUAL_BASE	0x40000000
+#define EFI_RT_VIRTUAL_BASE	SZ_512M
 
 static int cmp_mem_desc(const void *l, const void *r)
 {

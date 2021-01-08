@@ -61,12 +61,12 @@ bool acpi_ata_match(acpi_handle handle);
 bool acpi_bay_match(acpi_handle handle);
 bool acpi_dock_match(acpi_handle handle);
 
-bool acpi_check_dsm(acpi_handle handle, const u8 *uuid, int rev, u64 funcs);
+bool acpi_check_dsm(acpi_handle handle, const u8 *uuid, u64 rev, u64 funcs);
 union acpi_object *acpi_evaluate_dsm(acpi_handle handle, const u8 *uuid,
-			int rev, int func, union acpi_object *argv4);
+			u64 rev, u64 func, union acpi_object *argv4);
 
 static inline union acpi_object *
-acpi_evaluate_dsm_typed(acpi_handle handle, const u8 *uuid, int rev, int func,
+acpi_evaluate_dsm_typed(acpi_handle handle, const u8 *uuid, u64 rev, u64 func,
 			union acpi_object *argv4, acpi_object_type type)
 {
 	union acpi_object *obj;
@@ -86,6 +86,8 @@ acpi_evaluate_dsm_typed(acpi_handle handle, const u8 *uuid, int rev, int func,
 	  .package.count = (cnt),			\
 	  .package.elements = (eles)			\
 	}
+
+bool acpi_dev_found(const char *hid);
 
 #ifdef CONFIG_ACPI
 
@@ -392,13 +394,13 @@ struct acpi_data_node {
 
 static inline bool is_acpi_node(struct fwnode_handle *fwnode)
 {
-	return fwnode && (fwnode->type == FWNODE_ACPI
+	return !IS_ERR_OR_NULL(fwnode) && (fwnode->type == FWNODE_ACPI
 		|| fwnode->type == FWNODE_ACPI_DATA);
 }
 
 static inline bool is_acpi_device_node(struct fwnode_handle *fwnode)
 {
-	return fwnode && fwnode->type == FWNODE_ACPI;
+	return !IS_ERR_OR_NULL(fwnode) && fwnode->type == FWNODE_ACPI;
 }
 
 static inline struct acpi_device *to_acpi_device_node(struct fwnode_handle *fwnode)
@@ -416,6 +418,13 @@ static inline struct acpi_data_node *to_acpi_data_node(struct fwnode_handle *fwn
 {
 	return is_acpi_data_node(fwnode) ?
 		container_of(fwnode, struct acpi_data_node, fwnode) : NULL;
+}
+
+static inline bool acpi_data_node_match(struct fwnode_handle *fwnode,
+					const char *name)
+{
+	return is_acpi_data_node(fwnode) ?
+		(!strcmp(to_acpi_data_node(fwnode)->name, name)) : false;
 }
 
 static inline struct fwnode_handle *acpi_fwnode_handle(struct acpi_device *adev)
@@ -513,6 +522,8 @@ void acpi_bus_trim(struct acpi_device *start);
 acpi_status acpi_bus_get_ejd(acpi_handle handle, acpi_handle * ejd);
 int acpi_match_device_ids(struct acpi_device *device,
 			  const struct acpi_device_id *ids);
+void acpi_set_modalias(struct acpi_device *adev, const char *default_id,
+		       char *modalias, size_t len);
 int acpi_create_dir(struct acpi_device *);
 void acpi_remove_dir(struct acpi_device *);
 
@@ -564,6 +575,8 @@ struct acpi_pci_root {
 
 bool acpi_dma_supported(struct acpi_device *adev);
 enum dev_dma_attr acpi_get_dma_attr(struct acpi_device *adev);
+void acpi_dma_configure(struct device *dev, enum dev_dma_attr attr);
+void acpi_dma_deconfigure(struct device *dev);
 
 struct acpi_device *acpi_find_child_device(struct acpi_device *parent,
 					   u64 address, bool check_children);
@@ -631,7 +644,9 @@ static inline bool acpi_device_can_wakeup(struct acpi_device *adev)
 
 static inline bool acpi_device_can_poweroff(struct acpi_device *adev)
 {
-	return adev->power.states[ACPI_STATE_D3_COLD].flags.valid;
+	return adev->power.states[ACPI_STATE_D3_COLD].flags.valid ||
+		((acpi_gbl_FADT.header.revision < 6) &&
+		adev->power.states[ACPI_STATE_D3_HOT].flags.explicit_set);
 }
 
 #else	/* CONFIG_ACPI */

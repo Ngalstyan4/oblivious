@@ -40,7 +40,7 @@ static void opal_to_tm(u32 y_m_d, u64 h_m_s_ms, struct rtc_time *tm)
 	tm->tm_min  = bcd2bin((h_m_s_ms >> 48) & 0xff);
 	tm->tm_sec  = bcd2bin((h_m_s_ms >> 40) & 0xff);
 
-	GregorianDay(tm);
+	tm->tm_wday = -1;
 }
 
 static void tm_to_opal(struct rtc_time *tm, u32 *y_m_d, u64 *h_m_s_ms)
@@ -58,7 +58,6 @@ static void tm_to_opal(struct rtc_time *tm, u32 *y_m_d, u64 *h_m_s_ms)
 static int opal_get_rtc_time(struct device *dev, struct rtc_time *tm)
 {
 	long rc = OPAL_BUSY;
-	int retries = 10;
 	u32 y_m_d;
 	u64 h_m_s_ms;
 	__be32 __y_m_d;
@@ -68,11 +67,8 @@ static int opal_get_rtc_time(struct device *dev, struct rtc_time *tm)
 		rc = opal_rtc_read(&__y_m_d, &__h_m_s_ms);
 		if (rc == OPAL_BUSY_EVENT)
 			opal_poll_events(NULL);
-		else if (retries-- && (rc == OPAL_HARDWARE
-				       || rc == OPAL_INTERNAL_ERROR))
+		else
 			msleep(10);
-		else if (rc != OPAL_BUSY && rc != OPAL_BUSY_EVENT)
-			break;
 	}
 
 	if (rc != OPAL_SUCCESS)
@@ -88,7 +84,6 @@ static int opal_get_rtc_time(struct device *dev, struct rtc_time *tm)
 static int opal_set_rtc_time(struct device *dev, struct rtc_time *tm)
 {
 	long rc = OPAL_BUSY;
-	int retries = 10;
 	u32 y_m_d = 0;
 	u64 h_m_s_ms = 0;
 
@@ -97,11 +92,8 @@ static int opal_set_rtc_time(struct device *dev, struct rtc_time *tm)
 		rc = opal_rtc_write(y_m_d, h_m_s_ms);
 		if (rc == OPAL_BUSY_EVENT)
 			opal_poll_events(NULL);
-		else if (retries-- && (rc == OPAL_HARDWARE
-				       || rc == OPAL_INTERNAL_ERROR))
+		else
 			msleep(10);
-		else if (rc != OPAL_BUSY && rc != OPAL_BUSY_EVENT)
-			break;
 	}
 
 	return rc == OPAL_SUCCESS ? 0 : -EIO;
@@ -142,7 +134,7 @@ static int opal_get_tpo_time(struct device *dev, struct rtc_wkalrm *alarm)
 		goto exit;
 	}
 
-	rc = be64_to_cpu(msg.params[1]);
+	rc = opal_get_async_rc(msg);
 	if (rc != OPAL_SUCCESS) {
 		rc = -EIO;
 		goto exit;
@@ -189,7 +181,7 @@ static int opal_set_tpo_time(struct device *dev, struct rtc_wkalrm *alarm)
 		goto exit;
 	}
 
-	rc = be64_to_cpu(msg.params[1]);
+	rc = opal_get_async_rc(msg);
 	if (rc != OPAL_SUCCESS)
 		rc = -EIO;
 

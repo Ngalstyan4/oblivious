@@ -53,7 +53,7 @@ struct lynx_accel {
 	/* base virtual address of de data port */
 	volatile unsigned char __iomem *dpPortBase;
 
-	/* function fointers */
+	/* function pointers */
 	void (*de_init)(struct lynx_accel *);
 
 	int (*de_wait)(void);/* see if hardware ready to work */
@@ -79,7 +79,7 @@ struct sm750_dev {
 	struct fb_info *fbinfo[2];
 	struct lynx_accel accel;
 	int accel_off;
-	int dual;
+	int fb_count;
 	int mtrr_off;
 	struct{
 		int vram;
@@ -146,18 +146,20 @@ struct lynxfb_crtc {
 struct lynxfb_output {
 	int dpms;
 	int paths;
-	/* which paths(s) this output stands for,for sm750:
-	   paths=1:means output for panel paths
-	   paths=2:means output for crt paths
-	   paths=3:means output for both panel and crt paths
-	*/
+	/*
+	 * which paths(s) this output stands for,for sm750:
+	 * paths=1:means output for panel paths
+	 * paths=2:means output for crt paths
+	 * paths=3:means output for both panel and crt paths
+	 */
 
 	int *channel;
-	/* which channel these outputs linked with,for sm750:
-	   *channel=0 means primary channel
-	   *channel=1 means secondary channel
-	   output->channel ==> &crtc->channel
-	*/
+	/*
+	 * which channel these outputs linked with,for sm750:
+	 * *channel=0 means primary channel
+	 * *channel=1 means secondary channel
+	 * output->channel ==> &crtc->channel
+	 */
 	void *priv;
 
 	int (*proc_setBLANK)(struct lynxfb_output*, int);

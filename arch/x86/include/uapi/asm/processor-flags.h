@@ -77,8 +77,7 @@
 #define X86_CR3_PWT		_BITUL(X86_CR3_PWT_BIT)
 #define X86_CR3_PCD_BIT		4 /* Page Cache Disable */
 #define X86_CR3_PCD		_BITUL(X86_CR3_PCD_BIT)
-#define X86_CR3_PCID_NOFLUSH_BIT 63 /* Preserve old PCID */
-#define X86_CR3_PCID_NOFLUSH    _BITULL(X86_CR3_PCID_NOFLUSH_BIT)
+#define X86_CR3_PCID_MASK	_AC(0x00000fff,UL) /* PCID Mask */
 
 /*
  * Intel CPU features in CR4
@@ -119,6 +118,8 @@
 #define X86_CR4_SMEP		_BITUL(X86_CR4_SMEP_BIT)
 #define X86_CR4_SMAP_BIT	21 /* enable SMAP support */
 #define X86_CR4_SMAP		_BITUL(X86_CR4_SMAP_BIT)
+#define X86_CR4_PKE_BIT		22 /* enable Protection Keys support */
+#define X86_CR4_PKE		_BITUL(X86_CR4_PKE_BIT)
 
 /*
  * x86-64 Task Priority Register, CR8

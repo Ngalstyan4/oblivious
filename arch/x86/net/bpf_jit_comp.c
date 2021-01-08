@@ -12,7 +12,6 @@
 #include <linux/filter.h>
 #include <linux/if_vlan.h>
 #include <asm/cacheflush.h>
-#include <asm/nospec-branch.h>
 #include <linux/bpf.h>
 
 int bpf_jit_enable __read_mostly;
@@ -111,11 +110,16 @@ static void bpf_flush_icache(void *start, void *end)
 	((int)K < 0 ? ((int)K >= SKF_LL_OFF ? func##_negative_offset : func) : func##_positive_offset)
 
 /* pick a register outside of BPF range for JIT internal work */
-#define AUX_REG (MAX_BPF_REG + 1)
+#define AUX_REG (MAX_BPF_JIT_REG + 1)
 
-/* the following table maps BPF registers to x64 registers.
- * x64 register r12 is unused, since if used as base address register
- * in load/store instructions, it always needs an extra byte of encoding
+/* The following table maps BPF registers to x64 registers.
+ *
+ * x64 register r12 is unused, since if used as base address
+ * register in load/store instructions, it always needs an
+ * extra byte of encoding and is callee saved.
+ *
+ *  r9 caches skb->len - skb->data_len
+ * r10 caches skb->data, and used for blinding (if enabled)
  */
 static const int reg2hex[] = {
 	[BPF_REG_0] = 0,  /* rax */
@@ -129,6 +133,7 @@ static const int reg2hex[] = {
 	[BPF_REG_8] = 6,  /* r14 callee saved */
 	[BPF_REG_9] = 7,  /* r15 callee saved */
 	[BPF_REG_FP] = 5, /* rbp readonly */
+	[BPF_REG_AX] = 2, /* r10 temp register */
 	[AUX_REG] = 3,    /* r11 temp register */
 };
 
@@ -142,7 +147,8 @@ static bool is_ereg(u32 reg)
 			     BIT(AUX_REG) |
 			     BIT(BPF_REG_7) |
 			     BIT(BPF_REG_8) |
-			     BIT(BPF_REG_9));
+			     BIT(BPF_REG_9) |
+			     BIT(BPF_REG_AX));
 }
 
 /* add modifiers if 'reg' maps to x64 registers r8..r15 */
@@ -183,6 +189,7 @@ static void jit_fill_hole(void *area, unsigned int size)
 struct jit_context {
 	int cleanup_addr; /* epilogue code offset */
 	bool seen_ld_abs;
+	bool seen_ax_reg;
 };
 
 /* maximum number of bytes emitted while JITing one eBPF insn */
@@ -194,7 +201,7 @@ struct jit_context {
 	 32 /* space for rbx, r13, r14, r15 */ + \
 	 8 /* space for skb_copy_bits() buffer */)
 
-#define PROLOGUE_SIZE 51
+#define PROLOGUE_SIZE 48
 
 /* emit x64 prologue code for BPF program and check it's size.
  * bpf_tail_call helper will skip it while jumping into another program
@@ -230,11 +237,15 @@ static void emit_prologue(u8 **pprog)
 	/* mov qword ptr [rbp-X],r15 */
 	EMIT3_off32(0x4C, 0x89, 0xBD, -STACKSIZE + 24);
 
-	/* clear A and X registers */
-	EMIT2(0x31, 0xc0); /* xor eax, eax */
-	EMIT3(0x4D, 0x31, 0xED); /* xor r13, r13 */
+	/* Clear the tail call counter (tail_call_cnt): for eBPF tail calls
+	 * we need to reset the counter to 0. It's done in two instructions,
+	 * resetting rax register to 0 (xor on eax gets 0 extended), and
+	 * moving it to the counter location.
+	 */
 
-	/* clear tail_cnt: mov qword ptr [rbp-X], rax */
+	/* xor eax, eax */
+	EMIT2(0x31, 0xc0);
+	/* mov qword ptr [rbp-X], rax */
 	EMIT3_off32(0x48, 0x89, 0x85, -STACKSIZE + 32);
 
 	BUILD_BUG_ON(cnt != PROLOGUE_SIZE);
@@ -267,10 +278,10 @@ static void emit_bpf_tail_call(u8 **pprog)
 	/* if (index >= array->map.max_entries)
 	 *   goto out;
 	 */
-	EMIT2(0x89, 0xD2);                        /* mov edx, edx */
-	EMIT3(0x39, 0x56,                         /* cmp dword ptr [rsi + 16], edx */
+	EMIT4(0x48, 0x8B, 0x46,                   /* mov rax, qword ptr [rsi + 16] */
 	      offsetof(struct bpf_array, map.max_entries));
-#define OFFSET1 (41 + RETPOLINE_RAX_BPF_JIT_SIZE) /* number of bytes to jump */
+	EMIT3(0x48, 0x39, 0xD0);                  /* cmp rax, rdx */
+#define OFFSET1 47 /* number of bytes to jump */
 	EMIT2(X86_JBE, OFFSET1);                  /* jbe out */
 	label1 = cnt;
 
@@ -279,21 +290,22 @@ static void emit_bpf_tail_call(u8 **pprog)
 	 */
 	EMIT2_off32(0x8B, 0x85, -STACKSIZE + 36); /* mov eax, dword ptr [rbp - 516] */
 	EMIT3(0x83, 0xF8, MAX_TAIL_CALL_CNT);     /* cmp eax, MAX_TAIL_CALL_CNT */
-#define OFFSET2 (30 + RETPOLINE_RAX_BPF_JIT_SIZE)
+#define OFFSET2 36
 	EMIT2(X86_JA, OFFSET2);                   /* ja out */
 	label2 = cnt;
 	EMIT3(0x83, 0xC0, 0x01);                  /* add eax, 1 */
 	EMIT2_off32(0x89, 0x85, -STACKSIZE + 36); /* mov dword ptr [rbp - 516], eax */
 
 	/* prog = array->ptrs[index]; */
-	EMIT4_off32(0x48, 0x8B, 0x84, 0xD6,       /* mov rax, [rsi + rdx * 8 + offsetof(...)] */
+	EMIT4_off32(0x48, 0x8D, 0x84, 0xD6,       /* lea rax, [rsi + rdx * 8 + offsetof(...)] */
 		    offsetof(struct bpf_array, ptrs));
+	EMIT3(0x48, 0x8B, 0x00);                  /* mov rax, qword ptr [rax] */
 
 	/* if (prog == NULL)
 	 *   goto out;
 	 */
-	EMIT3(0x48, 0x85, 0xC0);		  /* test rax,rax */
-#define OFFSET3 (8 + RETPOLINE_RAX_BPF_JIT_SIZE)
+	EMIT4(0x48, 0x83, 0xF8, 0x00);            /* cmp rax, 0 */
+#define OFFSET3 10
 	EMIT2(X86_JE, OFFSET3);                   /* je out */
 	label3 = cnt;
 
@@ -306,7 +318,7 @@ static void emit_bpf_tail_call(u8 **pprog)
 	 * rdi == ctx (1st arg)
 	 * rax == prog->bpf_func + prologue_size
 	 */
-	RETPOLINE_RAX_BPF_JIT();
+	EMIT2(0xFF, 0xE0);                        /* jmp rax */
 
 	/* out: */
 	BUILD_BUG_ON(cnt - label1 != OFFSET1);
@@ -341,6 +353,7 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image,
 	struct bpf_insn *insn = bpf_prog->insnsi;
 	int insn_cnt = bpf_prog->len;
 	bool seen_ld_abs = ctx->seen_ld_abs | (oldproglen == 0);
+	bool seen_ax_reg = ctx->seen_ax_reg | (oldproglen == 0);
 	bool seen_exit = false;
 	u8 temp[BPF_MAX_INSN_SIZE + BPF_INSN_SAFETY];
 	int i, cnt = 0;
@@ -362,6 +375,9 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image,
 		bool reload_skb_data;
 		int ilen;
 		u8 *func;
+
+		if (dst_reg == BPF_REG_AX || src_reg == BPF_REG_AX)
+			ctx->seen_ax_reg = seen_ax_reg = true;
 
 		switch (insn->code) {
 			/* ALU */
@@ -455,6 +471,18 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image,
 			}
 
 		case BPF_ALU | BPF_MOV | BPF_K:
+			/* optimization: if imm32 is zero, use 'xor <dst>,<dst>'
+			 * to save 3 bytes.
+			 */
+			if (imm32 == 0) {
+				if (is_ereg(dst_reg))
+					EMIT1(add_2mod(0x40, dst_reg, dst_reg));
+				b2 = 0x31; /* xor */
+				b3 = 0xC0;
+				EMIT2(b2, add_2reg(b3, dst_reg, dst_reg));
+				break;
+			}
+
 			/* mov %eax, imm32 */
 			if (is_ereg(dst_reg))
 				EMIT1(add_1mod(0x40, dst_reg));
@@ -467,6 +495,20 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image,
 				/* verifier must catch invalid insns */
 				pr_err("invalid BPF_LD_IMM64 insn\n");
 				return -EINVAL;
+			}
+
+			/* optimization: if imm64 is zero, use 'xor <dst>,<dst>'
+			 * to save 7 bytes.
+			 */
+			if (insn[0].imm == 0 && insn[1].imm == 0) {
+				b1 = add_2mod(0x48, dst_reg, dst_reg);
+				b2 = 0x31; /* xor */
+				b3 = 0xC0;
+				EMIT3(b1, b2, add_2reg(b3, dst_reg, dst_reg));
+
+				insn++;
+				i++;
+				break;
 			}
 
 			/* movabsq %rax, imm64 */
@@ -811,7 +853,7 @@ xadd:			if (is_imm8(insn->off))
 			func = (u8 *) __bpf_call_base + imm32;
 			jmp_offset = func - (image + addrs[i]);
 			if (seen_ld_abs) {
-				reload_skb_data = bpf_helper_changes_skb_data(func);
+				reload_skb_data = bpf_helper_changes_pkt_data(func);
 				if (reload_skb_data) {
 					EMIT1(0x57); /* push %rdi */
 					jmp_offset += 22; /* pop, mov, sub, mov */
@@ -972,6 +1014,10 @@ common_load:
 			 * sk_load_* helpers also use %r10 and %r9d.
 			 * See bpf_jit.S
 			 */
+			if (seen_ax_reg)
+				/* r10 = skb->data, mov %r10, off32(%rbx) */
+				EMIT3_off32(0x4c, 0x8b, 0x93,
+					    offsetof(struct sk_buff, data));
 			EMIT1_off32(0xE8, jmp_offset); /* call */
 			break;
 
@@ -1021,13 +1067,13 @@ common_load:
 
 		ilen = prog - temp;
 		if (ilen > BPF_MAX_INSN_SIZE) {
-			pr_err("bpf_jit_compile fatal insn size error\n");
+			pr_err("bpf_jit: fatal insn size error\n");
 			return -EFAULT;
 		}
 
 		if (image) {
 			if (unlikely(proglen + ilen > oldproglen)) {
-				pr_err("bpf_jit_compile fatal error\n");
+				pr_err("bpf_jit: fatal error\n");
 				return -EFAULT;
 			}
 			memcpy(image + proglen, temp, ilen);
@@ -1039,29 +1085,37 @@ common_load:
 	return proglen;
 }
 
-void bpf_jit_compile(struct bpf_prog *prog)
-{
-}
-
-void bpf_int_jit_compile(struct bpf_prog *prog)
+struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 {
 	struct bpf_binary_header *header = NULL;
+	struct bpf_prog *tmp, *orig_prog = prog;
 	int proglen, oldproglen = 0;
 	struct jit_context ctx = {};
+	bool tmp_blinded = false;
 	u8 *image = NULL;
 	int *addrs;
 	int pass;
 	int i;
 
 	if (!bpf_jit_enable)
-		return;
+		return orig_prog;
 
-	if (!prog || !prog->len)
-		return;
+	tmp = bpf_jit_blind_constants(prog);
+	/* If blinding was requested and we failed during blinding,
+	 * we must fall back to the interpreter.
+	 */
+	if (IS_ERR(tmp))
+		return orig_prog;
+	if (tmp != prog) {
+		tmp_blinded = true;
+		prog = tmp;
+	}
 
 	addrs = kmalloc(prog->len * sizeof(*addrs), GFP_KERNEL);
-	if (!addrs)
-		return;
+	if (!addrs) {
+		prog = orig_prog;
+		goto out;
+	}
 
 	/* Before first pass, make a rough estimation of addrs[]
 	 * each bpf instruction is translated to less than 64 bytes
@@ -1077,30 +1131,33 @@ void bpf_int_jit_compile(struct bpf_prog *prog)
 	 * may converge on the last pass. In such case do one more
 	 * pass to emit the final image
 	 */
-	for (pass = 0; pass < 20 || image; pass++) {
+	for (pass = 0; pass < 10 || image; pass++) {
 		proglen = do_jit(prog, addrs, image, oldproglen, &ctx);
 		if (proglen <= 0) {
 			image = NULL;
 			if (header)
 				bpf_jit_binary_free(header);
-			goto out;
+			prog = orig_prog;
+			goto out_addrs;
 		}
 		if (image) {
 			if (proglen != oldproglen) {
 				pr_err("bpf_jit: proglen=%d != oldproglen=%d\n",
 				       proglen, oldproglen);
-				goto out;
+				prog = orig_prog;
+				goto out_addrs;
 			}
 			break;
 		}
 		if (proglen == oldproglen) {
 			header = bpf_jit_binary_alloc(proglen, &image,
 						      1, jit_fill_hole);
-			if (!header)
-				goto out;
+			if (!header) {
+				prog = orig_prog;
+				goto out_addrs;
+			}
 		}
 		oldproglen = proglen;
-		cond_resched();
 	}
 
 	if (bpf_jit_enable > 1)
@@ -1108,25 +1165,18 @@ void bpf_int_jit_compile(struct bpf_prog *prog)
 
 	if (image) {
 		bpf_flush_icache(header, image + proglen);
-		set_memory_ro((unsigned long)header, header->pages);
+		bpf_jit_binary_lock_ro(header);
 		prog->bpf_func = (void *)image;
 		prog->jited = 1;
+	} else {
+		prog = orig_prog;
 	}
-out:
+
+out_addrs:
 	kfree(addrs);
-}
-
-void bpf_jit_free(struct bpf_prog *fp)
-{
-	unsigned long addr = (unsigned long)fp->bpf_func & PAGE_MASK;
-	struct bpf_binary_header *header = (void *)addr;
-
-	if (!fp->jited)
-		goto free_filter;
-
-	set_memory_rw(addr, header->pages);
-	bpf_jit_binary_free(header);
-
-free_filter:
-	bpf_prog_unlock_free(fp);
+out:
+	if (tmp_blinded)
+		bpf_jit_prog_release_other(prog, prog == orig_prog ?
+					   tmp : orig_prog);
+	return prog;
 }

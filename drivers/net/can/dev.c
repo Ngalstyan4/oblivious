@@ -70,6 +70,7 @@ EXPORT_SYMBOL_GPL(can_len2dlc);
 
 #ifdef CONFIG_CAN_CALC_BITTIMING
 #define CAN_CALC_MAX_ERROR 50 /* in one-tenth of a percent */
+#define CAN_CALC_SYNC_SEG 1
 
 /*
  * Bit-timing calculation derived from:
@@ -84,98 +85,126 @@ EXPORT_SYMBOL_GPL(can_len2dlc);
  * registers of the CAN controller. You can find more information
  * in the header file linux/can/netlink.h.
  */
-static int can_update_spt(const struct can_bittiming_const *btc,
-			  int sampl_pt, int tseg, int *tseg1, int *tseg2)
+static int can_update_sample_point(const struct can_bittiming_const *btc,
+			  unsigned int sample_point_nominal, unsigned int tseg,
+			  unsigned int *tseg1_ptr, unsigned int *tseg2_ptr,
+			  unsigned int *sample_point_error_ptr)
 {
-	*tseg2 = tseg + 1 - (sampl_pt * (tseg + 1)) / 1000;
-	if (*tseg2 < btc->tseg2_min)
-		*tseg2 = btc->tseg2_min;
-	if (*tseg2 > btc->tseg2_max)
-		*tseg2 = btc->tseg2_max;
-	*tseg1 = tseg - *tseg2;
-	if (*tseg1 > btc->tseg1_max) {
-		*tseg1 = btc->tseg1_max;
-		*tseg2 = tseg - *tseg1;
+	unsigned int sample_point_error, best_sample_point_error = UINT_MAX;
+	unsigned int sample_point, best_sample_point = 0;
+	unsigned int tseg1, tseg2;
+	int i;
+
+	for (i = 0; i <= 1; i++) {
+		tseg2 = tseg + CAN_CALC_SYNC_SEG - (sample_point_nominal * (tseg + CAN_CALC_SYNC_SEG)) / 1000 - i;
+		tseg2 = clamp(tseg2, btc->tseg2_min, btc->tseg2_max);
+		tseg1 = tseg - tseg2;
+		if (tseg1 > btc->tseg1_max) {
+			tseg1 = btc->tseg1_max;
+			tseg2 = tseg - tseg1;
+		}
+
+		sample_point = 1000 * (tseg + CAN_CALC_SYNC_SEG - tseg2) / (tseg + CAN_CALC_SYNC_SEG);
+		sample_point_error = abs(sample_point_nominal - sample_point);
+
+		if ((sample_point <= sample_point_nominal) && (sample_point_error < best_sample_point_error)) {
+			best_sample_point = sample_point;
+			best_sample_point_error = sample_point_error;
+			*tseg1_ptr = tseg1;
+			*tseg2_ptr = tseg2;
+		}
 	}
-	return 1000 * (tseg + 1 - *tseg2) / (tseg + 1);
+
+	if (sample_point_error_ptr)
+		*sample_point_error_ptr = best_sample_point_error;
+
+	return best_sample_point;
 }
 
 static int can_calc_bittiming(struct net_device *dev, struct can_bittiming *bt,
 			      const struct can_bittiming_const *btc)
 {
 	struct can_priv *priv = netdev_priv(dev);
-	long best_error = 1000000000, error = 0;
-	int best_tseg = 0, best_brp = 0, brp = 0;
-	int tsegall, tseg = 0, tseg1 = 0, tseg2 = 0;
-	int spt_error = 1000, spt = 0, sampl_pt;
-	long rate;
+	unsigned int bitrate;			/* current bitrate */
+	unsigned int bitrate_error;		/* difference between current and nominal value */
+	unsigned int best_bitrate_error = UINT_MAX;
+	unsigned int sample_point_error;	/* difference between current and nominal value */
+	unsigned int best_sample_point_error = UINT_MAX;
+	unsigned int sample_point_nominal;	/* nominal sample point */
+	unsigned int best_tseg = 0;		/* current best value for tseg */
+	unsigned int best_brp = 0;		/* current best value for brp */
+	unsigned int brp, tsegall, tseg, tseg1 = 0, tseg2 = 0;
 	u64 v64;
 
 	/* Use CiA recommended sample points */
 	if (bt->sample_point) {
-		sampl_pt = bt->sample_point;
+		sample_point_nominal = bt->sample_point;
 	} else {
 		if (bt->bitrate > 800000)
-			sampl_pt = 750;
+			sample_point_nominal = 750;
 		else if (bt->bitrate > 500000)
-			sampl_pt = 800;
+			sample_point_nominal = 800;
 		else
-			sampl_pt = 875;
+			sample_point_nominal = 875;
 	}
 
 	/* tseg even = round down, odd = round up */
 	for (tseg = (btc->tseg1_max + btc->tseg2_max) * 2 + 1;
 	     tseg >= (btc->tseg1_min + btc->tseg2_min) * 2; tseg--) {
-		tsegall = 1 + tseg / 2;
+		tsegall = CAN_CALC_SYNC_SEG + tseg / 2;
+
 		/* Compute all possible tseg choices (tseg=tseg1+tseg2) */
 		brp = priv->clock.freq / (tsegall * bt->bitrate) + tseg % 2;
-		/* chose brp step which is possible in system */
+
+		/* choose brp step which is possible in system */
 		brp = (brp / btc->brp_inc) * btc->brp_inc;
 		if ((brp < btc->brp_min) || (brp > btc->brp_max))
 			continue;
-		rate = priv->clock.freq / (brp * tsegall);
-		error = bt->bitrate - rate;
+
+		bitrate = priv->clock.freq / (brp * tsegall);
+		bitrate_error = abs(bt->bitrate - bitrate);
+
 		/* tseg brp biterror */
-		if (error < 0)
-			error = -error;
-		if (error > best_error)
+		if (bitrate_error > best_bitrate_error)
 			continue;
-		best_error = error;
-		if (error == 0) {
-			spt = can_update_spt(btc, sampl_pt, tseg / 2,
-					     &tseg1, &tseg2);
-			error = sampl_pt - spt;
-			if (error < 0)
-				error = -error;
-			if (error > spt_error)
-				continue;
-			spt_error = error;
-		}
+
+		/* reset sample point error if we have a better bitrate */
+		if (bitrate_error < best_bitrate_error)
+			best_sample_point_error = UINT_MAX;
+
+		can_update_sample_point(btc, sample_point_nominal, tseg / 2, &tseg1, &tseg2, &sample_point_error);
+		if (sample_point_error > best_sample_point_error)
+			continue;
+
+		best_sample_point_error = sample_point_error;
+		best_bitrate_error = bitrate_error;
 		best_tseg = tseg / 2;
 		best_brp = brp;
-		if (error == 0)
+
+		if (bitrate_error == 0 && sample_point_error == 0)
 			break;
 	}
 
-	if (best_error) {
+	if (best_bitrate_error) {
 		/* Error in one-tenth of a percent */
-		error = (best_error * 1000) / bt->bitrate;
-		if (error > CAN_CALC_MAX_ERROR) {
+		v64 = (u64)best_bitrate_error * 1000;
+		do_div(v64, bt->bitrate);
+		bitrate_error = (u32)v64;
+		if (bitrate_error > CAN_CALC_MAX_ERROR) {
 			netdev_err(dev,
-				   "bitrate error %ld.%ld%% too high\n",
-				   error / 10, error % 10);
+				   "bitrate error %d.%d%% too high\n",
+				   bitrate_error / 10, bitrate_error % 10);
 			return -EDOM;
-		} else {
-			netdev_warn(dev, "bitrate error %ld.%ld%%\n",
-				    error / 10, error % 10);
 		}
+		netdev_warn(dev, "bitrate error %d.%d%%\n",
+			    bitrate_error / 10, bitrate_error % 10);
 	}
 
 	/* real sample point */
-	bt->sample_point = can_update_spt(btc, sampl_pt, best_tseg,
-					  &tseg1, &tseg2);
+	bt->sample_point = can_update_sample_point(btc, sample_point_nominal, best_tseg,
+					  &tseg1, &tseg2, NULL);
 
-	v64 = (u64)best_brp * 1000000000UL;
+	v64 = (u64)best_brp * 1000 * 1000 * 1000;
 	do_div(v64, priv->clock.freq);
 	bt->tq = (u32)v64;
 	bt->prop_seg = tseg1 / 2;
@@ -183,9 +212,9 @@ static int can_calc_bittiming(struct net_device *dev, struct can_bittiming *bt,
 	bt->phase_seg2 = tseg2;
 
 	/* check for sjw user settings */
-	if (!bt->sjw || !btc->sjw_max)
+	if (!bt->sjw || !btc->sjw_max) {
 		bt->sjw = 1;
-	else {
+	} else {
 		/* bt->sjw is at least 1 -> sanitize upper bound to sjw_max */
 		if (bt->sjw > btc->sjw_max)
 			bt->sjw = btc->sjw_max;
@@ -195,8 +224,9 @@ static int can_calc_bittiming(struct net_device *dev, struct can_bittiming *bt,
 	}
 
 	bt->brp = best_brp;
-	/* real bit-rate */
-	bt->bitrate = priv->clock.freq / (bt->brp * (tseg1 + tseg2 + 1));
+
+	/* real bitrate */
+	bt->bitrate = priv->clock.freq / (bt->brp * (CAN_CALC_SYNC_SEG + tseg1 + tseg2));
 
 	return 0;
 }
@@ -249,14 +279,31 @@ static int can_fixup_bittiming(struct net_device *dev, struct can_bittiming *bt,
 	return 0;
 }
 
+/* Checks the validity of predefined bitrate settings */
+static int can_validate_bitrate(struct net_device *dev, struct can_bittiming *bt,
+				const u32 *bitrate_const,
+				const unsigned int bitrate_const_cnt)
+{
+	struct can_priv *priv = netdev_priv(dev);
+	unsigned int i;
+
+	for (i = 0; i < bitrate_const_cnt; i++) {
+		if (bt->bitrate == bitrate_const[i])
+			break;
+	}
+
+	if (i >= priv->bitrate_const_cnt)
+		return -EINVAL;
+
+	return 0;
+}
+
 static int can_get_bittiming(struct net_device *dev, struct can_bittiming *bt,
-			     const struct can_bittiming_const *btc)
+			     const struct can_bittiming_const *btc,
+			     const u32 *bitrate_const,
+			     const unsigned int bitrate_const_cnt)
 {
 	int err;
-
-	/* Check if the CAN device has bit-timing parameters */
-	if (!btc)
-		return -EOPNOTSUPP;
 
 	/*
 	 * Depending on the given can_bittiming parameter structure the CAN
@@ -264,10 +311,13 @@ static int can_get_bittiming(struct net_device *dev, struct can_bittiming *bt,
 	 * alternatively the CAN timing parameters (tq, prop_seg, etc.) are
 	 * provided directly which are then checked and fixed up.
 	 */
-	if (!bt->tq && bt->bitrate)
+	if (!bt->tq && bt->bitrate && btc)
 		err = can_calc_bittiming(dev, bt, btc);
-	else if (bt->tq && !bt->bitrate)
+	else if (bt->tq && !bt->bitrate && btc)
 		err = can_fixup_bittiming(dev, bt, btc);
+	else if (!bt->tq && bt->bitrate && bitrate_const)
+		err = can_validate_bitrate(dev, bt, bitrate_const,
+					   bitrate_const_cnt);
 	else
 		err = -EINVAL;
 
@@ -842,8 +892,20 @@ static int can_changelink(struct net_device *dev,
 		/* Do not allow changing bittiming while running */
 		if (dev->flags & IFF_UP)
 			return -EBUSY;
+
+		/* Calculate bittiming parameters based on
+		 * bittiming_const if set, otherwise pass bitrate
+		 * directly via do_set_bitrate(). Bail out if neither
+		 * is given.
+		 */
+		if (!priv->bittiming_const && !priv->do_set_bittiming)
+			return -EOPNOTSUPP;
+
 		memcpy(&bt, nla_data(data[IFLA_CAN_BITTIMING]), sizeof(bt));
-		err = can_get_bittiming(dev, &bt, priv->bittiming_const);
+		err = can_get_bittiming(dev, &bt,
+					priv->bittiming_const,
+					priv->bitrate_const,
+					priv->bitrate_const_cnt);
 		if (err)
 			return err;
 		memcpy(&priv->bittiming, &bt, sizeof(bt));
@@ -913,9 +975,21 @@ static int can_changelink(struct net_device *dev,
 		/* Do not allow changing bittiming while running */
 		if (dev->flags & IFF_UP)
 			return -EBUSY;
+
+		/* Calculate bittiming parameters based on
+		 * data_bittiming_const if set, otherwise pass bitrate
+		 * directly via do_set_bitrate(). Bail out if neither
+		 * is given.
+		 */
+		if (!priv->data_bittiming_const && !priv->do_set_data_bittiming)
+			return -EOPNOTSUPP;
+
 		memcpy(&dbt, nla_data(data[IFLA_CAN_DATA_BITTIMING]),
 		       sizeof(dbt));
-		err = can_get_bittiming(dev, &dbt, priv->data_bittiming_const);
+		err = can_get_bittiming(dev, &dbt,
+					priv->data_bittiming_const,
+					priv->data_bitrate_const,
+					priv->data_bitrate_const_cnt);
 		if (err)
 			return err;
 		memcpy(&priv->data_bittiming, &dbt, sizeof(dbt));
@@ -926,6 +1000,30 @@ static int can_changelink(struct net_device *dev,
 			if (err)
 				return err;
 		}
+	}
+
+	if (data[IFLA_CAN_TERMINATION]) {
+		const u16 termval = nla_get_u16(data[IFLA_CAN_TERMINATION]);
+		const unsigned int num_term = priv->termination_const_cnt;
+		unsigned int i;
+
+		if (!priv->do_set_termination)
+			return -EOPNOTSUPP;
+
+		/* check whether given value is supported by the interface */
+		for (i = 0; i < num_term; i++) {
+			if (termval == priv->termination_const[i])
+				break;
+		}
+		if (i >= num_term)
+			return -EINVAL;
+
+		/* Finally, set the termination value */
+		err = priv->do_set_termination(dev, termval);
+		if (err)
+			return err;
+
+		priv->termination = termval;
 	}
 
 	return 0;
@@ -950,6 +1048,17 @@ static size_t can_get_size(const struct net_device *dev)
 		size += nla_total_size(sizeof(struct can_bittiming));
 	if (priv->data_bittiming_const)				/* IFLA_CAN_DATA_BITTIMING_CONST */
 		size += nla_total_size(sizeof(struct can_bittiming_const));
+	if (priv->termination_const) {
+		size += nla_total_size(sizeof(priv->termination));		/* IFLA_CAN_TERMINATION */
+		size += nla_total_size(sizeof(*priv->termination_const) *	/* IFLA_CAN_TERMINATION_CONST */
+				       priv->termination_const_cnt);
+	}
+	if (priv->bitrate_const)				/* IFLA_CAN_BITRATE_CONST */
+		size += nla_total_size(sizeof(*priv->bitrate_const) *
+				       priv->bitrate_const_cnt);
+	if (priv->data_bitrate_const)				/* IFLA_CAN_DATA_BITRATE_CONST */
+		size += nla_total_size(sizeof(*priv->data_bitrate_const) *
+				       priv->data_bitrate_const_cnt);
 
 	return size;
 }
@@ -988,7 +1097,28 @@ static int can_fill_info(struct sk_buff *skb, const struct net_device *dev)
 	    (priv->data_bittiming_const &&
 	     nla_put(skb, IFLA_CAN_DATA_BITTIMING_CONST,
 		     sizeof(*priv->data_bittiming_const),
-		     priv->data_bittiming_const)))
+		     priv->data_bittiming_const)) ||
+
+	    (priv->termination_const &&
+	     (nla_put_u16(skb, IFLA_CAN_TERMINATION, priv->termination) ||
+	      nla_put(skb, IFLA_CAN_TERMINATION_CONST,
+		      sizeof(*priv->termination_const) *
+		      priv->termination_const_cnt,
+		      priv->termination_const))) ||
+
+	    (priv->bitrate_const &&
+	     nla_put(skb, IFLA_CAN_BITRATE_CONST,
+		     sizeof(*priv->bitrate_const) *
+		     priv->bitrate_const_cnt,
+		     priv->bitrate_const)) ||
+
+	    (priv->data_bitrate_const &&
+	     nla_put(skb, IFLA_CAN_DATA_BITRATE_CONST,
+		     sizeof(*priv->data_bitrate_const) *
+		     priv->data_bitrate_const_cnt,
+		     priv->data_bitrate_const))
+	    )
+
 		return -EMSGSIZE;
 
 	return 0;
@@ -1043,6 +1173,22 @@ static struct rtnl_link_ops can_link_ops __read_mostly = {
  */
 int register_candev(struct net_device *dev)
 {
+	struct can_priv *priv = netdev_priv(dev);
+
+	/* Ensure termination_const, termination_const_cnt and
+	 * do_set_termination consistency. All must be either set or
+	 * unset.
+	 */
+	if ((!priv->termination_const != !priv->termination_const_cnt) ||
+	    (!priv->termination_const != !priv->do_set_termination))
+		return -EINVAL;
+
+	if (!priv->bitrate_const != !priv->bitrate_const_cnt)
+		return -EINVAL;
+
+	if (!priv->data_bitrate_const != !priv->data_bitrate_const_cnt)
+		return -EINVAL;
+
 	dev->rtnl_link_ops = &can_link_ops;
 	return register_netdev(dev);
 }

@@ -8,7 +8,7 @@
 #include <linux/stat.h>
 #include <linux/utime.h>
 #include <linux/syscalls.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/unistd.h>
 
 #ifdef __ARCH_WANT_SYS_UTIME
@@ -48,7 +48,7 @@ static bool nsec_valid(long nsec)
 	return nsec >= 0 && nsec <= 999999999;
 }
 
-static int utimes_common(struct path *path, struct timespec *times)
+static int utimes_common(const struct path *path, struct timespec *times)
 {
 	int error;
 	struct iattr newattrs;
@@ -81,7 +81,7 @@ static int utimes_common(struct path *path, struct timespec *times)
 			newattrs.ia_valid |= ATTR_MTIME_SET;
 		}
 		/*
-		 * Tell inode_change_ok(), that this is an explicit time
+		 * Tell setattr_prepare(), that this is an explicit time
 		 * update, even if neither ATTR_ATIME_SET nor ATTR_MTIME_SET
 		 * were used.
 		 */
@@ -90,9 +90,9 @@ static int utimes_common(struct path *path, struct timespec *times)
 		newattrs.ia_valid |= ATTR_TOUCH;
 	}
 retry_deleg:
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 	error = notify_change(path->dentry, &newattrs, &delegated_inode);
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	if (delegated_inode) {
 		error = break_deleg_wait(&delegated_inode);
 		if (!error)

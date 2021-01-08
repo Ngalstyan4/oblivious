@@ -343,7 +343,7 @@ void afs_dispatch_give_up_callbacks(struct work_struct *work)
 	 *   had callbacks entirely, and the server will call us later to break
 	 *   them
 	 */
-	afs_fs_give_up_callbacks(server, &afs_async_call);
+	afs_fs_give_up_callbacks(server, true);
 }
 
 /*
@@ -462,8 +462,8 @@ static void afs_callback_updater(struct work_struct *work)
  */
 int __init afs_callback_update_init(void)
 {
-	afs_callback_update_worker =
-		create_singlethread_workqueue("kafs_callbackd");
+	afs_callback_update_worker = alloc_ordered_workqueue("kafs_callbackd",
+							     WQ_MEM_RECLAIM);
 	return afs_callback_update_worker ? 0 : -ENOMEM;
 }
 

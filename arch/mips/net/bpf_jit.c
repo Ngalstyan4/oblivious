@@ -14,7 +14,6 @@
 #include <linux/errno.h>
 #include <linux/filter.h>
 #include <linux/if_vlan.h>
-#include <linux/kconfig.h>
 #include <linux/moduleloader.h>
 #include <linux/netdevice.h>
 #include <linux/string.h>
@@ -426,7 +425,7 @@ static inline void emit_load_ptr(unsigned int dst, unsigned int src,
 static inline void emit_load_func(unsigned int reg, ptr imm,
 				  struct jit_ctx *ctx)
 {
-	if (config_enabled(CONFIG_64BIT)) {
+	if (IS_ENABLED(CONFIG_64BIT)) {
 		/* At this point imm is always 64-bit */
 		emit_load_imm(r_tmp, (u64)imm >> 32, ctx);
 		emit_dsll(r_tmp_imm, r_tmp, 16, ctx); /* left shift by 16 */
@@ -516,7 +515,7 @@ static inline void emit_jr(unsigned int reg, struct jit_ctx *ctx)
 static inline u16 align_sp(unsigned int num)
 {
 	/* Double word alignment for 32-bit, quadword for 64-bit */
-	unsigned int align = config_enabled(CONFIG_64BIT) ? 16 : 8;
+	unsigned int align = IS_ENABLED(CONFIG_64BIT) ? 16 : 8;
 	num = (num + (align - 1)) & -align;
 	return num;
 }
@@ -527,8 +526,7 @@ static void save_bpf_jit_regs(struct jit_ctx *ctx, unsigned offset)
 	u32 sflags, tmp_flags;
 
 	/* Adjust the stack pointer */
-	if (offset)
-		emit_stack_offset(-align_sp(offset), ctx);
+	emit_stack_offset(-align_sp(offset), ctx);
 
 	tmp_flags = sflags = ctx->flags >> SEEN_SREG_SFT;
 	/* sflags is essentially a bitmap */
@@ -580,8 +578,7 @@ static void restore_bpf_jit_regs(struct jit_ctx *ctx,
 		emit_load_stack_reg(r_ra, r_sp, real_off, ctx);
 
 	/* Restore the sp and discard the scrach memory */
-	if (offset)
-		emit_stack_offset(align_sp(offset), ctx);
+	emit_stack_offset(align_sp(offset), ctx);
 }
 
 static unsigned int get_stack_depth(struct jit_ctx *ctx)
@@ -628,14 +625,8 @@ static void build_prologue(struct jit_ctx *ctx)
 	if (ctx->flags & SEEN_X)
 		emit_jit_reg_move(r_X, r_zero, ctx);
 
-	/*
-	 * Do not leak kernel data to userspace, we only need to clear
-	 * r_A if it is ever used.  In fact if it is never used, we
-	 * will not save/restore it, so clearing it in this case would
-	 * corrupt the state of the caller.
-	 */
-	if (bpf_needs_clear_a(&ctx->skf->insns[0]) &&
-	    (ctx->flags & SEEN_A))
+	/* Do not leak kernel data to userspace */
+	if (bpf_needs_clear_a(&ctx->skf->insns[0]))
 		emit_jit_reg_move(r_A, r_zero, ctx);
 }
 
@@ -1207,7 +1198,7 @@ void bpf_jit_compile(struct bpf_prog *fp)
 
 	memset(&ctx, 0, sizeof(ctx));
 
-	ctx.offsets = kcalloc(fp->len, sizeof(*ctx.offsets), GFP_KERNEL);
+	ctx.offsets = kcalloc(fp->len + 1, sizeof(*ctx.offsets), GFP_KERNEL);
 	if (ctx.offsets == NULL)
 		return;
 

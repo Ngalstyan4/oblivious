@@ -33,7 +33,6 @@
 
 #define pr_fmt(fmt) "xen:" KBUILD_MODNAME ": " fmt
 
-#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
@@ -128,7 +127,7 @@ struct unmap_refs_callback_data {
 	int result;
 };
 
-static struct gnttab_ops *gnttab_interface;
+static const struct gnttab_ops *gnttab_interface;
 
 static int grant_table_version;
 static int grefs_per_grant_frame;
@@ -1013,7 +1012,7 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
 	return rc;
 }
 
-static struct gnttab_ops gnttab_v1_ops = {
+static const struct gnttab_ops gnttab_v1_ops = {
 	.map_frames			= gnttab_map_frames_v1,
 	.unmap_frames			= gnttab_unmap_frames_v1,
 	.update_entry			= gnttab_update_entry_v1,
@@ -1147,12 +1146,12 @@ EXPORT_SYMBOL_GPL(gnttab_init);
 
 static int __gnttab_init(void)
 {
-	/* Delay grant-table initialization in the PV on HVM case */
-	if (xen_hvm_domain())
-		return 0;
-
-	if (!xen_pv_domain())
+	if (!xen_domain())
 		return -ENODEV;
+
+	/* Delay grant-table initialization in the PV on HVM case */
+	if (xen_hvm_domain() && !xen_pvh_domain())
+		return 0;
 
 	return gnttab_init();
 }

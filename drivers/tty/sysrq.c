@@ -14,8 +14,10 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/sched/rt.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task.h>
 #include <linux/interrupt.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
@@ -243,10 +245,8 @@ static void sysrq_handle_showallcpus(int key)
 	 * architecture has no support for it:
 	 */
 	if (!trigger_all_cpu_backtrace()) {
-		struct pt_regs *regs = NULL;
+		struct pt_regs *regs = get_irq_regs();
 
-		if (in_irq())
-			regs = get_irq_regs();
 		if (regs) {
 			pr_info("CPU%d:\n", smp_processor_id());
 			show_regs(regs);
@@ -265,10 +265,7 @@ static struct sysrq_key_op sysrq_showallcpus_op = {
 
 static void sysrq_handle_showregs(int key)
 {
-	struct pt_regs *regs = NULL;
-
-	if (in_irq())
-		regs = get_irq_regs();
+	struct pt_regs *regs = get_irq_regs();
 	if (regs)
 		show_regs(regs);
 	perf_event_print_debug();
@@ -322,7 +319,7 @@ static struct sysrq_key_op sysrq_ftrace_dump_op = {
 
 static void sysrq_handle_showmem(int key)
 {
-	show_mem(0);
+	show_mem(0, NULL);
 }
 static struct sysrq_key_op sysrq_showmem_op = {
 	.handler	= sysrq_handle_showmem,
@@ -368,6 +365,7 @@ static void moom_callback(struct work_struct *ignored)
 	struct oom_control oc = {
 		.zonelist = node_zonelist(first_memory_node, gfp_mask),
 		.nodemask = NULL,
+		.memcg = NULL,
 		.gfp_mask = gfp_mask,
 		.order = -1,
 	};

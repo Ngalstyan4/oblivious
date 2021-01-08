@@ -9,6 +9,7 @@
 #include <linux/mm.h>
 #include <linux/rwsem.h>
 #include <linux/memcontrol.h>
+#include <linux/highmem.h>
 
 /*
  * The anon_vma heads a list of private "related" vmas, to scan if
@@ -85,6 +86,8 @@ enum ttu_flags {
 	TTU_UNMAP = 1,			/* unmap mode */
 	TTU_MIGRATION = 2,		/* migration mode */
 	TTU_MUNLOCK = 4,		/* munlock mode */
+	TTU_LZFREE = 8,			/* lazy free mode */
+	TTU_SPLIT_HUGE_PMD = 16,	/* split huge PMD if any */
 
 	TTU_IGNORE_MLOCK = (1 << 8),	/* ignore mlock */
 	TTU_IGNORE_ACCESS = (1 << 9),	/* don't age */
@@ -92,6 +95,8 @@ enum ttu_flags {
 	TTU_BATCH_FLUSH = (1 << 11),	/* Batch TLB flushes where possible
 					 * and caller guarantees they will
 					 * do a final flush if necessary */
+	TTU_RMAP_LOCKED = (1 << 12)	/* do not grab rmap lock:
+					 * caller holds it */
 };
 
 #ifdef CONFIG_MMU
@@ -133,10 +138,18 @@ static inline void anon_vma_unlock_read(struct anon_vma *anon_vma)
  * anon_vma helper functions.
  */
 void anon_vma_init(void);	/* create anon_vma_cachep */
-int  anon_vma_prepare(struct vm_area_struct *);
+int  __anon_vma_prepare(struct vm_area_struct *);
 void unlink_anon_vmas(struct vm_area_struct *);
 int anon_vma_clone(struct vm_area_struct *, struct vm_area_struct *);
 int anon_vma_fork(struct vm_area_struct *, struct vm_area_struct *);
+
+static inline int anon_vma_prepare(struct vm_area_struct *vma)
+{
+	if (likely(vma->anon_vma))
+		return 0;
+
+	return __anon_vma_prepare(vma);
+}
 
 static inline void anon_vma_merge(struct vm_area_struct *vma,
 				  struct vm_area_struct *next)
@@ -147,25 +160,31 @@ static inline void anon_vma_merge(struct vm_area_struct *vma,
 
 struct anon_vma *page_get_anon_vma(struct page *page);
 
+/* bitflags for do_page_add_anon_rmap() */
+#define RMAP_EXCLUSIVE 0x01
+#define RMAP_COMPOUND 0x02
+
 /*
  * rmap interfaces called when adding or removing pte of page
  */
-void page_move_anon_rmap(struct page *, struct vm_area_struct *, unsigned long);
-void page_add_anon_rmap(struct page *, struct vm_area_struct *, unsigned long);
+void page_move_anon_rmap(struct page *, struct vm_area_struct *);
+void page_add_anon_rmap(struct page *, struct vm_area_struct *,
+		unsigned long, bool);
 void do_page_add_anon_rmap(struct page *, struct vm_area_struct *,
 			   unsigned long, int);
-void page_add_new_anon_rmap(struct page *, struct vm_area_struct *, unsigned long);
-void page_add_file_rmap(struct page *);
-void page_remove_rmap(struct page *);
+void page_add_new_anon_rmap(struct page *, struct vm_area_struct *,
+		unsigned long, bool);
+void page_add_file_rmap(struct page *, bool);
+void page_remove_rmap(struct page *, bool);
 
 void hugepage_add_anon_rmap(struct page *, struct vm_area_struct *,
 			    unsigned long);
 void hugepage_add_new_anon_rmap(struct page *, struct vm_area_struct *,
 				unsigned long);
 
-static inline void page_dup_rmap(struct page *page)
+static inline void page_dup_rmap(struct page *page, bool compound)
 {
-	atomic_inc(&page->_mapcount);
+	atomic_inc(compound ? compound_mapcount_ptr(page) : &page->_mapcount);
 }
 
 /*
@@ -178,22 +197,30 @@ int page_referenced(struct page *, int is_locked,
 
 int try_to_unmap(struct page *, enum ttu_flags flags);
 
-/*
- * Used by uprobes to replace a userspace page safely
- */
-pte_t *__page_check_address(struct page *, struct mm_struct *,
-				unsigned long, spinlock_t **, int);
+/* Avoid racy checks */
+#define PVMW_SYNC		(1 << 0)
+/* Look for migarion entries rather than present PTEs */
+#define PVMW_MIGRATION		(1 << 1)
 
-static inline pte_t *page_check_address(struct page *page, struct mm_struct *mm,
-					unsigned long address,
-					spinlock_t **ptlp, int sync)
+struct page_vma_mapped_walk {
+	struct page *page;
+	struct vm_area_struct *vma;
+	unsigned long address;
+	pmd_t *pmd;
+	pte_t *pte;
+	spinlock_t *ptl;
+	unsigned int flags;
+};
+
+static inline void page_vma_mapped_walk_done(struct page_vma_mapped_walk *pvmw)
 {
-	pte_t *ptep;
-
-	__cond_lock(*ptlp, ptep = __page_check_address(page, mm, address,
-						       ptlp, sync));
-	return ptep;
+	if (pvmw->pte)
+		pte_unmap(pvmw->pte);
+	if (pvmw->ptl)
+		spin_unlock(pvmw->ptl);
 }
+
+bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw);
 
 /*
  * Used by swapoff to help locate where page is expected in vma.
@@ -213,6 +240,8 @@ int page_mkclean(struct page *);
  * the page mlocked.
  */
 int try_to_munlock(struct page *);
+
+void remove_migration_ptes(struct page *old, struct page *new, bool locked);
 
 /*
  * Called by memory-failure.c to kill processes.
@@ -240,6 +269,7 @@ struct rmap_walk_control {
 };
 
 int rmap_walk(struct page *page, struct rmap_walk_control *rwc);
+int rmap_walk_locked(struct page *page, struct rmap_walk_control *rwc);
 
 #else	/* !CONFIG_MMU */
 
@@ -272,5 +302,6 @@ static inline int page_mkclean(struct page *page)
 #define SWAP_AGAIN	1
 #define SWAP_FAIL	2
 #define SWAP_MLOCK	3
+#define SWAP_LZFREE	4
 
 #endif	/* _LINUX_RMAP_H */

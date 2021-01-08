@@ -149,17 +149,13 @@ EXPORT_SYMBOL_GPL(af_alg_release_parent);
 
 static int alg_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
-	const u32 allowed = CRYPTO_ALG_KERN_DRIVER_ONLY;
+	const u32 forbidden = CRYPTO_ALG_INTERNAL;
 	struct sock *sk = sock->sk;
 	struct alg_sock *ask = alg_sk(sk);
 	struct sockaddr_alg *sa = (void *)uaddr;
 	const struct af_alg_type *type;
 	void *private;
 	int err;
-
-	/* If caller uses non-allowed flag, return error. */
-	if ((sa->salg_feat & ~allowed) || (sa->salg_mask & ~allowed))
-		return -EINVAL;
 
 	if (sock->state == SS_CONNECTED)
 		return -EINVAL;
@@ -179,7 +175,9 @@ static int alg_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	if (IS_ERR(type))
 		return PTR_ERR(type);
 
-	private = type->bind(sa->salg_name, sa->salg_feat, sa->salg_mask);
+	private = type->bind(sa->salg_name,
+			     sa->salg_feat & ~forbidden,
+			     sa->salg_mask & ~forbidden);
 	if (IS_ERR(private)) {
 		module_put(type->owner);
 		return PTR_ERR(private);
@@ -268,7 +266,7 @@ unlock:
 	return err;
 }
 
-int af_alg_accept(struct sock *sk, struct socket *newsock)
+int af_alg_accept(struct sock *sk, struct socket *newsock, bool kern)
 {
 	struct alg_sock *ask = alg_sk(sk);
 	const struct af_alg_type *type;
@@ -283,7 +281,7 @@ int af_alg_accept(struct sock *sk, struct socket *newsock)
 	if (!type)
 		goto unlock;
 
-	sk2 = sk_alloc(sock_net(sk), PF_ALG, GFP_KERNEL, &alg_proto, 0);
+	sk2 = sk_alloc(sock_net(sk), PF_ALG, GFP_KERNEL, &alg_proto, kern);
 	err = -ENOMEM;
 	if (!sk2)
 		goto unlock;
@@ -325,9 +323,10 @@ unlock:
 }
 EXPORT_SYMBOL_GPL(af_alg_accept);
 
-static int alg_accept(struct socket *sock, struct socket *newsock, int flags)
+static int alg_accept(struct socket *sock, struct socket *newsock, int flags,
+		      bool kern)
 {
-	return af_alg_accept(sock->sk, newsock);
+	return af_alg_accept(sock->sk, newsock, kern);
 }
 
 static const struct proto_ops alg_proto_ops = {

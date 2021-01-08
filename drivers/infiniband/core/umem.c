@@ -34,10 +34,10 @@
 
 #include <linux/mm.h>
 #include <linux/dma-mapping.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/mm.h>
 #include <linux/export.h>
 #include <linux/hugetlb.h>
-#include <linux/dma-attrs.h>
 #include <linux/slab.h>
 #include <rdma/ib_umem_odp.h>
 
@@ -52,7 +52,7 @@ static void __ib_umem_release(struct ib_device *dev, struct ib_umem *umem, int d
 
 	if (umem->nmap > 0)
 		ib_dma_unmap_sg(dev, umem->sg_head.sgl,
-				umem->nmap,
+				umem->npages,
 				DMA_BIDIRECTIONAL);
 
 	for_each_sg(umem->sg_head.sgl, sg, umem->npages, i) {
@@ -92,15 +92,13 @@ struct ib_umem *ib_umem_get(struct ib_ucontext *context, unsigned long addr,
 	unsigned long npages;
 	int ret;
 	int i;
-	DEFINE_DMA_ATTRS(attrs);
+	unsigned long dma_attrs = 0;
 	struct scatterlist *sg, *sg_list_start;
 	int need_release = 0;
+	unsigned int gup_flags = FOLL_WRITE;
 
 	if (dmasync)
-		dma_set_attr(DMA_ATTR_WRITE_BARRIER, &attrs);
-
-	if (!size)
-		return ERR_PTR(-EINVAL);
+		dma_attrs |= DMA_ATTR_WRITE_BARRIER;
 
 	/*
 	 * If the combination of the addr and size requested for this memory
@@ -186,14 +184,17 @@ struct ib_umem *ib_umem_get(struct ib_ucontext *context, unsigned long addr,
 	if (ret)
 		goto out;
 
+	if (!umem->writable)
+		gup_flags |= FOLL_FORCE;
+
 	need_release = 1;
 	sg_list_start = umem->sg_head.sgl;
 
 	while (npages) {
-		ret = get_user_pages(current, current->mm, cur_base,
+		ret = get_user_pages(cur_base,
 				     min_t(unsigned long, npages,
 					   PAGE_SIZE / sizeof (struct page *)),
-				     1, !umem->writable, page_list, vma_list);
+				     gup_flags, page_list, vma_list);
 
 		if (ret < 0)
 			goto out;
@@ -217,7 +218,7 @@ struct ib_umem *ib_umem_get(struct ib_ucontext *context, unsigned long addr,
 				  umem->sg_head.sgl,
 				  umem->npages,
 				  DMA_BIDIRECTIONAL,
-				  &attrs);
+				  dma_attrs);
 
 	if (umem->nmap <= 0) {
 		ret = -ENOMEM;
@@ -354,7 +355,7 @@ int ib_umem_copy_from(void *dst, struct ib_umem *umem, size_t offset,
 		return -EINVAL;
 	}
 
-	ret = sg_pcopy_to_buffer(umem->sg_head.sgl, umem->npages, dst, length,
+	ret = sg_pcopy_to_buffer(umem->sg_head.sgl, umem->nmap, dst, length,
 				 offset + ib_umem_offset(umem));
 
 	if (ret < 0)

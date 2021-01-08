@@ -16,10 +16,14 @@
  * GNU General Public License for more details.
  ******************************************************************************/
 
+#include <crypto/hash.h>
+#include <linux/module.h>
 #include <linux/string.h>
 #include <linux/kthread.h>
-#include <linux/crypto.h>
+#include <linux/sched/signal.h>
 #include <linux/idr.h>
+#include <linux/tcp.h>        /* TCP_NODELAY */
+#include <net/ipv6.h>         /* ipv6_addr_v4mapped() */
 #include <scsi/iscsi_proto.h>
 #include <target/target_core_base.h>
 #include <target/target_core_fabric.h>
@@ -115,27 +119,36 @@ out_login:
  */
 int iscsi_login_setup_crypto(struct iscsi_conn *conn)
 {
+	struct crypto_ahash *tfm;
+
 	/*
 	 * Setup slicing by CRC32C algorithm for RX and TX libcrypto contexts
 	 * which will default to crc32c_intel.ko for cpu_has_xmm4_2, or fallback
 	 * to software 1x8 byte slicing from crc32c.ko
 	 */
-	conn->conn_rx_hash.flags = 0;
-	conn->conn_rx_hash.tfm = crypto_alloc_hash("crc32c", 0,
-						CRYPTO_ALG_ASYNC);
-	if (IS_ERR(conn->conn_rx_hash.tfm)) {
-		pr_err("crypto_alloc_hash() failed for conn_rx_tfm\n");
+	tfm = crypto_alloc_ahash("crc32c", 0, CRYPTO_ALG_ASYNC);
+	if (IS_ERR(tfm)) {
+		pr_err("crypto_alloc_ahash() failed\n");
 		return -ENOMEM;
 	}
 
-	conn->conn_tx_hash.flags = 0;
-	conn->conn_tx_hash.tfm = crypto_alloc_hash("crc32c", 0,
-						CRYPTO_ALG_ASYNC);
-	if (IS_ERR(conn->conn_tx_hash.tfm)) {
-		pr_err("crypto_alloc_hash() failed for conn_tx_tfm\n");
-		crypto_free_hash(conn->conn_rx_hash.tfm);
+	conn->conn_rx_hash = ahash_request_alloc(tfm, GFP_KERNEL);
+	if (!conn->conn_rx_hash) {
+		pr_err("ahash_request_alloc() failed for conn_rx_hash\n");
+		crypto_free_ahash(tfm);
 		return -ENOMEM;
 	}
+	ahash_request_set_callback(conn->conn_rx_hash, 0, NULL, NULL);
+
+	conn->conn_tx_hash = ahash_request_alloc(tfm, GFP_KERNEL);
+	if (!conn->conn_tx_hash) {
+		pr_err("ahash_request_alloc() failed for conn_tx_hash\n");
+		ahash_request_free(conn->conn_rx_hash);
+		conn->conn_rx_hash = NULL;
+		crypto_free_ahash(tfm);
+		return -ENOMEM;
+	}
+	ahash_request_set_callback(conn->conn_tx_hash, 0, NULL, NULL);
 
 	return 0;
 }
@@ -195,7 +208,6 @@ int iscsi_check_for_session_reinstatement(struct iscsi_conn *conn)
 			    initiatorname_param->value) &&
 		   (sess_p->sess_ops->SessionType == sessiontype))) {
 			atomic_set(&sess_p->session_reinstatement, 1);
-			atomic_set(&sess_p->session_fall_back_to_erl0, 1);
 			spin_unlock(&sess_p->conn_lock);
 			iscsit_inc_session_usage_count(sess_p);
 			iscsit_stop_time2retain_timer(sess_p);
@@ -212,7 +224,7 @@ int iscsi_check_for_session_reinstatement(struct iscsi_conn *conn)
 		return 0;
 
 	pr_debug("%s iSCSI Session SID %u is still active for %s,"
-		" preforming session reinstatement.\n", (sessiontype) ?
+		" performing session reinstatement.\n", (sessiontype) ?
 		"Discovery" : "Normal", sess->sid,
 		sess->sess_ops->InitiatorName);
 
@@ -220,7 +232,7 @@ int iscsi_check_for_session_reinstatement(struct iscsi_conn *conn)
 	if (sess->session_state == TARG_SESS_STATE_FAILED) {
 		spin_unlock_bh(&sess->conn_lock);
 		iscsit_dec_session_usage_count(sess);
-		target_put_session(sess->se_sess);
+		iscsit_close_session(sess);
 		return 0;
 	}
 	spin_unlock_bh(&sess->conn_lock);
@@ -228,7 +240,7 @@ int iscsi_check_for_session_reinstatement(struct iscsi_conn *conn)
 	iscsit_stop_session(sess, 1, 1);
 	iscsit_dec_session_usage_count(sess);
 
-	target_put_session(sess->se_sess);
+	iscsit_close_session(sess);
 	return 0;
 }
 
@@ -250,7 +262,7 @@ static void iscsi_login_set_conn_values(
 	mutex_unlock(&auth_id_lock);
 }
 
-static __printf(2, 3) int iscsi_change_param_sprintf(
+__printf(2, 3) int iscsi_change_param_sprintf(
 	struct iscsi_conn *conn,
 	const char *fmt, ...)
 {
@@ -271,6 +283,7 @@ static __printf(2, 3) int iscsi_change_param_sprintf(
 
 	return 0;
 }
+EXPORT_SYMBOL(iscsi_change_param_sprintf);
 
 /*
  *	This is the leading connection of a new session,
@@ -425,7 +438,7 @@ static int iscsi_login_zero_tsih_s2(
 
 		/*
 		 * Make MaxRecvDataSegmentLength PAGE_SIZE aligned for
-		 * Immediate Data + Unsolicitied Data-OUT if necessary..
+		 * Immediate Data + Unsolicited Data-OUT if necessary..
 		 */
 		param = iscsi_find_param_from_key("MaxRecvDataSegmentLength",
 						  conn->param_list);
@@ -637,7 +650,7 @@ static void iscsi_post_login_start_timers(struct iscsi_conn *conn)
 {
 	struct iscsi_session *sess = conn->sess;
 	/*
-	 * FIXME: Unsolicitied NopIN support for ISER
+	 * FIXME: Unsolicited NopIN support for ISER
 	 */
 	if (conn->conn_transport->transport_type == ISCSI_INFINIBAND)
 		return;
@@ -1175,10 +1188,14 @@ old_sess_out:
 		iscsit_dec_session_usage_count(conn->sess);
 	}
 
-	if (!IS_ERR(conn->conn_rx_hash.tfm))
-		crypto_free_hash(conn->conn_rx_hash.tfm);
-	if (!IS_ERR(conn->conn_tx_hash.tfm))
-		crypto_free_hash(conn->conn_tx_hash.tfm);
+	ahash_request_free(conn->conn_tx_hash);
+	if (conn->conn_rx_hash) {
+		struct crypto_ahash *tfm;
+
+		tfm = crypto_ahash_reqtfm(conn->conn_rx_hash);
+		ahash_request_free(conn->conn_rx_hash);
+		crypto_free_ahash(tfm);
+	}
 
 	free_cpumask_var(conn->conn_cpumask);
 
@@ -1219,11 +1236,9 @@ static int __iscsi_target_login_thread(struct iscsi_np *np)
 	flush_signals(current);
 
 	spin_lock_bh(&np->np_thread_lock);
-	if (atomic_dec_if_positive(&np->np_reset_count) >= 0) {
+	if (np->np_thread_state == ISCSI_NP_THREAD_RESET) {
 		np->np_thread_state = ISCSI_NP_THREAD_ACTIVE;
-		spin_unlock_bh(&np->np_thread_lock);
 		complete(&np->np_restart_comp);
-		return 1;
 	} else if (np->np_thread_state == ISCSI_NP_THREAD_SHUTDOWN) {
 		spin_unlock_bh(&np->np_thread_lock);
 		goto exit;
@@ -1256,8 +1271,7 @@ static int __iscsi_target_login_thread(struct iscsi_np *np)
 		goto exit;
 	} else if (rc < 0) {
 		spin_lock_bh(&np->np_thread_lock);
-		if (atomic_dec_if_positive(&np->np_reset_count) >= 0) {
-			np->np_thread_state = ISCSI_NP_THREAD_ACTIVE;
+		if (np->np_thread_state == ISCSI_NP_THREAD_RESET) {
 			spin_unlock_bh(&np->np_thread_lock);
 			complete(&np->np_restart_comp);
 			iscsit_put_transport(conn->conn_transport);
@@ -1379,6 +1393,16 @@ static int __iscsi_target_login_thread(struct iscsi_np *np)
 			goto old_sess_out;
 	}
 
+	if (conn->conn_transport->iscsit_validate_params) {
+		ret = conn->conn_transport->iscsit_validate_params(conn);
+		if (ret < 0) {
+			if (zero_tsih)
+				goto new_sess_out;
+			else
+				goto old_sess_out;
+		}
+	}
+
 	ret = iscsi_target_start_negotiation(login, conn);
 	if (ret < 0)
 		goto new_sess_out;
@@ -1437,10 +1461,6 @@ int iscsi_target_login_thread(void *arg)
 		 */
 		if (ret != 1)
 			break;
-	}
-
-	while (!kthread_should_stop()) {
-		msleep(100);
 	}
 
 	return 0;

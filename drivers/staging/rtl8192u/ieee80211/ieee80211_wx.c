@@ -253,7 +253,7 @@ int ieee80211_wx_get_scan(struct ieee80211_device *ieee,
 	int i = 0;
 	int err = 0;
 	IEEE80211_DEBUG_WX("Getting scan\n");
-	down(&ieee->wx_sem);
+	mutex_lock(&ieee->wx_mutex);
 	spin_lock_irqsave(&ieee->lock, flags);
 
 	list_for_each_entry(network, &ieee->network_list, list) {
@@ -262,7 +262,7 @@ int ieee80211_wx_get_scan(struct ieee80211_device *ieee,
 		{
 			err = -E2BIG;
 			break;
-												}
+		}
 		if (ieee->scan_age == 0 ||
 		    time_after(network->last_scanned + ieee->scan_age, jiffies))
 			ev = rtl819x_translate_scan(ieee, ev, stop, network, info);
@@ -277,7 +277,7 @@ int ieee80211_wx_get_scan(struct ieee80211_device *ieee,
 	}
 
 	spin_unlock_irqrestore(&ieee->lock, flags);
-	up(&ieee->wx_sem);
+	mutex_unlock(&ieee->wx_mutex);
 	wrqu->data.length = ev -  extra;
 	wrqu->data.flags = 0;
 
@@ -623,7 +623,6 @@ int ieee80211_wx_set_encode_ext(struct ieee80211_device *ieee,
 			goto done;
 		}
 		*crypt = new_crypt;
-
 	}
 
 	if (ext->key_len > 0 && (*crypt)->ops->set_key &&
@@ -725,7 +724,6 @@ int ieee80211_wx_get_encode_ext(struct ieee80211_device *ieee,
 		    (ext->alg == IW_ENCODE_ALG_TKIP ||
 		     ext->alg == IW_ENCODE_ALG_CCMP))
 			ext->ext_flags |= IW_ENCODE_EXT_TX_SEQ_VALID;
-
 	}
 
 	return 0;
@@ -839,6 +837,5 @@ int ieee80211_wx_set_gen_ie(struct ieee80211_device *ieee, u8 *ie, size_t len)
 		ieee->wpa_ie_len = 0;
 	}
 	return 0;
-
 }
 EXPORT_SYMBOL(ieee80211_wx_set_gen_ie);

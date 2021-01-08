@@ -17,7 +17,6 @@
 #include <linux/types.h>
 #include <linux/list.h>
 #include <linux/errno.h>
-#include <linux/capability.h>
 #include <net/netlink.h>
 #include <net/sock.h>
 
@@ -51,12 +50,12 @@ nfnl_userspace_cthelper(struct sk_buff *skb, unsigned int protoff,
 	if (help == NULL)
 		return NF_DROP;
 
-	/* rcu_read_lock()ed by nf_hook_slow */
+	/* rcu_read_lock()ed by nf_hook_thresh */
 	helper = rcu_dereference(help->helper);
 	if (helper == NULL)
 		return NF_DROP;
 
-	/* This is an user-space helper not yet configured, skip. */
+	/* This is a user-space helper not yet configured, skip. */
 	if ((helper->flags &
 	    (NF_CT_HELPER_F_USERSPACE | NF_CT_HELPER_F_CONFIGURED)) ==
 	     NF_CT_HELPER_F_USERSPACE)
@@ -383,18 +382,15 @@ nfnl_cthelper_update(const struct nlattr * const tb[],
 	return 0;
 }
 
-static int
-nfnl_cthelper_new(struct sock *nfnl, struct sk_buff *skb,
-		  const struct nlmsghdr *nlh, const struct nlattr * const tb[])
+static int nfnl_cthelper_new(struct net *net, struct sock *nfnl,
+			     struct sk_buff *skb, const struct nlmsghdr *nlh,
+			     const struct nlattr * const tb[])
 {
 	const char *helper_name;
 	struct nf_conntrack_helper *cur, *helper = NULL;
 	struct nf_conntrack_tuple tuple;
 	struct nfnl_cthelper *nlcth;
 	int ret = 0;
-
-	if (!capable(CAP_NET_ADMIN))
-		return -EPERM;
 
 	if (!tb[NFCTH_NAME] || !tb[NFCTH_TUPLE])
 		return -EINVAL;
@@ -587,9 +583,9 @@ out:
 	return skb->len;
 }
 
-static int
-nfnl_cthelper_get(struct sock *nfnl, struct sk_buff *skb,
-		  const struct nlmsghdr *nlh, const struct nlattr * const tb[])
+static int nfnl_cthelper_get(struct net *net, struct sock *nfnl,
+			     struct sk_buff *skb, const struct nlmsghdr *nlh,
+			     const struct nlattr * const tb[])
 {
 	int ret = -ENOENT;
 	struct nf_conntrack_helper *cur;
@@ -598,9 +594,6 @@ nfnl_cthelper_get(struct sock *nfnl, struct sk_buff *skb,
 	struct nf_conntrack_tuple tuple;
 	struct nfnl_cthelper *nlcth;
 	bool tuple_set = false;
-
-	if (!capable(CAP_NET_ADMIN))
-		return -EPERM;
 
 	if (nlh->nlmsg_flags & NLM_F_DUMP) {
 		struct netlink_dump_control c = {
@@ -657,9 +650,9 @@ nfnl_cthelper_get(struct sock *nfnl, struct sk_buff *skb,
 	return ret;
 }
 
-static int
-nfnl_cthelper_del(struct sock *nfnl, struct sk_buff *skb,
-	     const struct nlmsghdr *nlh, const struct nlattr * const tb[])
+static int nfnl_cthelper_del(struct net *net, struct sock *nfnl,
+			     struct sk_buff *skb, const struct nlmsghdr *nlh,
+			     const struct nlattr * const tb[])
 {
 	char *helper_name = NULL;
 	struct nf_conntrack_helper *cur;
@@ -667,9 +660,6 @@ nfnl_cthelper_del(struct sock *nfnl, struct sk_buff *skb,
 	bool tuple_set = false, found = false;
 	struct nfnl_cthelper *nlcth, *n;
 	int j = 0, ret;
-
-	if (!capable(CAP_NET_ADMIN))
-		return -EPERM;
 
 	if (tb[NFCTH_NAME])
 		helper_name = nla_data(tb[NFCTH_NAME]);

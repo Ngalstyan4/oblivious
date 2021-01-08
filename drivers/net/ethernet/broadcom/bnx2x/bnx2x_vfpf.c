@@ -1777,6 +1777,23 @@ static int bnx2x_vf_mbx_qfilters(struct bnx2x *bp, struct bnx2x_virtf *vf)
 				goto op_err;
 		}
 
+		/* build vlan list */
+		fl = NULL;
+
+		rc = bnx2x_vf_mbx_macvlan_list(bp, vf, msg, &fl,
+					       VFPF_VLAN_FILTER);
+		if (rc)
+			goto op_err;
+
+		if (fl) {
+			/* set vlan list */
+			rc = bnx2x_vf_mac_vlan_config_list(bp, vf, fl,
+							   msg->vf_qid,
+							   false);
+			if (rc)
+				goto op_err;
+		}
+
 	}
 
 	if (msg->flags & VFPF_SET_Q_FILTERS_RX_MASK_CHANGED) {
@@ -2186,8 +2203,10 @@ void bnx2x_vf_mbx_schedule(struct bnx2x *bp,
 
 	/* Update VFDB with current message and schedule its handling */
 	mutex_lock(&BP_VFDB(bp)->event_mutex);
-	BP_VF_MBX(bp, vf_idx)->vf_addr_hi = vfpf_event->msg_addr_hi;
-	BP_VF_MBX(bp, vf_idx)->vf_addr_lo = vfpf_event->msg_addr_lo;
+	BP_VF_MBX(bp, vf_idx)->vf_addr_hi =
+		le32_to_cpu(vfpf_event->msg_addr_hi);
+	BP_VF_MBX(bp, vf_idx)->vf_addr_lo =
+		le32_to_cpu(vfpf_event->msg_addr_lo);
 	BP_VFDB(bp)->event_occur |= (1ULL << vf_idx);
 	mutex_unlock(&BP_VFDB(bp)->event_mutex);
 

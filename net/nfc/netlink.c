@@ -38,14 +38,7 @@ static const struct genl_multicast_group nfc_genl_mcgrps[] = {
 	{ .name = NFC_GENL_MCAST_EVENT_NAME, },
 };
 
-static struct genl_family nfc_genl_family = {
-	.id = GENL_ID_GENERATE,
-	.hdrsize = 0,
-	.name = NFC_GENL_NAME,
-	.version = NFC_GENL_VERSION,
-	.maxattr = NFC_ATTR_MAX,
-};
-
+static struct genl_family nfc_genl_family;
 static const struct nla_policy nfc_genl_policy[NFC_ATTR_MAX + 1] = {
 	[NFC_ATTR_DEVICE_INDEX] = { .type = NLA_U32 },
 	[NFC_ATTR_DEVICE_NAME] = { .type = NLA_STRING,
@@ -120,21 +113,20 @@ nla_put_failure:
 
 static struct nfc_dev *__get_device_from_cb(struct netlink_callback *cb)
 {
+	struct nlattr **attrbuf = genl_family_attrbuf(&nfc_genl_family);
 	struct nfc_dev *dev;
 	int rc;
 	u32 idx;
 
 	rc = nlmsg_parse(cb->nlh, GENL_HDRLEN + nfc_genl_family.hdrsize,
-			 nfc_genl_family.attrbuf,
-			 nfc_genl_family.maxattr,
-			 nfc_genl_policy);
+			 attrbuf, nfc_genl_family.maxattr, nfc_genl_policy);
 	if (rc < 0)
 		return ERR_PTR(rc);
 
-	if (!nfc_genl_family.attrbuf[NFC_ATTR_DEVICE_INDEX])
+	if (!attrbuf[NFC_ATTR_DEVICE_INDEX])
 		return ERR_PTR(-EINVAL);
 
-	idx = nla_get_u32(nfc_genl_family.attrbuf[NFC_ATTR_DEVICE_INDEX]);
+	idx = nla_get_u32(attrbuf[NFC_ATTR_DEVICE_INDEX]);
 
 	dev = nfc_get_device(idx);
 	if (!dev)
@@ -552,6 +544,43 @@ free_msg:
 	return -EMSGSIZE;
 }
 
+int nfc_genl_se_connectivity(struct nfc_dev *dev, u8 se_idx)
+{
+	struct nfc_se *se;
+	struct sk_buff *msg;
+	void *hdr;
+
+	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(msg, 0, 0, &nfc_genl_family, 0,
+			  NFC_EVENT_SE_CONNECTIVITY);
+	if (!hdr)
+		goto free_msg;
+
+	se = nfc_find_se(dev, se_idx);
+	if (!se)
+		goto free_msg;
+
+	if (nla_put_u32(msg, NFC_ATTR_DEVICE_INDEX, dev->idx) ||
+	    nla_put_u32(msg, NFC_ATTR_SE_INDEX, se_idx) ||
+	    nla_put_u8(msg, NFC_ATTR_SE_TYPE, se->type))
+		goto nla_put_failure;
+
+	genlmsg_end(msg, hdr);
+
+	genlmsg_multicast(&nfc_genl_family, msg, 0, 0, GFP_KERNEL);
+
+	return 0;
+
+nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+free_msg:
+	nlmsg_free(msg);
+	return -EMSGSIZE;
+}
+
 static int nfc_genl_send_device(struct sk_buff *msg, struct nfc_dev *dev,
 				u32 portid, u32 seq,
 				struct netlink_callback *cb,
@@ -873,9 +902,7 @@ static int nfc_genl_activate_target(struct sk_buff *skb, struct genl_info *info)
 	u32 device_idx, target_idx, protocol;
 	int rc;
 
-	if (!info->attrs[NFC_ATTR_DEVICE_INDEX] ||
-	    !info->attrs[NFC_ATTR_TARGET_INDEX] ||
-	    !info->attrs[NFC_ATTR_PROTOCOLS])
+	if (!info->attrs[NFC_ATTR_DEVICE_INDEX])
 		return -EINVAL;
 
 	device_idx = nla_get_u32(info->attrs[NFC_ATTR_DEVICE_INDEX]);
@@ -1719,6 +1746,18 @@ static const struct genl_ops nfc_genl_ops[] = {
 	},
 };
 
+static struct genl_family nfc_genl_family __ro_after_init = {
+	.hdrsize = 0,
+	.name = NFC_GENL_NAME,
+	.version = NFC_GENL_VERSION,
+	.maxattr = NFC_ATTR_MAX,
+	.module = THIS_MODULE,
+	.ops = nfc_genl_ops,
+	.n_ops = ARRAY_SIZE(nfc_genl_ops),
+	.mcgrps = nfc_genl_mcgrps,
+	.n_mcgrps = ARRAY_SIZE(nfc_genl_mcgrps),
+};
+
 
 struct urelease_work {
 	struct	work_struct w;
@@ -1804,9 +1843,7 @@ int __init nfc_genl_init(void)
 {
 	int rc;
 
-	rc = genl_register_family_with_ops_groups(&nfc_genl_family,
-						  nfc_genl_ops,
-						  nfc_genl_mcgrps);
+	rc = genl_register_family(&nfc_genl_family);
 	if (rc)
 		return rc;
 

@@ -164,7 +164,7 @@ static struct snd_soc_ops spitz_ops = {
 static int spitz_get_jack(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	ucontrol->value.integer.value[0] = spitz_jack_func;
+	ucontrol->value.enumerated.item[0] = spitz_jack_func;
 	return 0;
 }
 
@@ -173,10 +173,10 @@ static int spitz_set_jack(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
 
-	if (spitz_jack_func == ucontrol->value.integer.value[0])
+	if (spitz_jack_func == ucontrol->value.enumerated.item[0])
 		return 0;
 
-	spitz_jack_func = ucontrol->value.integer.value[0];
+	spitz_jack_func = ucontrol->value.enumerated.item[0];
 	spitz_ext_control(&card->dapm);
 	return 1;
 }
@@ -184,7 +184,7 @@ static int spitz_set_jack(struct snd_kcontrol *kcontrol,
 static int spitz_get_spk(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	ucontrol->value.integer.value[0] = spitz_spk_func;
+	ucontrol->value.enumerated.item[0] = spitz_spk_func;
 	return 0;
 }
 
@@ -193,10 +193,10 @@ static int spitz_set_spk(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
 
-	if (spitz_spk_func == ucontrol->value.integer.value[0])
+	if (spitz_spk_func == ucontrol->value.enumerated.item[0])
 		return 0;
 
-	spitz_spk_func = ucontrol->value.integer.value[0];
+	spitz_spk_func = ucontrol->value.enumerated.item[0];
 	spitz_ext_control(&card->dapm);
 	return 1;
 }
@@ -241,9 +241,9 @@ static const struct snd_soc_dapm_route spitz_audio_map[] = {
 	{"LINPUT1", NULL, "Line Jack"},
 };
 
-static const char *jack_function[] = {"Headphone", "Mic", "Line", "Headset",
-	"Off"};
-static const char *spk_function[] = {"On", "Off"};
+static const char * const jack_function[] = {"Headphone", "Mic", "Line",
+	"Headset", "Off"};
+static const char * const spk_function[] = {"On", "Off"};
 static const struct soc_enum spitz_enum[] = {
 	SOC_ENUM_SINGLE_EXT(5, jack_function),
 	SOC_ENUM_SINGLE_EXT(2, spk_function),

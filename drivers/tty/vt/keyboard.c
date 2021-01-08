@@ -26,7 +26,8 @@
 
 #include <linux/consolemap.h>
 #include <linux/module.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/debug.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/mm.h>
@@ -567,12 +568,12 @@ static void fn_scroll_forw(struct vc_data *vc)
 
 static void fn_scroll_back(struct vc_data *vc)
 {
-	scrollback(vc, 0);
+	scrollback(vc);
 }
 
 static void fn_show_mem(struct vc_data *vc)
 {
-	show_mem(0);
+	show_mem(0, NULL);
 }
 
 static void fn_show_state(struct vc_data *vc)
@@ -1256,7 +1257,7 @@ static int emulate_raw(struct vc_data *vc, unsigned int keycode,
 	case KEY_SYSRQ:
 		/*
 		 * Real AT keyboards (that's what we're trying
-		 * to emulate here emit 0xe0 0x2a 0xe0 0x37 when
+		 * to emulate here) emit 0xe0 0x2a 0xe0 0x37 when
 		 * pressing PrtSc/SysRq alone, but simply 0x54
 		 * when pressing Alt+PrtSc/SysRq.
 		 */
@@ -1694,16 +1695,12 @@ int vt_do_diacrit(unsigned int cmd, void __user *udp, int perm)
 			return -EINVAL;
 
 		if (ct) {
-			dia = kmalloc(sizeof(struct kbdiacr) * ct,
-								GFP_KERNEL);
-			if (!dia)
-				return -ENOMEM;
 
-			if (copy_from_user(dia, a->kbdiacr,
-					sizeof(struct kbdiacr) * ct)) {
-				kfree(dia);
-				return -EFAULT;
-			}
+			dia = memdup_user(a->kbdiacr,
+					sizeof(struct kbdiacr) * ct);
+			if (IS_ERR(dia))
+				return PTR_ERR(dia);
+
 		}
 
 		spin_lock_irqsave(&kbd_event_lock, flags);
@@ -1737,16 +1734,10 @@ int vt_do_diacrit(unsigned int cmd, void __user *udp, int perm)
 			return -EINVAL;
 
 		if (ct) {
-			buf = kmalloc(ct * sizeof(struct kbdiacruc),
-								GFP_KERNEL);
-			if (buf == NULL)
-				return -ENOMEM;
-
-			if (copy_from_user(buf, a->kbdiacruc,
-					ct * sizeof(struct kbdiacruc))) {
-				kfree(buf);
-				return -EFAULT;
-			}
+			buf = memdup_user(a->kbdiacruc,
+					  ct * sizeof(struct kbdiacruc));
+			if (IS_ERR(buf))
+				return PTR_ERR(buf);
 		} 
 		spin_lock_irqsave(&kbd_event_lock, flags);
 		if (ct)

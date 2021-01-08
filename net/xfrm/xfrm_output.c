@@ -99,6 +99,9 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
 
 		skb_dst_force(skb);
 
+		/* Inner headers are invalid now. */
+		skb->encapsulation = 0;
+
 		err = x->type->output(x, skb);
 		if (err == -EINPROGRESS)
 			goto out;
@@ -243,10 +246,8 @@ void xfrm_local_error(struct sk_buff *skb, int mtu)
 		return;
 
 	afinfo = xfrm_state_get_afinfo(proto);
-	if (!afinfo)
-		return;
-
-	afinfo->local_error(skb, mtu);
-	xfrm_state_put_afinfo(afinfo);
+	if (afinfo)
+		afinfo->local_error(skb, mtu);
+	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(xfrm_local_error);

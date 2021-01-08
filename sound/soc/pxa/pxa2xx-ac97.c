@@ -27,8 +27,6 @@
 #include <mach/regs-ac97.h>
 #include <mach/audio.h>
 
-#include "pxa2xx-ac97.h"
-
 static void pxa2xx_ac97_warm_reset(struct snd_ac97 *ac97)
 {
 	pxa2xx_ac97_try_warm_reset(ac97);
@@ -287,3 +285,4 @@ module_platform_driver(pxa2xx_ac97_driver);
 MODULE_AUTHOR("Nicolas Pitre");
 MODULE_DESCRIPTION("AC97 driver for the Intel PXA2xx chip");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:pxa2xx-ac97");

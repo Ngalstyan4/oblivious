@@ -207,6 +207,7 @@
 #include <linux/fs.h>
 #include <linux/kref.h>
 #include <linux/kthread.h>
+#include <linux/sched/signal.h>
 #include <linux/limits.h>
 #include <linux/rwsem.h>
 #include <linux/slab.h>
@@ -306,14 +307,12 @@ struct fsg_common {
 	struct completion	thread_notifier;
 	struct task_struct	*thread_task;
 
+	/* Callback functions. */
+	const struct fsg_operations	*ops;
 	/* Gadget's private data. */
 	void			*private_data;
 
-	/*
-	 * Vendor (8 chars), product (16 chars), release (4
-	 * hexadecimal digits) and NUL byte
-	 */
-	char inquiry_string[8 + 16 + 4 + 1];
+	char inquiry_string[INQUIRY_STRING_LEN];
 
 	struct kref		ref;
 };
@@ -397,11 +396,7 @@ static int fsg_set_halt(struct fsg_dev *fsg, struct usb_ep *ep)
 /* Caller must hold fsg->lock */
 static void wakeup_thread(struct fsg_common *common)
 {
-	/*
-	 * Ensure the reading of thread_wakeup_needed
-	 * and the writing of bh->state are completed
-	 */
-	smp_mb();
+	smp_wmb();	/* ensure the write of bh->state is complete */
 	/* Tell the main thread that something has happened */
 	common->thread_wakeup_needed = 1;
 	if (common->thread_task)
@@ -632,12 +627,7 @@ static int sleep_thread(struct fsg_common *common, bool can_freeze)
 	}
 	__set_current_state(TASK_RUNNING);
 	common->thread_wakeup_needed = 0;
-
-	/*
-	 * Ensure the writing of thread_wakeup_needed
-	 * and the reading of bh->state are completed
-	 */
-	smp_mb();
+	smp_rmb();	/* ensure the latest bh->state is visible */
 	return rc;
 }
 
@@ -1114,7 +1104,12 @@ static int do_inquiry(struct fsg_common *common, struct fsg_buffhd *bh)
 	buf[5] = 0;		/* No special options */
 	buf[6] = 0;
 	buf[7] = 0;
-	memcpy(buf + 8, common->inquiry_string, sizeof common->inquiry_string);
+	if (curlun->inquiry_string[0])
+		memcpy(buf + 8, curlun->inquiry_string,
+		       sizeof(curlun->inquiry_string));
+	else
+		memcpy(buf + 8, common->inquiry_string,
+		       sizeof(common->inquiry_string));
 	return 36;
 }
 
@@ -2502,7 +2497,6 @@ static void handle_exception(struct fsg_common *common)
 static int fsg_main_thread(void *common_)
 {
 	struct fsg_common	*common = common_;
-	int			i;
 
 	/*
 	 * Allow the thread to be killed by a signal, but set the signal mask
@@ -2564,16 +2558,21 @@ static int fsg_main_thread(void *common_)
 	common->thread_task = NULL;
 	spin_unlock_irq(&common->lock);
 
-	/* Eject media from all LUNs */
+	if (!common->ops || !common->ops->thread_exits
+	 || common->ops->thread_exits(common) < 0) {
+		int i;
 
-	down_write(&common->filesem);
-	for (i = 0; i < ARRAY_SIZE(common->luns); i++) {
-		struct fsg_lun *curlun = common->luns[i];
+		down_write(&common->filesem);
+		for (i = 0; i < ARRAY_SIZE(common->luns); --i) {
+			struct fsg_lun *curlun = common->luns[i];
+			if (!curlun || !fsg_lun_is_open(curlun))
+				continue;
 
-		if (curlun && fsg_lun_is_open(curlun))
 			fsg_lun_close(curlun);
+			curlun->unit_attention_data = SS_MEDIUM_NOT_PRESENT;
+		}
+		up_write(&common->filesem);
 	}
-	up_write(&common->filesem);
 
 	/* Let fsg_unbind() know the thread has exited */
 	complete_and_exit(&common->thread_notifier, 0);
@@ -2658,18 +2657,6 @@ void fsg_common_put(struct fsg_common *common)
 }
 EXPORT_SYMBOL_GPL(fsg_common_put);
 
-/* check if fsg_num_buffers is within a valid range */
-static inline int fsg_num_buffers_validate(unsigned int fsg_num_buffers)
-{
-#define FSG_MAX_NUM_BUFFERS	32
-
-	if (fsg_num_buffers >= 2 && fsg_num_buffers <= FSG_MAX_NUM_BUFFERS)
-		return 0;
-	pr_err("fsg_num_buffers %u is out of range (%d to %d)\n",
-	       fsg_num_buffers, 2, FSG_MAX_NUM_BUFFERS);
-	return -EINVAL;
-}
-
 static struct fsg_common *fsg_common_setup(struct fsg_common *common)
 {
 	if (!common) {
@@ -2712,11 +2699,7 @@ static void _fsg_common_free_buffers(struct fsg_buffhd *buffhds, unsigned n)
 int fsg_common_set_num_buffers(struct fsg_common *common, unsigned int n)
 {
 	struct fsg_buffhd *bh, *buffhds;
-	int i, rc;
-
-	rc = fsg_num_buffers_validate(n);
-	if (rc != 0)
-		return rc;
+	int i;
 
 	buffhds = kcalloc(n, sizeof(*buffhds), GFP_KERNEL);
 	if (!buffhds)
@@ -2778,6 +2761,13 @@ void fsg_common_remove_luns(struct fsg_common *common)
 	_fsg_common_remove_luns(common, ARRAY_SIZE(common->luns));
 }
 EXPORT_SYMBOL_GPL(fsg_common_remove_luns);
+
+void fsg_common_set_ops(struct fsg_common *common,
+			const struct fsg_operations *ops)
+{
+	common->ops = ops;
+}
+EXPORT_SYMBOL_GPL(fsg_common_set_ops);
 
 void fsg_common_free_buffers(struct fsg_common *common)
 {
@@ -3083,7 +3073,7 @@ static int fsg_bind(struct usb_configuration *c, struct usb_function *f)
 	fsg_ss_bulk_out_comp_desc.bMaxBurst = max_burst;
 
 	ret = usb_assign_descriptors(f, fsg_fs_function, fsg_hs_function,
-			fsg_ss_function);
+			fsg_ss_function, fsg_ss_function);
 	if (ret)
 		goto autoconf_fail;
 
@@ -3221,12 +3211,27 @@ static ssize_t fsg_lun_opts_nofua_store(struct config_item *item,
 
 CONFIGFS_ATTR(fsg_lun_opts_, nofua);
 
+static ssize_t fsg_lun_opts_inquiry_string_show(struct config_item *item,
+						char *page)
+{
+	return fsg_show_inquiry_string(to_fsg_lun_opts(item)->lun, page);
+}
+
+static ssize_t fsg_lun_opts_inquiry_string_store(struct config_item *item,
+						 const char *page, size_t len)
+{
+	return fsg_store_inquiry_string(to_fsg_lun_opts(item)->lun, page, len);
+}
+
+CONFIGFS_ATTR(fsg_lun_opts_, inquiry_string);
+
 static struct configfs_attribute *fsg_lun_attrs[] = {
 	&fsg_lun_opts_attr_file,
 	&fsg_lun_opts_attr_ro,
 	&fsg_lun_opts_attr_removable,
 	&fsg_lun_opts_attr_cdrom,
 	&fsg_lun_opts_attr_nofua,
+	&fsg_lun_opts_attr_inquiry_string,
 	NULL,
 };
 
@@ -3397,10 +3402,6 @@ static ssize_t fsg_opts_num_buffers_store(struct config_item *item,
 	if (ret)
 		goto end;
 
-	ret = fsg_num_buffers_validate(num);
-	if (ret)
-		goto end;
-
 	fsg_common_set_num_buffers(opts->common, num);
 	ret = len;
 
@@ -3474,11 +3475,11 @@ static struct usb_function_instance *fsg_alloc_inst(void)
 
 	opts->lun0.lun = opts->common->luns[0];
 	opts->lun0.lun_id = 0;
-	config_group_init_type_name(&opts->lun0.group, "lun.0", &fsg_lun_type);
-	opts->default_groups[0] = &opts->lun0.group;
-	opts->func_inst.group.default_groups = opts->default_groups;
 
 	config_group_init_type_name(&opts->func_inst.group, "", &fsg_func_type);
+
+	config_group_init_type_name(&opts->lun0.group, "lun.0", &fsg_lun_type);
+	configfs_add_default_group(&opts->lun0.group, &opts->func_inst.group);
 
 	return &opts->func_inst;
 

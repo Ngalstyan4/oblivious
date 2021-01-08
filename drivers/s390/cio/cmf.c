@@ -30,7 +30,7 @@
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/list.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/timex.h>	/* get_tod_clock() */
@@ -164,6 +164,9 @@ static inline u64 time_to_avg_nsec(u32 value, u32 count)
 	return ret;
 }
 
+#define CMF_OFF 0
+#define CMF_ON	2
+
 /*
  * Activate or deactivate the channel monitor. When area is NULL,
  * the monitor is deactivated. The channel monitor needs to
@@ -176,7 +179,7 @@ static inline void cmf_activate(void *area, unsigned int onoff)
 	register long __gpr1 asm("1");
 
 	__gpr2 = area;
-	__gpr1 = onoff ? 2 : 0;
+	__gpr1 = onoff;
 	/* activate channel measurement */
 	asm("schm" : : "d" (__gpr2), "d" (__gpr1) );
 }
@@ -587,7 +590,7 @@ static int alloc_cmb(struct ccw_device *cdev)
 			/* everything ok */
 			memset(mem, 0, size);
 			cmb_area.mem = mem;
-			cmf_activate(cmb_area.mem, 1);
+			cmf_activate(cmb_area.mem, CMF_ON);
 		}
 	}
 
@@ -621,7 +624,7 @@ static void free_cmb(struct ccw_device *cdev)
 	if (list_empty(&cmb_area.list)) {
 		ssize_t size;
 		size = sizeof(struct cmb) * cmb_area.num_channels;
-		cmf_activate(NULL, 0);
+		cmf_activate(NULL, CMF_OFF);
 		free_pages((unsigned long)cmb_area.mem, get_order(size));
 		cmb_area.mem = NULL;
 	}
@@ -841,7 +844,7 @@ static int alloc_cmbe(struct ccw_device *cdev)
 
 	/* activate global measurement if this is the first channel */
 	if (list_empty(&cmb_area.list))
-		cmf_activate(NULL, 1);
+		cmf_activate(NULL, CMF_ON);
 	list_add_tail(&cdev->private->cmb_list, &cmb_area.list);
 
 	spin_unlock_irq(cdev->ccwlock);
@@ -878,7 +881,7 @@ static void free_cmbe(struct ccw_device *cdev)
 	/* deactivate global measurement if this is the last channel */
 	list_del_init(&cdev->private->cmb_list);
 	if (list_empty(&cmb_area.list))
-		cmf_activate(NULL, 0);
+		cmf_activate(NULL, CMF_OFF);
 	spin_unlock_irq(cdev->ccwlock);
 	spin_unlock(&cmb_area.lock);
 }
@@ -1082,15 +1085,9 @@ static ssize_t cmb_show_avg_utilization(struct device *dev,
 		      data.function_pending_time +
 		      data.device_disconnect_time;
 
-	/* shift to avoid long long division */
-	while (-1ul < (data.elapsed_time | utilization)) {
-		utilization >>= 8;
-		data.elapsed_time >>= 8;
-	}
-
 	/* calculate value in 0.1 percent units */
-	t = (unsigned long) data.elapsed_time / 1000;
-	u = (unsigned long) utilization / t;
+	t = data.elapsed_time / 1000;
+	u = utilization / t;
 
 	return sprintf(buf, "%02ld.%01ld%%\n", u/ 10, u - (u/ 10) * 10);
 }
@@ -1332,7 +1329,7 @@ void cmf_reactivate(void)
 {
 	spin_lock(&cmb_area.lock);
 	if (!list_empty(&cmb_area.list))
-		cmf_activate(cmb_area.mem, 1);
+		cmf_activate(cmb_area.mem, CMF_ON);
 	spin_unlock(&cmb_area.lock);
 }
 
@@ -1386,13 +1383,7 @@ static int __init init_cmf(void)
 		"%s (mode %s)\n", format_string, detect_string);
 	return 0;
 }
-module_init(init_cmf);
-
-
-MODULE_AUTHOR("Arnd Bergmann <arndb@de.ibm.com>");
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("channel measurement facility base driver\n"
-		   "Copyright IBM Corp. 2003\n");
+device_initcall(init_cmf);
 
 EXPORT_SYMBOL_GPL(enable_cmf);
 EXPORT_SYMBOL_GPL(disable_cmf);

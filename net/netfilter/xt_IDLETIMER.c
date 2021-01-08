@@ -147,10 +147,10 @@ static int idletimer_tg_create(struct idletimer_tg_info *info)
 		    (unsigned long) info->timer);
 	info->timer->refcnt = 1;
 
-	INIT_WORK(&info->timer->work, idletimer_tg_work);
-
 	mod_timer(&info->timer->timer,
 		  msecs_to_jiffies(info->timeout * 1000) + jiffies);
+
+	INIT_WORK(&info->timer->work, idletimer_tg_work);
 
 	return 0;
 
@@ -192,10 +192,7 @@ static int idletimer_tg_checkentry(const struct xt_tgchk_param *par)
 		pr_debug("timeout value is zero\n");
 		return -EINVAL;
 	}
-	if (info->timeout >= INT_MAX / 1000) {
-		pr_debug("timeout value is too big\n");
-		return -EINVAL;
-	}
+
 	if (info->label[0] == '\0' ||
 	    strnlen(info->label,
 		    MAX_IDLETIMER_LABEL_SIZE) == MAX_IDLETIMER_LABEL_SIZE) {
@@ -239,6 +236,7 @@ static void idletimer_tg_destroy(const struct xt_tgdtor_param *par)
 
 		list_del(&info->timer->entry);
 		del_timer_sync(&info->timer->timer);
+		cancel_work_sync(&info->timer->work);
 		sysfs_remove_file(idletimer_tg_kobj, &info->timer->attr.attr);
 		kfree(info->timer->attr.attr.name);
 		kfree(info->timer);

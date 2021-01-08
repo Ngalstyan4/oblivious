@@ -190,9 +190,9 @@ extern void clockevents_config_and_register(struct clock_event_device *dev,
 extern int clockevents_update_freq(struct clock_event_device *ce, u32 freq);
 
 static inline void
-clockevents_calc_mult_shift(struct clock_event_device *ce, u32 freq, u32 minsec)
+clockevents_calc_mult_shift(struct clock_event_device *ce, u32 freq, u32 maxsec)
 {
-	return clocks_calc_mult_shift(&ce->mult, &ce->shift, NSEC_PER_SEC, freq, minsec);
+	return clocks_calc_mult_shift(&ce->mult, &ce->shift, NSEC_PER_SEC, freq, maxsec);
 }
 
 extern void clockevents_suspend(void);
@@ -223,5 +223,14 @@ static inline int tick_check_broadcast_expired(void) { return 0; }
 static inline void tick_setup_hrtimer_broadcast(void) { }
 
 #endif /* !CONFIG_GENERIC_CLOCKEVENTS */
+
+#define CLOCKEVENT_OF_DECLARE(name, compat, fn) \
+	OF_DECLARE_1_RET(clkevt, name, compat, fn)
+
+#ifdef CONFIG_CLKEVT_PROBE
+extern int clockevent_probe(void);
+#else
+static inline int clockevent_probe(void) { return 0; }
+#endif
 
 #endif /* _LINUX_CLOCKCHIPS_H */

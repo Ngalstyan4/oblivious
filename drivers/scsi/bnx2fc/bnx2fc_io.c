@@ -74,7 +74,7 @@ static void bnx2fc_cmd_timeout(struct work_struct *work)
 				    &io_req->req_flags)) {
 			/* Handle internally generated ABTS timeout */
 			BNX2FC_IO_DBG(io_req, "ABTS timed out refcnt = %d\n",
-					io_req->refcount.refcount.counter);
+					kref_read(&io_req->refcount));
 			if (!(test_and_set_bit(BNX2FC_FLAG_ABTS_DONE,
 					       &io_req->req_flags))) {
 				/*
@@ -179,12 +179,24 @@ static void bnx2fc_scsi_done(struct bnx2fc_cmd *io_req, int err_code)
 
 	bnx2fc_unmap_sg_list(io_req);
 	io_req->sc_cmd = NULL;
+
+	/* Sanity checks before returning command to mid-layer */
 	if (!sc_cmd) {
 		printk(KERN_ERR PFX "scsi_done - sc_cmd NULL. "
 				    "IO(0x%x) already cleaned up\n",
 		       io_req->xid);
 		return;
 	}
+	if (!sc_cmd->device) {
+		pr_err(PFX "0x%x: sc_cmd->device is NULL.\n", io_req->xid);
+		return;
+	}
+	if (!sc_cmd->device->host) {
+		pr_err(PFX "0x%x: sc_cmd->device->host is NULL.\n",
+		    io_req->xid);
+		return;
+	}
+
 	sc_cmd->result = err_code << 16;
 
 	BNX2FC_IO_DBG(io_req, "sc=%p, result=0x%x, retries=%d, allowed=%d\n",
@@ -770,7 +782,7 @@ retry_tmf:
 	spin_unlock_bh(&tgt->tgt_lock);
 
 	rc = wait_for_completion_timeout(&io_req->tm_done,
-					 BNX2FC_TM_TIMEOUT * HZ);
+					 interface->tm_timeout * HZ);
 	spin_lock_bh(&tgt->tgt_lock);
 
 	io_req->wait_for_comp = 0;
@@ -1067,7 +1079,7 @@ int bnx2fc_eh_device_reset(struct scsi_cmnd *sc_cmd)
 	return bnx2fc_initiate_tmf(sc_cmd, FCP_TMF_LUN_RESET);
 }
 
-int bnx2fc_abts_cleanup(struct bnx2fc_cmd *io_req)
+static int bnx2fc_abts_cleanup(struct bnx2fc_cmd *io_req)
 {
 	struct bnx2fc_rport *tgt = io_req->tgt;
 	int rc = SUCCESS;
@@ -1104,8 +1116,7 @@ int bnx2fc_eh_abort(struct scsi_cmnd *sc_cmd)
 	struct bnx2fc_cmd *io_req;
 	struct fc_lport *lport;
 	struct bnx2fc_rport *tgt;
-	int rc = FAILED;
-
+	int rc;
 
 	rc = fc_block_scsi_eh(sc_cmd);
 	if (rc)
@@ -1114,7 +1125,7 @@ int bnx2fc_eh_abort(struct scsi_cmnd *sc_cmd)
 	lport = shost_priv(sc_cmd->device->host);
 	if ((lport->state != LPORT_ST_READY) || !(lport->link_up)) {
 		printk(KERN_ERR PFX "eh_abort: link not ready\n");
-		return rc;
+		return FAILED;
 	}
 
 	tgt = (struct bnx2fc_rport *)&rp[1];
@@ -1130,7 +1141,7 @@ int bnx2fc_eh_abort(struct scsi_cmnd *sc_cmd)
 		return SUCCESS;
 	}
 	BNX2FC_IO_DBG(io_req, "eh_abort - refcnt = %d\n",
-		      io_req->refcount.refcount.counter);
+		      kref_read(&io_req->refcount));
 
 	/* Hold IO request across abort processing */
 	kref_get(&io_req->refcount);
@@ -1288,7 +1299,7 @@ void bnx2fc_process_cleanup_compl(struct bnx2fc_cmd *io_req,
 {
 	BNX2FC_IO_DBG(io_req, "Entered process_cleanup_compl "
 			      "refcnt = %d, cmd_type = %d\n",
-		   io_req->refcount.refcount.counter, io_req->cmd_type);
+		   kref_read(&io_req->refcount), io_req->cmd_type);
 	bnx2fc_scsi_done(io_req, DID_ERROR);
 	kref_put(&io_req->refcount, bnx2fc_cmd_release);
 	if (io_req->wait_for_comp)
@@ -1307,7 +1318,7 @@ void bnx2fc_process_abts_compl(struct bnx2fc_cmd *io_req,
 	BNX2FC_IO_DBG(io_req, "Entered process_abts_compl xid = 0x%x"
 			      "refcnt = %d, cmd_type = %d\n",
 		   io_req->xid,
-		   io_req->refcount.refcount.counter, io_req->cmd_type);
+		   kref_read(&io_req->refcount), io_req->cmd_type);
 
 	if (test_and_set_bit(BNX2FC_FLAG_ABTS_DONE,
 				       &io_req->req_flags)) {
@@ -1747,7 +1758,7 @@ static void bnx2fc_parse_fcp_rsp(struct bnx2fc_cmd *io_req,
 		if ((fcp_rsp_len == 4) || (fcp_rsp_len == 8)) {
 			/* Only for task management function */
 			io_req->fcp_rsp_code = rq_data[3];
-			printk(KERN_ERR PFX "fcp_rsp_code = %d\n",
+			BNX2FC_IO_DBG(io_req, "fcp_rsp_code = %d\n",
 				io_req->fcp_rsp_code);
 		}
 

@@ -53,7 +53,7 @@ static int afs_vlocation_access_vl_by_name(struct afs_vlocation *vl,
 
 		/* attempt to access the VL server */
 		ret = afs_vl_get_entry_by_name(&addr, key, vl->vldb.name, vldb,
-					       &afs_sync_call);
+					       false);
 		switch (ret) {
 		case 0:
 			goto out;
@@ -111,7 +111,7 @@ static int afs_vlocation_access_vl_by_id(struct afs_vlocation *vl,
 
 		/* attempt to access the VL server */
 		ret = afs_vl_get_entry_by_id(&addr, key, volid, voltype, vldb,
-					     &afs_sync_call);
+					     false);
 		switch (ret) {
 		case 0:
 			goto out;
@@ -595,8 +595,8 @@ static void afs_vlocation_reaper(struct work_struct *work)
  */
 int __init afs_vlocation_update_init(void)
 {
-	afs_vlocation_update_worker =
-		create_singlethread_workqueue("kafs_vlupdated");
+	afs_vlocation_update_worker = alloc_workqueue("kafs_vlupdated",
+						      WQ_MEM_RECLAIM, 0);
 	return afs_vlocation_update_worker ? 0 : -ENOMEM;
 }
 

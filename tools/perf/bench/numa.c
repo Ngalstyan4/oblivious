@@ -4,10 +4,13 @@
  * numa: Simulate NUMA-sensitive workload and measure their NUMA performance
  */
 
+/* For the CLR_() macros */
+#include <pthread.h>
+
 #include "../perf.h"
 #include "../builtin.h"
 #include "../util/util.h"
-#include "../util/parse-options.h"
+#include <subcmd/parse-options.h>
 #include "../util/cloexec.h"
 
 #include "bench.h"
@@ -21,13 +24,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
 #include <sys/types.h>
+#include <linux/time64.h>
 
 #include <numa.h>
 #include <numaif.h>
@@ -40,6 +43,7 @@
 /*
  * Debug printf:
  */
+#undef dprintf
 #define dprintf(x...) do { if (g && g->p.show_details >= 1) printf(x); } while (0)
 
 struct thread_data {
@@ -208,47 +212,6 @@ static const char * const numa_usage[] = {
 	NULL
 };
 
-/*
- * To get number of numa nodes present.
- */
-static int nr_numa_nodes(void)
-{
-	int i, nr_nodes = 0;
-
-	for (i = 0; i < g->p.nr_nodes; i++) {
-		if (numa_bitmask_isbitset(numa_nodes_ptr, i))
-			nr_nodes++;
-	}
-
-	return nr_nodes;
-}
-
-/*
- * To check if given numa node is present.
- */
-static int is_node_present(int node)
-{
-	return numa_bitmask_isbitset(numa_nodes_ptr, node);
-}
-
-/*
- * To check given numa node has cpus.
- */
-static bool node_has_cpus(int node)
-{
-	struct bitmask *cpu = numa_allocate_cpumask();
-	unsigned int i;
-
-	if (cpu && !numa_node_to_cpus(node, cpu)) {
-		for (i = 0; i < cpu->size; i++) {
-			if (numa_bitmask_isbitset(cpu, i))
-				return true;
-		}
-	}
-
-	return false; /* lets fall back to nocpus safely */
-}
-
 static cpu_set_t bind_to_cpu(int target_cpu)
 {
 	cpu_set_t orig_mask, mask;
@@ -277,12 +240,12 @@ static cpu_set_t bind_to_cpu(int target_cpu)
 
 static cpu_set_t bind_to_node(int target_node)
 {
-	int cpus_per_node = g->p.nr_cpus / nr_numa_nodes();
+	int cpus_per_node = g->p.nr_cpus/g->p.nr_nodes;
 	cpu_set_t orig_mask, mask;
 	int cpu;
 	int ret;
 
-	BUG_ON(cpus_per_node * nr_numa_nodes() != g->p.nr_cpus);
+	BUG_ON(cpus_per_node*g->p.nr_nodes != g->p.nr_cpus);
 	BUG_ON(!cpus_per_node);
 
 	ret = sched_getaffinity(0, sizeof(orig_mask), &orig_mask);
@@ -334,7 +297,7 @@ static void bind_to_memnode(int node)
 	if (node == -1)
 		return;
 
-	BUG_ON(g->p.nr_nodes > (int)sizeof(nodemask));
+	BUG_ON(g->p.nr_nodes > (int)sizeof(nodemask)*8);
 	nodemask = 1L << node;
 
 	ret = set_mempolicy(MPOL_BIND, &nodemask, sizeof(nodemask)*8);
@@ -682,7 +645,7 @@ static int parse_setup_node_list(void)
 			int i;
 
 			for (i = 0; i < mul; i++) {
-				if (t >= g->p.nr_tasks || !node_has_cpus(bind_node)) {
+				if (t >= g->p.nr_tasks) {
 					printf("\n# NOTE: ignoring bind NODEs starting at NODE#%d\n", bind_node);
 					goto out;
 				}
@@ -997,8 +960,6 @@ static void calc_convergence(double runtime_ns_max, double *convergence)
 	sum = 0;
 
 	for (node = 0; node < g->p.nr_nodes; node++) {
-		if (!is_node_present(node))
-			continue;
 		nr = nodes[node];
 		nr_min = min(nr, nr_min);
 		nr_max = max(nr, nr_max);
@@ -1019,11 +980,8 @@ static void calc_convergence(double runtime_ns_max, double *convergence)
 	process_groups = 0;
 
 	for (node = 0; node < g->p.nr_nodes; node++) {
-		int processes;
+		int processes = count_node_processes(node);
 
-		if (!is_node_present(node))
-			continue;
-		processes = count_node_processes(node);
 		nr = nodes[node];
 		tprintf(" %2d/%-2d", nr, processes);
 
@@ -1048,7 +1006,7 @@ static void calc_convergence(double runtime_ns_max, double *convergence)
 	if (strong && process_groups == g->p.nr_proc) {
 		if (!*convergence) {
 			*convergence = runtime_ns_max;
-			tprintf(" (%6.1fs converged)\n", *convergence/1e9);
+			tprintf(" (%6.1fs converged)\n", *convergence / NSEC_PER_SEC);
 			if (g->p.measure_convergence) {
 				g->all_converged = true;
 				g->stop_work = true;
@@ -1056,7 +1014,7 @@ static void calc_convergence(double runtime_ns_max, double *convergence)
 		}
 	} else {
 		if (*convergence) {
-			tprintf(" (%6.1fs de-converged)", runtime_ns_max/1e9);
+			tprintf(" (%6.1fs de-converged)", runtime_ns_max / NSEC_PER_SEC);
 			*convergence = 0;
 		}
 		tprintf("\n");
@@ -1066,7 +1024,7 @@ static void calc_convergence(double runtime_ns_max, double *convergence)
 static void show_summary(double runtime_ns_max, int l, double *convergence)
 {
 	tprintf("\r #  %5.1f%%  [%.1f mins]",
-		(double)(l+1)/g->p.nr_loops*100.0, runtime_ns_max/1e9 / 60.0);
+		(double)(l+1)/g->p.nr_loops*100.0, runtime_ns_max / NSEC_PER_SEC / 60.0);
 
 	calc_convergence(runtime_ns_max, convergence);
 
@@ -1223,8 +1181,8 @@ static void *worker_thread(void *__tdata)
 
 		if (details >= 3) {
 			timersub(&stop, &start, &diff);
-			runtime_ns_max = diff.tv_sec * 1000000000;
-			runtime_ns_max += diff.tv_usec * 1000;
+			runtime_ns_max = diff.tv_sec * NSEC_PER_SEC;
+			runtime_ns_max += diff.tv_usec * NSEC_PER_USEC;
 
 			if (details >= 0) {
 				printf(" #%2d / %2d: %14.2lf nsecs/op [val: %016"PRIx64"]\n",
@@ -1236,23 +1194,23 @@ static void *worker_thread(void *__tdata)
 			continue;
 
 		timersub(&stop, &start0, &diff);
-		runtime_ns_max = diff.tv_sec * 1000000000ULL;
-		runtime_ns_max += diff.tv_usec * 1000ULL;
+		runtime_ns_max = diff.tv_sec * NSEC_PER_SEC;
+		runtime_ns_max += diff.tv_usec * NSEC_PER_USEC;
 
 		show_summary(runtime_ns_max, l, &convergence);
 	}
 
 	gettimeofday(&stop, NULL);
 	timersub(&stop, &start0, &diff);
-	td->runtime_ns = diff.tv_sec * 1000000000ULL;
-	td->runtime_ns += diff.tv_usec * 1000ULL;
-	td->speed_gbs = bytes_done / (td->runtime_ns / 1e9) / 1e9;
+	td->runtime_ns = diff.tv_sec * NSEC_PER_SEC;
+	td->runtime_ns += diff.tv_usec * NSEC_PER_USEC;
+	td->speed_gbs = bytes_done / (td->runtime_ns / NSEC_PER_SEC) / 1e9;
 
 	getrusage(RUSAGE_THREAD, &rusage);
-	td->system_time_ns = rusage.ru_stime.tv_sec * 1000000000ULL;
-	td->system_time_ns += rusage.ru_stime.tv_usec * 1000ULL;
-	td->user_time_ns = rusage.ru_utime.tv_sec * 1000000000ULL;
-	td->user_time_ns += rusage.ru_utime.tv_usec * 1000ULL;
+	td->system_time_ns = rusage.ru_stime.tv_sec * NSEC_PER_SEC;
+	td->system_time_ns += rusage.ru_stime.tv_usec * NSEC_PER_USEC;
+	td->user_time_ns = rusage.ru_utime.tv_sec * NSEC_PER_SEC;
+	td->user_time_ns += rusage.ru_utime.tv_usec * NSEC_PER_USEC;
 
 	free_data(thread_data, g->p.bytes_thread);
 
@@ -1329,7 +1287,7 @@ static void print_summary(void)
 
 	printf("\n ###\n");
 	printf(" # %d %s will execute (on %d nodes, %d CPUs):\n",
-		g->p.nr_tasks, g->p.nr_tasks == 1 ? "task" : "tasks", nr_numa_nodes(), g->p.nr_cpus);
+		g->p.nr_tasks, g->p.nr_tasks == 1 ? "task" : "tasks", g->p.nr_nodes, g->p.nr_cpus);
 	printf(" #      %5dx %5ldMB global  shared mem operations\n",
 			g->p.nr_loops, g->p.bytes_global/1024/1024);
 	printf(" #      %5dx %5ldMB process shared mem operations\n",
@@ -1513,7 +1471,7 @@ static int __bench_numa(const char *name)
 	}
 	/* Wait for all the threads to start up: */
 	while (g->nr_tasks_started != g->p.nr_tasks)
-		usleep(1000);
+		usleep(USEC_PER_MSEC);
 
 	BUG_ON(g->nr_tasks_started != g->p.nr_tasks);
 
@@ -1532,9 +1490,9 @@ static int __bench_numa(const char *name)
 
 		timersub(&stop, &start, &diff);
 
-		startup_sec = diff.tv_sec * 1000000000.0;
-		startup_sec += diff.tv_usec * 1000.0;
-		startup_sec /= 1e9;
+		startup_sec = diff.tv_sec * NSEC_PER_SEC;
+		startup_sec += diff.tv_usec * NSEC_PER_USEC;
+		startup_sec /= NSEC_PER_SEC;
 
 		tprintf(" threads initialized in %.6f seconds.\n", startup_sec);
 		tprintf(" #\n");
@@ -1573,14 +1531,14 @@ static int __bench_numa(const char *name)
 	tprintf("\n ###\n");
 	tprintf("\n");
 
-	runtime_sec_max = diff.tv_sec * 1000000000.0;
-	runtime_sec_max += diff.tv_usec * 1000.0;
-	runtime_sec_max /= 1e9;
+	runtime_sec_max = diff.tv_sec * NSEC_PER_SEC;
+	runtime_sec_max += diff.tv_usec * NSEC_PER_USEC;
+	runtime_sec_max /= NSEC_PER_SEC;
 
-	runtime_sec_min = runtime_ns_min/1e9;
+	runtime_sec_min = runtime_ns_min / NSEC_PER_SEC;
 
 	bytes = g->bytes_done;
-	runtime_avg = (double)runtime_ns_sum / g->p.nr_tasks / 1e9;
+	runtime_avg = (double)runtime_ns_sum / g->p.nr_tasks / NSEC_PER_SEC;
 
 	if (g->p.measure_convergence) {
 		print_res(name, runtime_sec_max,
@@ -1606,7 +1564,7 @@ static int __bench_numa(const char *name)
 	print_res(name, bytes / 1e9,
 		"GB,", "data-total",		"GB data processed, total");
 
-	print_res(name, runtime_sec_max * 1e9 / (bytes / g->p.nr_tasks),
+	print_res(name, runtime_sec_max * NSEC_PER_SEC / (bytes / g->p.nr_tasks),
 		"nsecs,", "runtime/byte/thread","nsecs/byte/thread runtime");
 
 	print_res(name, bytes / g->p.nr_tasks / 1e9 / runtime_sec_max,
@@ -1625,9 +1583,9 @@ static int __bench_numa(const char *name)
 				snprintf(tname, sizeof(tname), "process%d:thread%d", p, t);
 				print_res(tname, td->speed_gbs,
 					"GB/sec",	"thread-speed", "GB/sec/thread speed");
-				print_res(tname, td->system_time_ns / 1e9,
+				print_res(tname, td->system_time_ns / NSEC_PER_SEC,
 					"secs",	"thread-system-time", "system CPU time/thread");
-				print_res(tname, td->user_time_ns / 1e9,
+				print_res(tname, td->user_time_ns / NSEC_PER_SEC,
 					"secs",	"thread-user-time", "user CPU time/thread");
 			}
 		}

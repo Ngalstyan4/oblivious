@@ -1,5 +1,5 @@
 #include "../util.h"
-#include "../cache.h"
+#include "../config.h"
 #include "../../perf.h"
 #include "libslang.h"
 #include "ui.h"
@@ -528,11 +528,11 @@ static struct ui_browser_colorset {
 		.colorset = HE_COLORSET_SELECTED,
 		.name	  = "selected",
 		.fg	  = "black",
-		.bg	  = "lightgray",
+		.bg	  = "yellow",
 	},
 	{
-		.colorset = HE_COLORSET_CODE,
-		.name	  = "code",
+		.colorset = HE_COLORSET_JUMP_ARROWS,
+		.name	  = "jump_arrows",
 		.fg	  = "blue",
 		.bg	  = "default",
 	},
@@ -702,7 +702,7 @@ static void __ui_browser__line_arrow_down(struct ui_browser *browser,
 		ui_browser__gotorc(browser, row, column + 1);
 		SLsmg_draw_hline(2);
 
-		if (++row == 0)
+		if (row++ == 0)
 			goto out;
 	} else
 		row = 0;

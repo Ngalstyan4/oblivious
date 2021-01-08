@@ -18,6 +18,7 @@
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/kernel.h>
+#include <linux/sched/signal.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/net.h>
@@ -45,7 +46,7 @@ struct skcipher_ctx {
 	struct af_alg_completion completion;
 
 	atomic_t inflight;
-	unsigned used;
+	size_t used;
 
 	unsigned int len;
 	bool more;
@@ -86,13 +87,8 @@ static void skcipher_free_async_sgls(struct skcipher_async_req *sreq)
 	}
 	sgl = sreq->tsg;
 	n = sg_nents(sgl);
-	for_each_sg(sgl, sg, n, i) {
-		struct page *page = sg_page(sg);
-
-		/* some SGs may not have a page mapped */
-		if (page && atomic_read(&page->_count))
-			put_page(page);
-	}
+	for_each_sg(sgl, sg, n, i)
+		put_page(sg_page(sg));
 
 	kfree(sreq->tsg);
 }
@@ -143,10 +139,8 @@ static int skcipher_alloc_sgl(struct sock *sk)
 		sg_init_table(sgl->sg, MAX_SGL_ENTS + 1);
 		sgl->cur = 0;
 
-		if (sg) {
+		if (sg)
 			sg_chain(sg, MAX_SGL_ENTS + 1, sgl->sg);
-			sg_unmark_end(sg + (MAX_SGL_ENTS - 1));
-		}
 
 		list_add_tail(&sgl->list, &ctx->tsgl);
 	}
@@ -154,7 +148,7 @@ static int skcipher_alloc_sgl(struct sock *sk)
 	return 0;
 }
 
-static void skcipher_pull_sgl(struct sock *sk, int used, int put)
+static void skcipher_pull_sgl(struct sock *sk, size_t used, int put)
 {
 	struct alg_sock *ask = alg_sk(sk);
 	struct skcipher_ctx *ctx = ask->private;
@@ -168,7 +162,7 @@ static void skcipher_pull_sgl(struct sock *sk, int used, int put)
 		sg = sgl->sg;
 
 		for (i = 0; i < sgl->cur; i++) {
-			int plen = min_t(int, used, sg[i].length);
+			size_t plen = min_t(size_t, used, sg[i].length);
 
 			if (!sg_page(sg + i))
 				continue;
@@ -206,26 +200,26 @@ static void skcipher_free_sgl(struct sock *sk)
 
 static int skcipher_wait_for_wmem(struct sock *sk, unsigned flags)
 {
-	long timeout;
-	DEFINE_WAIT(wait);
+	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	int err = -ERESTARTSYS;
+	long timeout;
 
 	if (flags & MSG_DONTWAIT)
 		return -EAGAIN;
 
 	sk_set_bit(SOCKWQ_ASYNC_NOSPACE, sk);
 
+	add_wait_queue(sk_sleep(sk), &wait);
 	for (;;) {
 		if (signal_pending(current))
 			break;
-		prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
 		timeout = MAX_SCHEDULE_TIMEOUT;
-		if (sk_wait_event(sk, &timeout, skcipher_writable(sk))) {
+		if (sk_wait_event(sk, &timeout, skcipher_writable(sk), &wait)) {
 			err = 0;
 			break;
 		}
 	}
-	finish_wait(sk_sleep(sk), &wait);
+	remove_wait_queue(sk_sleep(sk), &wait);
 
 	return err;
 }
@@ -239,7 +233,7 @@ static void skcipher_wmem_wakeup(struct sock *sk)
 
 	rcu_read_lock();
 	wq = rcu_dereference(sk->sk_wq);
-	if (wq_has_sleeper(wq))
+	if (skwq_has_sleeper(wq))
 		wake_up_interruptible_sync_poll(&wq->wait, POLLIN |
 							   POLLRDNORM |
 							   POLLRDBAND);
@@ -249,10 +243,10 @@ static void skcipher_wmem_wakeup(struct sock *sk)
 
 static int skcipher_wait_for_data(struct sock *sk, unsigned flags)
 {
+	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	struct alg_sock *ask = alg_sk(sk);
 	struct skcipher_ctx *ctx = ask->private;
 	long timeout;
-	DEFINE_WAIT(wait);
 	int err = -ERESTARTSYS;
 
 	if (flags & MSG_DONTWAIT) {
@@ -261,17 +255,17 @@ static int skcipher_wait_for_data(struct sock *sk, unsigned flags)
 
 	sk_set_bit(SOCKWQ_ASYNC_WAITDATA, sk);
 
+	add_wait_queue(sk_sleep(sk), &wait);
 	for (;;) {
 		if (signal_pending(current))
 			break;
-		prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
 		timeout = MAX_SCHEDULE_TIMEOUT;
-		if (sk_wait_event(sk, &timeout, ctx->used)) {
+		if (sk_wait_event(sk, &timeout, ctx->used, &wait)) {
 			err = 0;
 			break;
 		}
 	}
-	finish_wait(sk_sleep(sk), &wait);
+	remove_wait_queue(sk_sleep(sk), &wait);
 
 	sk_clear_bit(SOCKWQ_ASYNC_WAITDATA, sk);
 
@@ -289,7 +283,7 @@ static void skcipher_data_wakeup(struct sock *sk)
 
 	rcu_read_lock();
 	wq = rcu_dereference(sk->sk_wq);
-	if (wq_has_sleeper(wq))
+	if (skwq_has_sleeper(wq))
 		wake_up_interruptible_sync_poll(&wq->wait, POLLOUT |
 							   POLLRDNORM |
 							   POLLRDBAND);
@@ -352,7 +346,7 @@ static int skcipher_sendmsg(struct socket *sock, struct msghdr *msg,
 	while (size) {
 		struct scatterlist *sg;
 		unsigned long len = size;
-		int plen;
+		size_t plen;
 
 		if (ctx->merge) {
 			sgl = list_entry(ctx->tsgl.prev,
@@ -395,7 +389,7 @@ static int skcipher_sendmsg(struct socket *sock, struct msghdr *msg,
 			sg_unmark_end(sg + sgl->cur - 1);
 		do {
 			i = sgl->cur;
-			plen = min_t(int, len, PAGE_SIZE);
+			plen = min_t(size_t, len, PAGE_SIZE);
 
 			sg_assign_page(sg + i, alloc_page(GFP_KERNEL));
 			err = -ENOMEM;
@@ -573,8 +567,10 @@ static int skcipher_recvmsg_async(struct socket *sock, struct msghdr *msg,
 			 * need to expand */
 			tmp = kcalloc(tx_nents * 2, sizeof(*tmp),
 				      GFP_KERNEL);
-			if (!tmp)
+			if (!tmp) {
+				err = -ENOMEM;
 				goto free;
+			}
 
 			sg_init_table(tmp, tx_nents * 2);
 			for (x = 0; x < tx_nents; x++)

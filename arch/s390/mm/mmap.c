@@ -22,14 +22,17 @@
  * Started by Ingo Molnar <mingo@elte.hu>
  */
 
+#include <linux/elf-randomize.h>
 #include <linux/personality.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
-#include <linux/module.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/mm.h>
 #include <linux/random.h>
 #include <linux/compat.h>
 #include <linux/security.h>
 #include <asm/pgalloc.h>
+#include <asm/elf.h>
 
 static unsigned long stack_maxrandom_size(void)
 {
@@ -97,7 +100,7 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 		addr = PAGE_ALIGN(addr);
 		vma = find_vma(mm, addr);
 		if (TASK_SIZE - len >= addr && addr >= mmap_min_addr &&
-		    (!vma || addr + len <= vm_start_gap(vma)))
+		    (!vma || addr + len <= vma->vm_start))
 			return addr;
 	}
 
@@ -135,7 +138,7 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 		addr = PAGE_ALIGN(addr);
 		vma = find_vma(mm, addr);
 		if (TASK_SIZE - len >= addr && addr >= mmap_min_addr &&
-				(!vma || addr + len <= vm_start_gap(vma)))
+				(!vma || addr + len <= vma->vm_start))
 			return addr;
 	}
 
@@ -169,7 +172,7 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 
 int s390_mmap_check(unsigned long addr, unsigned long len, unsigned long flags)
 {
-	if (is_compat_task() || (TASK_SIZE >= (1UL << 53)))
+	if (is_compat_task() || TASK_SIZE >= TASK_MAX_SIZE)
 		return 0;
 	if (!(flags & MAP_FIXED))
 		addr = 0;
@@ -189,7 +192,7 @@ s390_get_unmapped_area(struct file *filp, unsigned long addr,
 	area = arch_get_unmapped_area(filp, addr, len, pgoff, flags);
 	if (!(area & ~PAGE_MASK))
 		return area;
-	if (area == -ENOMEM && !is_compat_task() && TASK_SIZE < (1UL << 53)) {
+	if (area == -ENOMEM && !is_compat_task() && TASK_SIZE < TASK_MAX_SIZE) {
 		/* Upgrade the page table to 4 levels and retry. */
 		rc = crst_table_upgrade(mm);
 		if (rc)
@@ -211,7 +214,7 @@ s390_get_unmapped_area_topdown(struct file *filp, const unsigned long addr,
 	area = arch_get_unmapped_area_topdown(filp, addr, len, pgoff, flags);
 	if (!(area & ~PAGE_MASK))
 		return area;
-	if (area == -ENOMEM && !is_compat_task() && TASK_SIZE < (1UL << 53)) {
+	if (area == -ENOMEM && !is_compat_task() && TASK_SIZE < TASK_MAX_SIZE) {
 		/* Upgrade the page table to 4 levels and retry. */
 		rc = crst_table_upgrade(mm);
 		if (rc)

@@ -37,6 +37,7 @@
 #define IWPM_MAPINFO_HASH_MASK	(IWPM_MAPINFO_HASH_SIZE - 1)
 #define IWPM_REMINFO_HASH_SIZE	64
 #define IWPM_REMINFO_HASH_MASK	(IWPM_REMINFO_HASH_SIZE - 1)
+#define IWPM_MSG_SIZE		512
 
 static LIST_HEAD(iwpm_nlmsg_req_list);
 static DEFINE_SPINLOCK(iwpm_nlmsg_req_lock);
@@ -61,7 +62,6 @@ int iwpm_init(u8 nl_client)
 					sizeof(struct hlist_head), GFP_KERNEL);
 		if (!iwpm_hash_bucket) {
 			ret = -ENOMEM;
-			pr_err("%s Unable to create mapinfo hash table\n", __func__);
 			goto init_exit;
 		}
 		iwpm_reminfo_bucket = kzalloc(IWPM_REMINFO_HASH_SIZE *
@@ -69,7 +69,6 @@ int iwpm_init(u8 nl_client)
 		if (!iwpm_reminfo_bucket) {
 			kfree(iwpm_hash_bucket);
 			ret = -ENOMEM;
-			pr_err("%s Unable to create reminfo hash table\n", __func__);
 			goto init_exit;
 		}
 	}
@@ -127,10 +126,9 @@ int iwpm_create_mapinfo(struct sockaddr_storage *local_sockaddr,
 	if (!iwpm_valid_client(nl_client))
 		return ret;
 	map_info = kzalloc(sizeof(struct iwpm_mapping_info), GFP_KERNEL);
-	if (!map_info) {
-		pr_err("%s: Unable to allocate a mapping info\n", __func__);
+	if (!map_info)
 		return -ENOMEM;
-	}
+
 	memcpy(&map_info->local_sockaddr, local_sockaddr,
 	       sizeof(struct sockaddr_storage));
 	memcpy(&map_info->mapped_sockaddr, mapped_sockaddr,
@@ -254,9 +252,9 @@ void iwpm_add_remote_info(struct iwpm_remote_info *rem_info)
 }
 
 int iwpm_get_remote_info(struct sockaddr_storage *mapped_loc_addr,
-				struct sockaddr_storage *mapped_rem_addr,
-				struct sockaddr_storage *remote_addr,
-				u8 nl_client)
+			 struct sockaddr_storage *mapped_rem_addr,
+			 struct sockaddr_storage *remote_addr,
+			 u8 nl_client)
 {
 	struct hlist_node *tmp_hlist_node;
 	struct hlist_head *hash_bucket_head;
@@ -308,10 +306,9 @@ struct iwpm_nlmsg_request *iwpm_get_nlmsg_request(__u32 nlmsg_seq,
 	unsigned long flags;
 
 	nlmsg_request = kzalloc(sizeof(struct iwpm_nlmsg_request), gfp);
-	if (!nlmsg_request) {
-		pr_err("%s Unable to allocate a nlmsg_request\n", __func__);
+	if (!nlmsg_request)
 		return NULL;
-	}
+
 	spin_lock_irqsave(&iwpm_nlmsg_req_lock, flags);
 	list_add_tail(&nlmsg_request->inprocess_list, &iwpm_nlmsg_req_list);
 	spin_unlock_irqrestore(&iwpm_nlmsg_req_lock, flags);
@@ -322,6 +319,8 @@ struct iwpm_nlmsg_request *iwpm_get_nlmsg_request(__u32 nlmsg_seq,
 	nlmsg_request->nl_client = nl_client;
 	nlmsg_request->request_done = 0;
 	nlmsg_request->err_code = 0;
+	sema_init(&nlmsg_request->sem, 1);
+	down(&nlmsg_request->sem);
 	return nlmsg_request;
 }
 
@@ -364,11 +363,9 @@ struct iwpm_nlmsg_request *iwpm_find_nlmsg_request(__u32 echo_seq)
 int iwpm_wait_complete_req(struct iwpm_nlmsg_request *nlmsg_request)
 {
 	int ret;
-	init_waitqueue_head(&nlmsg_request->waitq);
 
-	ret = wait_event_timeout(nlmsg_request->waitq,
-			(nlmsg_request->request_done != 0), IWPM_NL_TIMEOUT);
-	if (!ret) {
+	ret = down_timeout(&nlmsg_request->sem, IWPM_NL_TIMEOUT);
+	if (ret) {
 		ret = -EINVAL;
 		pr_info("%s: Timeout %d sec for netlink request (seq = %u)\n",
 			__func__, (IWPM_NL_TIMEOUT/HZ), nlmsg_request->nlmsg_seq);
@@ -452,7 +449,7 @@ struct sk_buff *iwpm_create_nlmsg(u32 nl_op, struct nlmsghdr **nlh,
 {
 	struct sk_buff *skb = NULL;
 
-	skb = dev_alloc_skb(NLMSG_GOODSIZE);
+	skb = dev_alloc_skb(IWPM_MSG_SIZE);
 	if (!skb) {
 		pr_err("%s Unable to allocate skb\n", __func__);
 		goto create_nlmsg_exit;
@@ -663,7 +660,6 @@ int iwpm_send_mapinfo(u8 nl_client, int iwpm_pid)
 	}
 	skb_num++;
 	spin_lock_irqsave(&iwpm_mapinfo_lock, flags);
-	ret = -EINVAL;
 	for (i = 0; i < IWPM_MAPINFO_HASH_SIZE; i++) {
 		hlist_for_each_entry(map_info, &iwpm_hash_bucket[i],
 				     hlist_node) {

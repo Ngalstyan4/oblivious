@@ -461,14 +461,10 @@ static int get_serial_info(struct usb_serial_port *port,
 {
 	struct serial_struct tmp;
 
-	if (!retinfo)
-		return -EFAULT;
-
 	memset(&tmp, 0, sizeof(tmp));
 	tmp.line		= port->minor;
 	tmp.port		= 0;
 	tmp.irq			= 0;
-	tmp.flags		= ASYNC_SKIP_TEST | ASYNC_AUTO_IRQ;
 	tmp.xmit_fifo_size	= port->bulk_out_size;
 	tmp.baud_base		= 9600;
 	tmp.close_delay		= 5*HZ;
@@ -972,7 +968,7 @@ static int qt2_write(struct tty_struct *tty,
 
 	data = write_urb->transfer_buffer;
 	spin_lock_irqsave(&port_priv->urb_lock, flags);
-	if (port_priv->urb_in_use == true) {
+	if (port_priv->urb_in_use) {
 		dev_err(&port->dev, "qt2_write - urb is in use\n");
 		goto write_out;
 	}

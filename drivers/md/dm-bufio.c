@@ -11,11 +11,13 @@
 #include <linux/device-mapper.h>
 #include <linux/dm-io.h>
 #include <linux/slab.h>
+#include <linux/sched/mm.h>
 #include <linux/jiffies.h>
 #include <linux/vmalloc.h>
 #include <linux/shrinker.h>
 #include <linux/module.h>
 #include <linux/rbtree.h>
+#include <linux/stacktrace.h>
 
 #define DM_MSG_PREFIX "bufio"
 
@@ -149,6 +151,11 @@ struct dm_buffer {
 	struct list_head write_list;
 	struct bio bio;
 	struct bio_vec bio_vec[DM_BUFIO_INLINE_VECS];
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+#define MAX_STACK 10
+	struct stack_trace stack_trace;
+	unsigned long stack_entries[MAX_STACK];
+#endif
 };
 
 /*----------------------------------------------------------------*/
@@ -185,19 +192,6 @@ static void dm_bufio_unlock(struct dm_bufio_client *c)
 	mutex_unlock(&c->lock);
 }
 
-/*
- * FIXME Move to sched.h?
- */
-#ifdef CONFIG_PREEMPT_VOLUNTARY
-#  define dm_bufio_cond_resched()		\
-do {						\
-	if (unlikely(need_resched()))		\
-		_cond_resched();		\
-} while (0)
-#else
-#  define dm_bufio_cond_resched()                do { } while (0)
-#endif
-
 /*----------------------------------------------------------------*/
 
 /*
@@ -222,7 +216,7 @@ static DEFINE_SPINLOCK(param_spinlock);
  * Buffers are freed after this timeout
  */
 static unsigned dm_bufio_max_age = DM_BUFIO_DEFAULT_AGE_SECS;
-static unsigned long dm_bufio_retain_bytes = DM_BUFIO_DEFAULT_RETAIN_BYTES;
+static unsigned dm_bufio_retain_bytes = DM_BUFIO_DEFAULT_RETAIN_BYTES;
 
 static unsigned long dm_bufio_peak_allocated;
 static unsigned long dm_bufio_allocated_kmem_cache;
@@ -252,6 +246,17 @@ static LIST_HEAD(dm_bufio_all_clients);
  * dm_bufio_cache_size_per_client and dm_bufio_client_count
  */
 static DEFINE_MUTEX(dm_bufio_clients_lock);
+
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+static void buffer_record_stack(struct dm_buffer *b)
+{
+	b->stack_trace.nr_entries = 0;
+	b->stack_trace.max_entries = MAX_STACK;
+	b->stack_trace.entries = b->stack_entries;
+	b->stack_trace.skip = 2;
+	save_stack_trace(&b->stack_trace);
+}
+#endif
 
 /*----------------------------------------------------------------
  * A red/black tree acts as an index for all the buffers.
@@ -454,6 +459,9 @@ static struct dm_buffer *alloc_buffer(struct dm_bufio_client *c, gfp_t gfp_mask)
 
 	adjust_total_allocated(b->data_mode, (long)c->block_size);
 
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+	memset(&b->stack_trace, 0, sizeof(b->stack_trace));
+#endif
 	return b;
 }
 
@@ -554,7 +562,8 @@ static void use_dmio(struct dm_buffer *b, int rw, sector_t block,
 {
 	int r;
 	struct dm_io_request io_req = {
-		.bi_rw = rw,
+		.bi_op = rw,
+		.bi_op_flags = 0,
 		.notify.fn = dmio_complete,
 		.notify.context = b,
 		.client = b->c->dm_io,
@@ -603,9 +612,7 @@ static void use_inline_bio(struct dm_buffer *b, int rw, sector_t block,
 	char *ptr;
 	int len;
 
-	bio_init(&b->bio);
-	b->bio.bi_io_vec = b->bio_vec;
-	b->bio.bi_max_vecs = DM_BUFIO_INLINE_VECS;
+	bio_init(&b->bio, b->bio_vec, DM_BUFIO_INLINE_VECS);
 	b->bio.bi_iter.bi_sector = block << b->c->sectors_per_block_bits;
 	b->bio.bi_bdev = b->c->bdev;
 	b->bio.bi_end_io = inline_endio;
@@ -614,6 +621,7 @@ static void use_inline_bio(struct dm_buffer *b, int rw, sector_t block,
 	 * the dm_buffer's inline bio is local to bufio.
 	 */
 	b->bio.bi_private = end_io;
+	bio_set_op_attrs(&b->bio, rw, 0);
 
 	/*
 	 * We assume that if len >= PAGE_SIZE ptr is page-aligned.
@@ -630,7 +638,7 @@ static void use_inline_bio(struct dm_buffer *b, int rw, sector_t block,
 	do {
 		if (!bio_add_page(&b->bio, virt_to_page(ptr),
 				  len < PAGE_SIZE ? len : PAGE_SIZE,
-				  virt_to_phys(ptr) & (PAGE_SIZE - 1))) {
+				  offset_in_page(ptr))) {
 			BUG_ON(b->c->block_size <= PAGE_SIZE);
 			use_dmio(b, rw, block, end_io);
 			return;
@@ -640,7 +648,7 @@ static void use_inline_bio(struct dm_buffer *b, int rw, sector_t block,
 		ptr += PAGE_SIZE;
 	} while (len > 0);
 
-	submit_bio(rw, &b->bio);
+	submit_bio(&b->bio);
 }
 
 static void submit_io(struct dm_buffer *b, int rw, sector_t block,
@@ -719,7 +727,7 @@ static void __flush_write_list(struct list_head *write_list)
 			list_entry(write_list->next, struct dm_buffer, write_list);
 		list_del(&b->write_list);
 		submit_io(b, WRITE, b->block, write_endio);
-		dm_bufio_cond_resched();
+		cond_resched();
 	}
 	blk_finish_plug(&plug);
 }
@@ -758,7 +766,7 @@ static struct dm_buffer *__get_unclaimed_buffer(struct dm_bufio_client *c)
 			__unlink_buffer(b);
 			return b;
 		}
-		dm_bufio_cond_resched();
+		cond_resched();
 	}
 
 	list_for_each_entry_reverse(b, &c->lru[LIST_DIRTY], lru_list) {
@@ -769,7 +777,7 @@ static struct dm_buffer *__get_unclaimed_buffer(struct dm_bufio_client *c)
 			__unlink_buffer(b);
 			return b;
 		}
-		dm_bufio_cond_resched();
+		cond_resched();
 	}
 
 	return NULL;
@@ -787,7 +795,7 @@ static void __wait_for_free_buffer(struct dm_bufio_client *c)
 	DECLARE_WAITQUEUE(wait, current);
 
 	add_wait_queue(&c->free_buffer_wait, &wait);
-	set_task_state(current, TASK_UNINTERRUPTIBLE);
+	set_current_state(TASK_UNINTERRUPTIBLE);
 	dm_bufio_unlock(c);
 
 	io_schedule();
@@ -813,12 +821,14 @@ enum new_flag {
 static struct dm_buffer *__alloc_buffer_wait_no_callback(struct dm_bufio_client *c, enum new_flag nf)
 {
 	struct dm_buffer *b;
+	bool tried_noio_alloc = false;
 
 	/*
 	 * dm-bufio is resistant to allocation failures (it just keeps
 	 * one buffer reserved in cases all the allocations fail).
 	 * So set flags to not try too hard:
-	 *	GFP_NOIO: don't recurse into the I/O layer
+	 *	GFP_NOWAIT: don't wait; if we need to sleep we'll release our
+	 *		    mutex and wait ourselves.
 	 *	__GFP_NORETRY: don't retry and rather return failure
 	 *	__GFP_NOMEMALLOC: don't use emergency reserves
 	 *	__GFP_NOWARN: don't print a warning in case of failure
@@ -828,13 +838,22 @@ static struct dm_buffer *__alloc_buffer_wait_no_callback(struct dm_bufio_client 
 	 */
 	while (1) {
 		if (dm_bufio_cache_size_latch != 1) {
-			b = alloc_buffer(c, GFP_NOIO | __GFP_NORETRY | __GFP_NOMEMALLOC | __GFP_NOWARN);
+			b = alloc_buffer(c, GFP_NOWAIT | __GFP_NORETRY | __GFP_NOMEMALLOC | __GFP_NOWARN);
 			if (b)
 				return b;
 		}
 
 		if (nf == NF_PREFETCH)
 			return NULL;
+
+		if (dm_bufio_cache_size_latch != 1 && !tried_noio_alloc) {
+			dm_bufio_unlock(c);
+			b = alloc_buffer(c, GFP_NOIO | __GFP_NORETRY | __GFP_NOMEMALLOC | __GFP_NOWARN);
+			dm_bufio_lock(c);
+			if (b)
+				return b;
+			tried_noio_alloc = true;
+		}
 
 		if (!list_empty(&c->reserved_buffers)) {
 			b = list_entry(c->reserved_buffers.next,
@@ -901,7 +920,7 @@ static void __write_dirty_buffers_async(struct dm_bufio_client *c, int no_wait,
 			return;
 
 		__write_dirty_buffer(b, write_list);
-		dm_bufio_cond_resched();
+		cond_resched();
 	}
 }
 
@@ -914,11 +933,10 @@ static void __get_memory_limit(struct dm_bufio_client *c,
 {
 	unsigned long buffers;
 
-	if (unlikely(ACCESS_ONCE(dm_bufio_cache_size) != dm_bufio_cache_size_latch)) {
-		if (mutex_trylock(&dm_bufio_clients_lock)) {
-			__cache_size_refresh();
-			mutex_unlock(&dm_bufio_clients_lock);
-		}
+	if (ACCESS_ONCE(dm_bufio_cache_size) != dm_bufio_cache_size_latch) {
+		mutex_lock(&dm_bufio_clients_lock);
+		__cache_size_refresh();
+		mutex_unlock(&dm_bufio_clients_lock);
 	}
 
 	buffers = dm_bufio_cache_size_per_client >>
@@ -928,8 +946,7 @@ static void __get_memory_limit(struct dm_bufio_client *c,
 		buffers = c->minimum_buffers;
 
 	*limit_buffers = buffers;
-	*threshold_buffers = mult_frac(buffers,
-				       DM_BUFIO_WRITEBACK_PERCENT, 100);
+	*threshold_buffers = buffers * DM_BUFIO_WRITEBACK_PERCENT / 100;
 }
 
 /*
@@ -953,7 +970,7 @@ static void __check_watermark(struct dm_bufio_client *c,
 			return;
 
 		__free_buffer_wake(b);
-		dm_bufio_cond_resched();
+		cond_resched();
 	}
 
 	if (c->n_buffers[LIST_DIRTY] > threshold_buffers)
@@ -1065,12 +1082,16 @@ static void *new_read(struct dm_bufio_client *c, sector_t block,
 
 	dm_bufio_lock(c);
 	b = __bufio_new(c, block, nf, &need_submit, &write_list);
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+	if (b && b->hold_count == 1)
+		buffer_record_stack(b);
+#endif
 	dm_bufio_unlock(c);
 
 	__flush_write_list(&write_list);
 
 	if (!b)
-		return b;
+		return NULL;
 
 	if (need_submit)
 		submit_io(b, READ, b->block, read_endio);
@@ -1146,7 +1167,7 @@ void dm_bufio_prefetch(struct dm_bufio_client *c,
 				submit_io(b, READ, b->block, read_endio);
 			dm_bufio_release(b);
 
-			dm_bufio_cond_resched();
+			cond_resched();
 
 			if (!n_blocks)
 				goto flush_plug;
@@ -1267,7 +1288,7 @@ again:
 		    !test_bit(B_WRITING, &b->state))
 			__relink_lru(b, LIST_CLEAN);
 
-		dm_bufio_cond_resched();
+		cond_resched();
 
 		/*
 		 * If we dropped the lock, the list is no longer consistent,
@@ -1304,7 +1325,8 @@ EXPORT_SYMBOL_GPL(dm_bufio_write_dirty_buffers);
 int dm_bufio_issue_flush(struct dm_bufio_client *c)
 {
 	struct dm_io_request io_req = {
-		.bi_rw = WRITE_FLUSH,
+		.bi_op = REQ_OP_WRITE,
+		.bi_op_flags = REQ_PREFLUSH,
 		.mem.type = DM_IO_KMEM,
 		.mem.ptr.addr = NULL,
 		.client = c->dm_io,
@@ -1464,6 +1486,7 @@ static void drop_buffers(struct dm_bufio_client *c)
 {
 	struct dm_buffer *b;
 	int i;
+	bool warned = false;
 
 	BUG_ON(dm_bufio_in_request());
 
@@ -1478,9 +1501,21 @@ static void drop_buffers(struct dm_bufio_client *c)
 		__free_buffer_wake(b);
 
 	for (i = 0; i < LIST_SIZE; i++)
-		list_for_each_entry(b, &c->lru[i], lru_list)
+		list_for_each_entry(b, &c->lru[i], lru_list) {
+			WARN_ON(!warned);
+			warned = true;
 			DMERR("leaked buffer %llx, hold count %u, list %d",
 			      (unsigned long long)b->block, b->hold_count, i);
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+			print_stack_trace(&b->stack_trace, 1);
+			b->hold_count = 0; /* mark unclaimed to avoid BUG_ON below */
+#endif
+		}
+
+#ifdef CONFIG_DM_DEBUG_BLOCK_STACK_TRACING
+	while ((b = __get_unclaimed_buffer(c)))
+		__free_buffer_wake(b);
+#endif
 
 	for (i = 0; i < LIST_SIZE; i++)
 		BUG_ON(!list_empty(&c->lru[i]));
@@ -1515,10 +1550,10 @@ static bool __try_evict_buffer(struct dm_buffer *b, gfp_t gfp)
 	return true;
 }
 
-static unsigned long get_retain_buffers(struct dm_bufio_client *c)
+static unsigned get_retain_buffers(struct dm_bufio_client *c)
 {
-        unsigned long retain_bytes = ACCESS_ONCE(dm_bufio_retain_bytes);
-        return retain_bytes >> (c->sectors_per_block_bits + SECTOR_SHIFT);
+        unsigned retain_bytes = ACCESS_ONCE(dm_bufio_retain_bytes);
+        return retain_bytes / c->block_size;
 }
 
 static unsigned long __scan(struct dm_bufio_client *c, unsigned long nr_to_scan,
@@ -1527,9 +1562,8 @@ static unsigned long __scan(struct dm_bufio_client *c, unsigned long nr_to_scan,
 	int l;
 	struct dm_buffer *b, *tmp;
 	unsigned long freed = 0;
-	unsigned long count = c->n_buffers[LIST_CLEAN] +
-			      c->n_buffers[LIST_DIRTY];
-	unsigned long retain_target = get_retain_buffers(c);
+	unsigned long count = nr_to_scan;
+	unsigned retain_target = get_retain_buffers(c);
 
 	for (l = 0; l < LIST_SIZE; l++) {
 		list_for_each_entry_safe_reverse(b, tmp, &c->lru[l], lru_list) {
@@ -1537,7 +1571,7 @@ static unsigned long __scan(struct dm_bufio_client *c, unsigned long nr_to_scan,
 				freed++;
 			if (!--nr_to_scan || ((count - freed) <= retain_target))
 				return freed;
-			dm_bufio_cond_resched();
+			cond_resched();
 		}
 	}
 	return freed;
@@ -1563,20 +1597,9 @@ dm_bufio_shrink_scan(struct shrinker *shrink, struct shrink_control *sc)
 static unsigned long
 dm_bufio_shrink_count(struct shrinker *shrink, struct shrink_control *sc)
 {
-	struct dm_bufio_client *c;
-	unsigned long count;
-	unsigned long retain_target;
+	struct dm_bufio_client *c = container_of(shrink, struct dm_bufio_client, shrinker);
 
-	c = container_of(shrink, struct dm_bufio_client, shrinker);
-	if (sc->gfp_mask & __GFP_FS)
-		dm_bufio_lock(c);
-	else if (!dm_bufio_trylock(c))
-		return 0;
-
-	count = c->n_buffers[LIST_CLEAN] + c->n_buffers[LIST_DIRTY];
-	retain_target = get_retain_buffers(c);
-	dm_bufio_unlock(c);
-	return (count < retain_target) ? 0 : (count - retain_target);
+	return ACCESS_ONCE(c->n_buffers[LIST_CLEAN]) + ACCESS_ONCE(c->n_buffers[LIST_DIRTY]);
 }
 
 /*
@@ -1757,18 +1780,10 @@ static bool older_than(struct dm_buffer *b, unsigned long age_hz)
 static void __evict_old_buffers(struct dm_bufio_client *c, unsigned long age_hz)
 {
 	struct dm_buffer *b, *tmp;
-	unsigned long retain_target = get_retain_buffers(c);
-	unsigned long count;
-	LIST_HEAD(write_list);
+	unsigned retain_target = get_retain_buffers(c);
+	unsigned count;
 
 	dm_bufio_lock(c);
-
-	__check_watermark(c, &write_list);
-	if (unlikely(!list_empty(&write_list))) {
-		dm_bufio_unlock(c);
-		__flush_write_list(&write_list);
-		dm_bufio_lock(c);
-	}
 
 	count = c->n_buffers[LIST_CLEAN] + c->n_buffers[LIST_DIRTY];
 	list_for_each_entry_safe_reverse(b, tmp, &c->lru[LIST_CLEAN], lru_list) {
@@ -1781,7 +1796,7 @@ static void __evict_old_buffers(struct dm_bufio_client *c, unsigned long age_hz)
 		if (__try_evict_buffer(b, 0))
 			count--;
 
-		dm_bufio_cond_resched();
+		cond_resched();
 	}
 
 	dm_bufio_unlock(c);
@@ -1793,8 +1808,6 @@ static void cleanup_old_buffers(void)
 	struct dm_bufio_client *c;
 
 	mutex_lock(&dm_bufio_clients_lock);
-
-	__cache_size_refresh();
 
 	list_for_each_entry(c, &dm_bufio_all_clients, client_list)
 		__evict_old_buffers(c, max_age_hz);
@@ -1833,15 +1846,19 @@ static int __init dm_bufio_init(void)
 	memset(&dm_bufio_caches, 0, sizeof dm_bufio_caches);
 	memset(&dm_bufio_cache_names, 0, sizeof dm_bufio_cache_names);
 
-	mem = (__u64)mult_frac(totalram_pages - totalhigh_pages,
-			       DM_BUFIO_MEMORY_PERCENT, 100) << PAGE_SHIFT;
+	mem = (__u64)((totalram_pages - totalhigh_pages) *
+		      DM_BUFIO_MEMORY_PERCENT / 100) << PAGE_SHIFT;
 
 	if (mem > ULONG_MAX)
 		mem = ULONG_MAX;
 
 #ifdef CONFIG_MMU
-	if (mem > mult_frac(VMALLOC_TOTAL, DM_BUFIO_VMALLOC_PERCENT, 100))
-		mem = mult_frac(VMALLOC_TOTAL, DM_BUFIO_VMALLOC_PERCENT, 100);
+	/*
+	 * Get the size of vmalloc space the same way as VMALLOC_TOTAL
+	 * in fs/proc/internal.h
+	 */
+	if (mem > (VMALLOC_END - VMALLOC_START) * DM_BUFIO_VMALLOC_PERCENT / 100)
+		mem = (VMALLOC_END - VMALLOC_START) * DM_BUFIO_VMALLOC_PERCENT / 100;
 #endif
 
 	dm_bufio_default_cache_size = mem;
@@ -1850,7 +1867,7 @@ static int __init dm_bufio_init(void)
 	__cache_size_refresh();
 	mutex_unlock(&dm_bufio_clients_lock);
 
-	dm_bufio_wq = create_singlethread_workqueue("dm_bufio_cache");
+	dm_bufio_wq = alloc_workqueue("dm_bufio_cache", WQ_MEM_RECLAIM, 0);
 	if (!dm_bufio_wq)
 		return -ENOMEM;
 
@@ -1902,8 +1919,7 @@ static void __exit dm_bufio_exit(void)
 		bug = 1;
 	}
 
-	if (bug)
-		BUG();
+	BUG_ON(bug);
 }
 
 module_init(dm_bufio_init)
@@ -1915,7 +1931,7 @@ MODULE_PARM_DESC(max_cache_size_bytes, "Size of metadata cache");
 module_param_named(max_age_seconds, dm_bufio_max_age, uint, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(max_age_seconds, "Max age of a buffer in seconds");
 
-module_param_named(retain_bytes, dm_bufio_retain_bytes, ulong, S_IRUGO | S_IWUSR);
+module_param_named(retain_bytes, dm_bufio_retain_bytes, uint, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(retain_bytes, "Try to keep at least this many bytes cached in memory");
 
 module_param_named(peak_allocated_bytes, dm_bufio_peak_allocated, ulong, S_IRUGO | S_IWUSR);

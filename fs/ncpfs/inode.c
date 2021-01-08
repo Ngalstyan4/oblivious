@@ -13,7 +13,7 @@
 
 #include <linux/module.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/byteorder.h>
 
 #include <linux/time.h>
@@ -30,6 +30,7 @@
 #include <linux/vfs.h>
 #include <linux/mount.h>
 #include <linux/seq_file.h>
+#include <linux/sched/signal.h>
 #include <linux/namei.h>
 
 #include <net/sock.h>
@@ -82,7 +83,7 @@ static int init_inodecache(void)
 	ncp_inode_cachep = kmem_cache_create("ncp_inode_cache",
 					     sizeof(struct ncp_inode_info),
 					     0, (SLAB_RECLAIM_ACCOUNT|
-						SLAB_MEM_SPREAD),
+						SLAB_MEM_SPREAD|SLAB_ACCOUNT),
 					     init_once);
 	if (ncp_inode_cachep == NULL)
 		return -ENOMEM;
@@ -243,9 +244,7 @@ static void ncp_set_attr(struct inode *inode, struct ncp_entry_info *nwinfo)
 
 #if defined(CONFIG_NCPFS_EXTRAS) || defined(CONFIG_NCPFS_NFS_NS)
 static const struct inode_operations ncp_symlink_inode_operations = {
-	.readlink	= generic_readlink,
-	.follow_link	= page_follow_link_light,
-	.put_link	= page_put_link,
+	.get_link	= page_get_link,
 	.setattr	= ncp_notify_change,
 };
 #endif
@@ -283,6 +282,7 @@ ncp_iget(struct super_block *sb, struct ncp_entry_info *info)
 #if defined(CONFIG_NCPFS_EXTRAS) || defined(CONFIG_NCPFS_NFS_NS)
 		} else if (S_ISLNK(inode->i_mode)) {
 			inode->i_op = &ncp_symlink_inode_operations;
+			inode_nohighmem(inode);
 			inode->i_data.a_ops = &ncp_symlink_aops;
 #endif
 		} else {
@@ -884,7 +884,7 @@ int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 	/* ageing the dentry to force validation */
 	ncp_age_dentry(server, dentry);
 
-	result = inode_change_ok(inode, attr);
+	result = setattr_prepare(dentry, attr);
 	if (result < 0)
 		goto out;
 

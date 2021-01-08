@@ -3341,7 +3341,7 @@ static int niu_rbr_add_page(struct niu *np, struct rx_ring_info *rp,
 
 	niu_hash_page(rp, page, addr);
 	if (rp->rbr_blocks_per_page > 1)
-		atomic_add(rp->rbr_blocks_per_page - 1, &page->_count);
+		page_ref_add(page, rp->rbr_blocks_per_page - 1);
 
 	for (i = 0; i < rp->rbr_blocks_per_page; i++) {
 		__le32 *rbr = &rp->rbr[start_index + i];
@@ -3786,7 +3786,7 @@ static int niu_poll(struct napi_struct *napi, int budget)
 	work_done = niu_poll_core(np, lp, budget);
 
 	if (work_done < budget) {
-		napi_complete(napi);
+		napi_complete_done(napi, work_done);
 		niu_ldg_rearm(np, lp, 1);
 	}
 	return work_done;
@@ -6294,8 +6294,8 @@ no_rings:
 	stats->tx_errors = errors;
 }
 
-static struct rtnl_link_stats64 *niu_get_stats(struct net_device *dev,
-					       struct rtnl_link_stats64 *stats)
+static void niu_get_stats(struct net_device *dev,
+			  struct rtnl_link_stats64 *stats)
 {
 	struct niu *np = netdev_priv(dev);
 
@@ -6303,8 +6303,6 @@ static struct rtnl_link_stats64 *niu_get_stats(struct net_device *dev,
 		niu_get_rx_stats(np, stats);
 		niu_get_tx_stats(np, stats);
 	}
-
-	return stats;
 }
 
 static void niu_load_hash_xmac(struct niu *np, u16 *hash)
@@ -6431,7 +6429,7 @@ static int niu_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 static void niu_netif_stop(struct niu *np)
 {
-	np->dev->trans_start = jiffies;	/* prevent tx timeout */
+	netif_trans_update(np->dev);	/* prevent tx timeout */
 
 	niu_disable_napi(np);
 
@@ -6753,9 +6751,6 @@ static int niu_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct niu *np = netdev_priv(dev);
 	int err, orig_jumbo, new_jumbo;
-
-	if (new_mtu < 68 || new_mtu > NIU_MAX_MTU)
-		return -EINVAL;
 
 	orig_jumbo = (dev->mtu > ETH_DATA_LEN);
 	new_jumbo = (new_mtu > ETH_DATA_LEN);
@@ -9822,6 +9817,10 @@ static int niu_pci_init_one(struct pci_dev *pdev,
 	pci_save_state(pdev);
 
 	dev->irq = pdev->irq;
+
+	/* MTU range: 68 - 9216 */
+	dev->min_mtu = ETH_MIN_MTU;
+	dev->max_mtu = NIU_MAX_MTU;
 
 	niu_assign_netdev_ops(dev);
 

@@ -16,6 +16,7 @@
 #include <linux/intel-iommu.h>
 #include <linux/mmu_notifier.h>
 #include <linux/sched.h>
+#include <linux/sched/mm.h>
 #include <linux/slab.h>
 #include <linux/intel-svm.h>
 #include <linux/rculist.h>
@@ -127,7 +128,6 @@ int intel_svm_enable_prq(struct intel_iommu *iommu)
 		pr_err("IOMMU: %s: Failed to request IRQ for page request queue\n",
 		       iommu->name);
 		dmar_free_hwirq(irq);
-		iommu->pr_irq = 0;
 		goto err;
 	}
 	dmar_writeq(iommu->reg + DMAR_PQH_REG, 0ULL);
@@ -143,11 +143,9 @@ int intel_svm_finish_prq(struct intel_iommu *iommu)
 	dmar_writeq(iommu->reg + DMAR_PQT_REG, 0ULL);
 	dmar_writeq(iommu->reg + DMAR_PQA_REG, 0ULL);
 
-	if (iommu->pr_irq) {
-		free_irq(iommu->pr_irq, iommu);
-		dmar_free_hwirq(iommu->pr_irq);
-		iommu->pr_irq = 0;
-	}
+	free_irq(iommu->pr_irq, iommu);
+	dmar_free_hwirq(iommu->pr_irq);
+	iommu->pr_irq = 0;
 
 	free_pages((unsigned long)iommu->prq, PRQ_ORDER);
 	iommu->prq = NULL;
@@ -582,7 +580,7 @@ static irqreturn_t prq_event_thread(int irq, void *d)
 		if (!svm->mm)
 			goto bad_req;
 		/* If the mm is already defunct, don't handle faults. */
-		if (!atomic_inc_not_zero(&svm->mm->mm_users))
+		if (!mmget_not_zero(svm->mm))
 			goto bad_req;
 		down_read(&svm->mm->mmap_sem);
 		vma = find_extend_vma(svm->mm, address);
@@ -592,7 +590,7 @@ static irqreturn_t prq_event_thread(int irq, void *d)
 		if (access_error(vma, req))
 			goto invalid;
 
-		ret = handle_mm_fault(svm->mm, vma, address,
+		ret = handle_mm_fault(vma, address,
 				      req->wr_req ? FAULT_FLAG_WRITE : 0);
 		if (ret & VM_FAULT_ERROR)
 			goto invalid;

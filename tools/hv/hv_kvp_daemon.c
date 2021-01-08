@@ -22,8 +22,6 @@
  */
 
 
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <sys/poll.h>
 #include <sys/utsname.h>
 #include <stdio.h>
@@ -34,7 +32,6 @@
 #include <errno.h>
 #include <arpa/inet.h>
 #include <linux/hyperv.h>
-#include <linux/netlink.h>
 #include <ifaddrs.h>
 #include <netdb.h>
 #include <syslog.h>
@@ -96,12 +93,12 @@ static struct utsname uts_buf;
 
 #define KVP_CONFIG_LOC	"/var/lib/hyperv"
 
+#ifndef KVP_SCRIPTS_PATH
+#define KVP_SCRIPTS_PATH "/usr/libexec/hypervkvpd/"
+#endif
+
 #define MAX_FILE_NAME 100
 #define ENTRIES_PER_BLOCK 50
-
-#ifndef SOL_NETLINK
-#define SOL_NETLINK 270
-#endif
 
 struct kvp_record {
 	char key[HV_KVP_EXCHANGE_MAX_KEY_SIZE];
@@ -193,14 +190,11 @@ static void kvp_update_mem_state(int pool)
 	for (;;) {
 		readp = &record[records_read];
 		records_read += fread(readp, sizeof(struct kvp_record),
-				ENTRIES_PER_BLOCK * num_blocks - records_read,
-				filep);
+					ENTRIES_PER_BLOCK * num_blocks,
+					filep);
 
 		if (ferror(filep)) {
-			syslog(LOG_ERR,
-				"Failed to read file, pool: %d; error: %d %s",
-				 pool, errno, strerror(errno));
-			kvp_release_lock(pool);
+			syslog(LOG_ERR, "Failed to read file, pool: %d", pool);
 			exit(EXIT_FAILURE);
 		}
 
@@ -213,7 +207,6 @@ static void kvp_update_mem_state(int pool)
 
 			if (record == NULL) {
 				syslog(LOG_ERR, "malloc failed");
-				kvp_release_lock(pool);
 				exit(EXIT_FAILURE);
 			}
 			continue;
@@ -228,11 +221,15 @@ static void kvp_update_mem_state(int pool)
 	fclose(filep);
 	kvp_release_lock(pool);
 }
-
 static int kvp_file_init(void)
 {
 	int  fd;
+	FILE *filep;
+	size_t records_read;
 	char *fname;
+	struct kvp_record *record;
+	struct kvp_record *readp;
+	int num_blocks;
 	int i;
 	int alloc_unit = sizeof(struct kvp_record) * ENTRIES_PER_BLOCK;
 
@@ -246,19 +243,61 @@ static int kvp_file_init(void)
 
 	for (i = 0; i < KVP_POOL_COUNT; i++) {
 		fname = kvp_file_info[i].fname;
+		records_read = 0;
+		num_blocks = 1;
 		sprintf(fname, "%s/.kvp_pool_%d", KVP_CONFIG_LOC, i);
 		fd = open(fname, O_RDWR | O_CREAT | O_CLOEXEC, 0644 /* rw-r--r-- */);
 
 		if (fd == -1)
 			return 1;
 
-		kvp_file_info[i].fd = fd;
-		kvp_file_info[i].num_blocks = 1;
-		kvp_file_info[i].records = malloc(alloc_unit);
-		if (kvp_file_info[i].records == NULL)
+
+		filep = fopen(fname, "re");
+		if (!filep) {
+			close(fd);
 			return 1;
-		kvp_file_info[i].num_records = 0;
-		kvp_update_mem_state(i);
+		}
+
+		record = malloc(alloc_unit * num_blocks);
+		if (record == NULL) {
+			fclose(filep);
+			close(fd);
+			return 1;
+		}
+		for (;;) {
+			readp = &record[records_read];
+			records_read += fread(readp, sizeof(struct kvp_record),
+					ENTRIES_PER_BLOCK,
+					filep);
+
+			if (ferror(filep)) {
+				syslog(LOG_ERR, "Failed to read file, pool: %d",
+				       i);
+				exit(EXIT_FAILURE);
+			}
+
+			if (!feof(filep)) {
+				/*
+				 * We have more data to read.
+				 */
+				num_blocks++;
+				record = realloc(record, alloc_unit *
+						num_blocks);
+				if (record == NULL) {
+					fclose(filep);
+					close(fd);
+					return 1;
+				}
+				continue;
+			}
+			break;
+		}
+		kvp_file_info[i].fd = fd;
+		kvp_file_info[i].num_blocks = num_blocks;
+		kvp_file_info[i].records = record;
+		kvp_file_info[i].num_records = records_read;
+		fclose(filep);
+
 	}
 
 	return 0;
@@ -660,7 +699,7 @@ static char *kvp_mac_to_if_name(char *mac)
 	if (dir == NULL)
 		return NULL;
 
-	snprintf(dev_id, sizeof(dev_id), kvp_net_dir);
+	snprintf(dev_id, sizeof(dev_id), "%s", kvp_net_dir);
 	q = dev_id + strlen(kvp_net_dir);
 
 	while ((entry = readdir(dir)) != NULL) {
@@ -783,7 +822,7 @@ static void kvp_get_ipconfig_info(char *if_name,
 	 * .
 	 */
 
-	sprintf(cmd, "%s",  "hv_get_dns_info");
+	sprintf(cmd, KVP_SCRIPTS_PATH "%s",  "hv_get_dns_info");
 
 	/*
 	 * Execute the command to gather DNS info.
@@ -800,7 +839,7 @@ static void kvp_get_ipconfig_info(char *if_name,
 	 * Enabled: DHCP enabled.
 	 */
 
-	sprintf(cmd, "%s %s", "hv_get_dhcp_info", if_name);
+	sprintf(cmd, KVP_SCRIPTS_PATH "%s %s", "hv_get_dhcp_info", if_name);
 
 	file = popen(cmd, "r");
 	if (file == NULL)
@@ -1306,7 +1345,8 @@ static int kvp_set_ip_info(char *if_name, struct hv_kvp_ipaddr_value *new_val)
 	 * invoke the external script to do its magic.
 	 */
 
-	snprintf(cmd, sizeof(cmd), "%s %s", "hv_set_ifconfig", if_file);
+	snprintf(cmd, sizeof(cmd), KVP_SCRIPTS_PATH "%s %s",
+		 "hv_set_ifconfig", if_file);
 	if (system(cmd)) {
 		syslog(LOG_ERR, "Failed to execute cmd '%s'; error: %d %s",
 				cmd, errno, strerror(errno));

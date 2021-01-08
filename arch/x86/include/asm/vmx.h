@@ -25,6 +25,7 @@
 #define VMX_H
 
 
+#include <linux/bitops.h>
 #include <linux/types.h>
 #include <uapi/asm/vmx.h>
 
@@ -60,6 +61,7 @@
  */
 #define SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES 0x00000001
 #define SECONDARY_EXEC_ENABLE_EPT               0x00000002
+#define SECONDARY_EXEC_DESC			0x00000004
 #define SECONDARY_EXEC_RDTSCP			0x00000008
 #define SECONDARY_EXEC_VIRTUALIZE_X2APIC_MODE   0x00000010
 #define SECONDARY_EXEC_ENABLE_VPID              0x00000020
@@ -72,7 +74,6 @@
 #define SECONDARY_EXEC_SHADOW_VMCS              0x00004000
 #define SECONDARY_EXEC_ENABLE_PML               0x00020000
 #define SECONDARY_EXEC_XSAVES			0x00100000
-#define SECONDARY_EXEC_PCOMMIT			0x00200000
 #define SECONDARY_EXEC_TSC_SCALING              0x02000000
 
 #define PIN_BASED_EXT_INTR_MASK                 0x00000001
@@ -110,6 +111,36 @@
 #define VMX_MISC_PREEMPTION_TIMER_RATE_MASK	0x0000001f
 #define VMX_MISC_SAVE_EFER_LMA			0x00000020
 #define VMX_MISC_ACTIVITY_HLT			0x00000040
+
+static inline u32 vmx_basic_vmcs_revision_id(u64 vmx_basic)
+{
+	return vmx_basic & GENMASK_ULL(30, 0);
+}
+
+static inline u32 vmx_basic_vmcs_size(u64 vmx_basic)
+{
+	return (vmx_basic & GENMASK_ULL(44, 32)) >> 32;
+}
+
+static inline int vmx_misc_preemption_timer_rate(u64 vmx_misc)
+{
+	return vmx_misc & VMX_MISC_PREEMPTION_TIMER_RATE_MASK;
+}
+
+static inline int vmx_misc_cr3_count(u64 vmx_misc)
+{
+	return (vmx_misc & GENMASK_ULL(24, 16)) >> 16;
+}
+
+static inline int vmx_misc_max_msr(u64 vmx_misc)
+{
+	return (vmx_misc & GENMASK_ULL(27, 25)) >> 25;
+}
+
+static inline int vmx_misc_mseg_revid(u64 vmx_misc)
+{
+	return (vmx_misc & GENMASK_ULL(63, 32)) >> 32;
+}
 
 /* VMCS Encodings */
 enum vmcs_field {
@@ -310,7 +341,6 @@ enum vmcs_field {
 #define INTR_TYPE_NMI_INTR		(2 << 8) /* NMI */
 #define INTR_TYPE_HARD_EXCEPTION	(3 << 8) /* processor exception */
 #define INTR_TYPE_SOFT_INTR             (4 << 8) /* software interrupt */
-#define INTR_TYPE_PRIV_SW_EXCEPTION	(5 << 8) /* ICE breakpoint - undocumented */
 #define INTR_TYPE_SOFT_EXCEPTION	(6 << 8) /* software exception */
 
 /* GUEST_INTERRUPTIBILITY_INFO flags. */
@@ -437,8 +467,16 @@ enum vmcs_field {
 #define VMX_EPT_WRITABLE_MASK			0x2ull
 #define VMX_EPT_EXECUTABLE_MASK			0x4ull
 #define VMX_EPT_IPAT_BIT    			(1ull << 6)
-#define VMX_EPT_ACCESS_BIT				(1ull << 8)
-#define VMX_EPT_DIRTY_BIT				(1ull << 9)
+#define VMX_EPT_ACCESS_BIT			(1ull << 8)
+#define VMX_EPT_DIRTY_BIT			(1ull << 9)
+#define VMX_EPT_RWX_MASK                        (VMX_EPT_READABLE_MASK |       \
+						 VMX_EPT_WRITABLE_MASK |       \
+						 VMX_EPT_EXECUTABLE_MASK)
+#define VMX_EPT_MT_MASK				(7ull << VMX_EPT_MT_EPTE_SHIFT)
+
+/* The mask to use to trigger an EPT Misconfiguration in order to track MMIO */
+#define VMX_EPT_MISCONFIG_WX_VALUE		(VMX_EPT_WRITABLE_MASK |       \
+						 VMX_EPT_EXECUTABLE_MASK)
 
 #define VMX_EPT_IDENTITY_PAGETABLE_ADDR		0xfffbc000ul
 
@@ -468,6 +506,22 @@ struct vmx_msr_entry {
 #define ENTRY_FAIL_PDPTE		2
 #define ENTRY_FAIL_NMI			3
 #define ENTRY_FAIL_VMCS_LINK_PTR	4
+
+/*
+ * Exit Qualifications for EPT Violations
+ */
+#define EPT_VIOLATION_ACC_READ_BIT	0
+#define EPT_VIOLATION_ACC_WRITE_BIT	1
+#define EPT_VIOLATION_ACC_INSTR_BIT	2
+#define EPT_VIOLATION_READABLE_BIT	3
+#define EPT_VIOLATION_WRITABLE_BIT	4
+#define EPT_VIOLATION_EXECUTABLE_BIT	5
+#define EPT_VIOLATION_ACC_READ		(1 << EPT_VIOLATION_ACC_READ_BIT)
+#define EPT_VIOLATION_ACC_WRITE		(1 << EPT_VIOLATION_ACC_WRITE_BIT)
+#define EPT_VIOLATION_ACC_INSTR		(1 << EPT_VIOLATION_ACC_INSTR_BIT)
+#define EPT_VIOLATION_READABLE		(1 << EPT_VIOLATION_READABLE_BIT)
+#define EPT_VIOLATION_WRITABLE		(1 << EPT_VIOLATION_WRITABLE_BIT)
+#define EPT_VIOLATION_EXECUTABLE	(1 << EPT_VIOLATION_EXECUTABLE_BIT)
 
 /*
  * VM-instruction error numbers

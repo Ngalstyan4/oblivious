@@ -11,10 +11,6 @@
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
  * more details.
  *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
- *
  * The full GNU General Public License is included in this distribution in the
  * file called LICENSE.
  *
@@ -178,8 +174,8 @@ static void _rtl_pci_update_default_setting(struct ieee80211_hw *hw)
 		}
 		break;
 	default:
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-			 "switch case not processed\n");
+		pr_err("switch case %#x not processed\n",
+		       rtlpci->const_support_pciaspm);
 		break;
 	}
 
@@ -359,30 +355,28 @@ static bool rtl_pci_check_buddy_priv(struct ieee80211_hw *hw,
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci_priv *pcipriv = rtl_pcipriv(hw);
 	bool find_buddy_priv = false;
-	struct rtl_priv *tpriv = NULL;
+	struct rtl_priv *tpriv;
 	struct rtl_pci_priv *tpcipriv = NULL;
 
 	if (!list_empty(&rtlpriv->glb_var->glb_priv_list)) {
 		list_for_each_entry(tpriv, &rtlpriv->glb_var->glb_priv_list,
 				    list) {
-			if (tpriv) {
-				tpcipriv = (struct rtl_pci_priv *)tpriv->priv;
-				RT_TRACE(rtlpriv, COMP_INIT, DBG_LOUD,
-					 "pcipriv->ndis_adapter.funcnumber %x\n",
-					pcipriv->ndis_adapter.funcnumber);
-				RT_TRACE(rtlpriv, COMP_INIT, DBG_LOUD,
-					 "tpcipriv->ndis_adapter.funcnumber %x\n",
-					tpcipriv->ndis_adapter.funcnumber);
+			tpcipriv = (struct rtl_pci_priv *)tpriv->priv;
+			RT_TRACE(rtlpriv, COMP_INIT, DBG_LOUD,
+				 "pcipriv->ndis_adapter.funcnumber %x\n",
+				pcipriv->ndis_adapter.funcnumber);
+			RT_TRACE(rtlpriv, COMP_INIT, DBG_LOUD,
+				 "tpcipriv->ndis_adapter.funcnumber %x\n",
+				tpcipriv->ndis_adapter.funcnumber);
 
-				if ((pcipriv->ndis_adapter.busnumber ==
-				     tpcipriv->ndis_adapter.busnumber) &&
-				    (pcipriv->ndis_adapter.devnumber ==
-				    tpcipriv->ndis_adapter.devnumber) &&
-				    (pcipriv->ndis_adapter.funcnumber !=
-				    tpcipriv->ndis_adapter.funcnumber)) {
-					find_buddy_priv = true;
-					break;
-				}
+			if ((pcipriv->ndis_adapter.busnumber ==
+			     tpcipriv->ndis_adapter.busnumber) &&
+			    (pcipriv->ndis_adapter.devnumber ==
+			    tpcipriv->ndis_adapter.devnumber) &&
+			    (pcipriv->ndis_adapter.funcnumber !=
+			    tpcipriv->ndis_adapter.funcnumber)) {
+				find_buddy_priv = true;
+				break;
 			}
 		}
 	}
@@ -853,7 +847,7 @@ static void _rtl_pci_rx_interrupt(struct ieee80211_hw *hw)
 		}
 		/* handle command packet here */
 		if (rtlpriv->cfg->ops->rx_command_packet &&
-		    rtlpriv->cfg->ops->rx_command_packet(hw, stats, skb)) {
+		    rtlpriv->cfg->ops->rx_command_packet(hw, &stats, skb)) {
 				dev_kfree_skb_any(skb);
 				goto new_trx_end;
 		}
@@ -1209,7 +1203,8 @@ static void _rtl_pci_init_struct(struct ieee80211_hw *hw,
 	/*Tx/Rx related var */
 	_rtl_pci_init_trx_var(hw);
 
-	/*IBSS*/ mac->beacon_interval = 100;
+	/*IBSS*/
+	mac->beacon_interval = 100;
 
 	/*AMPDU*/
 	mac->min_space_cfg = 0;
@@ -1217,6 +1212,10 @@ static void _rtl_pci_init_struct(struct ieee80211_hw *hw,
 	/*set sane AMPDU defaults */
 	mac->current_ampdu_density = 7;
 	mac->current_ampdu_factor = 3;
+
+	/*Retry Limit*/
+	mac->retry_short = 7;
+	mac->retry_long = 7;
 
 	/*QOS*/
 	rtlpci->acm_method = EACMWAY2_SW;
@@ -1251,9 +1250,8 @@ static int _rtl_pci_init_tx_ring(struct ieee80211_hw *hw,
 					 &buffer_desc_dma);
 
 		if (!buffer_desc || (unsigned long)buffer_desc & 0xFF) {
-			RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-				 "Cannot allocate TX ring (prio = %d)\n",
-				 prio);
+			pr_err("Cannot allocate TX ring (prio = %d)\n",
+			       prio);
 			return -ENOMEM;
 		}
 
@@ -1270,8 +1268,7 @@ static int _rtl_pci_init_tx_ring(struct ieee80211_hw *hw,
 				     sizeof(*desc) * entries, &desc_dma);
 
 	if (!desc || (unsigned long)desc & 0xFF) {
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-			 "Cannot allocate TX ring (prio = %d)\n", prio);
+		pr_err("Cannot allocate TX ring (prio = %d)\n", prio);
 		return -ENOMEM;
 	}
 
@@ -1318,8 +1315,7 @@ static int _rtl_pci_init_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 					  &rtlpci->rx_ring[rxring_idx].dma);
 		if (!rtlpci->rx_ring[rxring_idx].buffer_desc ||
 		    (ulong)rtlpci->rx_ring[rxring_idx].buffer_desc & 0xFF) {
-			RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-				 "Cannot allocate RX ring\n");
+			pr_err("Cannot allocate RX ring\n");
 			return -ENOMEM;
 		}
 
@@ -1342,8 +1338,7 @@ static int _rtl_pci_init_rx_ring(struct ieee80211_hw *hw, int rxring_idx)
 					  &rtlpci->rx_ring[rxring_idx].dma);
 		if (!rtlpci->rx_ring[rxring_idx].desc ||
 		    (unsigned long)rtlpci->rx_ring[rxring_idx].desc & 0xFF) {
-			RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-				 "Cannot allocate RX ring\n");
+			pr_err("Cannot allocate RX ring\n");
 			return -ENOMEM;
 		}
 
@@ -1572,14 +1567,7 @@ int rtl_pci_reset_trx_ring(struct ieee80211_hw *hw)
 				dev_kfree_skb_irq(skb);
 				ring->idx = (ring->idx + 1) % ring->entries;
 			}
-
-			if (rtlpriv->use_new_trx_flow) {
-				rtlpci->tx_ring[i].cur_tx_rp = 0;
-				rtlpci->tx_ring[i].cur_tx_wp = 0;
-			}
-
 			ring->idx = 0;
-			ring->entries = rtlpci->txringcount[i];
 		}
 	}
 	spin_unlock_irqrestore(&rtlpriv->locks.irq_th_lock, flags);
@@ -1810,15 +1798,13 @@ static void rtl_pci_deinit(struct ieee80211_hw *hw)
 
 static int rtl_pci_init(struct ieee80211_hw *hw, struct pci_dev *pdev)
 {
-	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	int err;
 
 	_rtl_pci_init_struct(hw, pdev);
 
 	err = _rtl_pci_init_trx_ring(hw);
 	if (err) {
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-			 "tx ring initialization failed\n");
+		pr_err("tx ring initialization failed\n");
 		return err;
 	}
 
@@ -1831,6 +1817,7 @@ static int rtl_pci_start(struct ieee80211_hw *hw)
 	struct rtl_hal *rtlhal = rtl_hal(rtl_priv(hw));
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	struct rtl_ps_ctl *ppsc = rtl_psc(rtl_priv(hw));
+	struct rtl_mac *rtlmac = rtl_mac(rtl_priv(hw));
 
 	int err;
 
@@ -1848,6 +1835,8 @@ static int rtl_pci_start(struct ieee80211_hw *hw)
 			 "Failed to config hardware!\n");
 		return err;
 	}
+	rtlpriv->cfg->ops->set_hw_reg(hw, HW_VAR_RETRY_LIMIT,
+			&rtlmac->retry_long);
 
 	rtlpriv->cfg->ops->enable_interrupt(hw);
 	RT_TRACE(rtlpriv, COMP_INIT, DBG_LOUD, "enable_interrupt OK\n");
@@ -2185,15 +2174,15 @@ int rtl_pci_probe(struct pci_dev *pdev,
 
 	err = pci_enable_device(pdev);
 	if (err) {
-		RT_ASSERT(false, "%s : Cannot enable new PCI device\n",
+		WARN_ONCE(true, "%s : Cannot enable new PCI device\n",
 			  pci_name(pdev));
 		return err;
 	}
 
 	if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) {
 		if (pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32))) {
-			RT_ASSERT(false,
-				  "Unable to obtain 32bit DMA for consistent allocations\n");
+			WARN_ONCE(true,
+				  "rtlwifi: Unable to obtain 32bit DMA for consistent allocations\n");
 			err = -ENOMEM;
 			goto fail1;
 		}
@@ -2204,7 +2193,7 @@ int rtl_pci_probe(struct pci_dev *pdev,
 	hw = ieee80211_alloc_hw(sizeof(struct rtl_pci_priv) +
 				sizeof(struct rtl_priv), &rtl_ops);
 	if (!hw) {
-		RT_ASSERT(false,
+		WARN_ONCE(true,
 			  "%s : ieee80211 alloc failed\n", pci_name(pdev));
 		err = -ENOMEM;
 		goto fail1;
@@ -2230,20 +2219,10 @@ int rtl_pci_probe(struct pci_dev *pdev,
 	rtlpriv->intf_ops = &rtl_pci_ops;
 	rtlpriv->glb_var = &rtl_global_var;
 
-	/*
-	 *init dbgp flags before all
-	 *other functions, because we will
-	 *use it in other funtions like
-	 *RT_TRACE/RT_PRINT/RTL_PRINT_DATA
-	 *you can not use these macro
-	 *before this
-	 */
-	rtl_dbgp_flag_init(hw);
-
 	/* MEM map */
 	err = pci_request_regions(pdev, KBUILD_MODNAME);
 	if (err) {
-		RT_ASSERT(false, "Can't obtain PCI resources\n");
+		WARN_ONCE(true, "rtlwifi: Can't obtain PCI resources\n");
 		goto fail1;
 	}
 
@@ -2256,7 +2235,7 @@ int rtl_pci_probe(struct pci_dev *pdev,
 			(unsigned long)pci_iomap(pdev,
 			rtlpriv->cfg->bar_id, pmem_len);
 	if (rtlpriv->io.pci_mem_start == 0) {
-		RT_ASSERT(false, "Can't map PCI mem\n");
+		WARN_ONCE(true, "rtlwifi: Can't map PCI mem\n");
 		err = -ENOMEM;
 		goto fail2;
 	}
@@ -2276,7 +2255,7 @@ int rtl_pci_probe(struct pci_dev *pdev,
 	/* find adapter */
 	if (!_rtl_pci_find_adapter(pdev, hw)) {
 		err = -ENODEV;
-		goto fail2;
+		goto fail3;
 	}
 
 	/* Init IO handler */
@@ -2286,7 +2265,7 @@ int rtl_pci_probe(struct pci_dev *pdev,
 	rtlpriv->cfg->ops->read_eeprom_info(hw);
 
 	if (rtlpriv->cfg->ops->init_sw_vars(hw)) {
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG, "Can't init_sw_vars\n");
+		pr_err("Can't init_sw_vars\n");
 		err = -ENODEV;
 		goto fail3;
 	}
@@ -2298,33 +2277,24 @@ int rtl_pci_probe(struct pci_dev *pdev,
 	/* Init mac80211 sw */
 	err = rtl_init_core(hw);
 	if (err) {
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-			 "Can't allocate sw for mac80211\n");
+		pr_err("Can't allocate sw for mac80211\n");
 		goto fail3;
 	}
 
 	/* Init PCI sw */
 	err = rtl_pci_init(hw, pdev);
 	if (err) {
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG, "Failed to init PCI\n");
+		pr_err("Failed to init PCI\n");
 		goto fail3;
 	}
 
 	err = ieee80211_register_hw(hw);
 	if (err) {
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-			 "Can't register mac80211 hw.\n");
+		pr_err("Can't register mac80211 hw.\n");
 		err = -ENODEV;
 		goto fail3;
 	}
 	rtlpriv->mac80211.mac80211_registered = 1;
-
-	err = sysfs_create_group(&pdev->dev.kobj, &rtl_attribute_group);
-	if (err) {
-		RT_TRACE(rtlpriv, COMP_ERR, DBG_EMERG,
-			 "failed to create sysfs device attributes\n");
-		goto fail3;
-	}
 
 	/*init rfkill */
 	rtl_init_rfkill(hw);	/* Init PCI sw */
@@ -2346,10 +2316,10 @@ fail3:
 	pci_set_drvdata(pdev, NULL);
 	rtl_deinit_core(hw);
 
-fail2:
 	if (rtlpriv->io.pci_mem_start != 0)
 		pci_iounmap(pdev, (void __iomem *)rtlpriv->io.pci_mem_start);
 
+fail2:
 	pci_release_regions(pdev);
 	complete(&rtlpriv->firmware_loading_complete);
 
@@ -2375,8 +2345,6 @@ void rtl_pci_disconnect(struct pci_dev *pdev)
 	wait_for_completion(&rtlpriv->firmware_loading_complete);
 	clear_bit(RTL_STATUS_INTERFACE_START, &rtlpriv->status);
 
-	sysfs_remove_group(&pdev->dev.kobj, &rtl_attribute_group);
-
 	/*ieee80211_unregister_hw will call ops_stop */
 	if (rtlmac->mac80211_registered == 1) {
 		ieee80211_unregister_hw(hw);
@@ -2395,7 +2363,6 @@ void rtl_pci_disconnect(struct pci_dev *pdev)
 	rtlpriv->cfg->ops->deinit_sw_vars(hw);
 
 	if (rtlpci->irq_alloc) {
-		synchronize_irq(rtlpci->pdev->irq);
 		free_irq(rtlpci->pdev->irq, hw);
 		rtlpci->irq_alloc = 0;
 	}
@@ -2461,7 +2428,7 @@ int rtl_pci_resume(struct device *dev)
 EXPORT_SYMBOL(rtl_pci_resume);
 #endif /* CONFIG_PM_SLEEP */
 
-struct rtl_intf_ops rtl_pci_ops = {
+const struct rtl_intf_ops rtl_pci_ops = {
 	.read_efuse_byte = read_efuse_byte,
 	.adapter_start = rtl_pci_start,
 	.adapter_stop = rtl_pci_stop,

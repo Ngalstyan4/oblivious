@@ -53,17 +53,20 @@ static inline bool radeon_has_atpx(void) { return false; }
  * the rest of the device (CP, writeback, etc.).
  * Returns 0 on success.
  */
-int radeon_driver_unload_kms(struct drm_device *dev)
+void radeon_driver_unload_kms(struct drm_device *dev)
 {
 	struct radeon_device *rdev = dev->dev_private;
 
 	if (rdev == NULL)
-		return 0;
+		return;
 
 	if (rdev->rmmio == NULL)
 		goto done_free;
 
-	pm_runtime_get_sync(dev->dev);
+	if (radeon_is_px(dev)) {
+		pm_runtime_get_sync(dev->dev);
+		pm_runtime_forbid(dev->dev);
+	}
 
 	radeon_kfd_device_fini(rdev);
 
@@ -75,7 +78,6 @@ int radeon_driver_unload_kms(struct drm_device *dev)
 done_free:
 	kfree(rdev);
 	dev->dev_private = NULL;
-	return 0;
 }
 
 /**
@@ -103,7 +105,7 @@ int radeon_driver_load_kms(struct drm_device *dev, unsigned long flags)
 	dev->dev_private = (void *)rdev;
 
 	/* update BUS flag */
-	if (drm_pci_device_is_agp(dev)) {
+	if (pci_find_capability(dev->pdev, PCI_CAP_ID_AGP)) {
 		flags |= RADEON_IS_AGP;
 	} else if (pci_is_pcie(dev->pdev)) {
 		flags |= RADEON_IS_PCIE;
@@ -638,11 +640,11 @@ int radeon_driver_open_kms(struct drm_device *dev, struct drm_file *file_priv)
 	if (rdev->family >= CHIP_CAYMAN) {
 		struct radeon_fpriv *fpriv;
 		struct radeon_vm *vm;
-		int r;
 
 		fpriv = kzalloc(sizeof(*fpriv), GFP_KERNEL);
 		if (unlikely(!fpriv)) {
-			return -ENOMEM;
+			r = -ENOMEM;
+			goto out_suspend;
 		}
 
 		if (rdev->accel_working) {
@@ -650,14 +652,14 @@ int radeon_driver_open_kms(struct drm_device *dev, struct drm_file *file_priv)
 			r = radeon_vm_init(rdev, vm);
 			if (r) {
 				kfree(fpriv);
-				return r;
+				goto out_suspend;
 			}
 
 			r = radeon_bo_reserve(rdev->ring_tmp_bo.bo, false);
 			if (r) {
 				radeon_vm_fini(rdev, vm);
 				kfree(fpriv);
-				return r;
+				goto out_suspend;
 			}
 
 			/* map the ib pool buffer read only into
@@ -671,15 +673,16 @@ int radeon_driver_open_kms(struct drm_device *dev, struct drm_file *file_priv)
 			if (r) {
 				radeon_vm_fini(rdev, vm);
 				kfree(fpriv);
-				return r;
+				goto out_suspend;
 			}
 		}
 		file_priv->driver_priv = fpriv;
 	}
 
+out_suspend:
 	pm_runtime_mark_last_busy(dev->dev);
 	pm_runtime_put_autosuspend(dev->dev);
-	return 0;
+	return r;
 }
 
 /**
@@ -714,6 +717,8 @@ void radeon_driver_postclose_kms(struct drm_device *dev,
 		kfree(fpriv);
 		file_priv->driver_priv = NULL;
 	}
+	pm_runtime_mark_last_busy(dev->dev);
+	pm_runtime_put_autosuspend(dev->dev);
 }
 
 /**
@@ -729,6 +734,8 @@ void radeon_driver_preclose_kms(struct drm_device *dev,
 				struct drm_file *file_priv)
 {
 	struct radeon_device *rdev = dev->dev_private;
+
+	pm_runtime_get_sync(dev->dev);
 
 	mutex_lock(&rdev->gem.mutex);
 	if (rdev->hyperz_filp == file_priv)
@@ -748,19 +755,19 @@ void radeon_driver_preclose_kms(struct drm_device *dev,
  * radeon_get_vblank_counter_kms - get frame count
  *
  * @dev: drm dev pointer
- * @crtc: crtc to get the frame count from
+ * @pipe: crtc to get the frame count from
  *
  * Gets the frame count on the requested crtc (all asics).
  * Returns frame count on success, -EINVAL on failure.
  */
-u32 radeon_get_vblank_counter_kms(struct drm_device *dev, int crtc)
+u32 radeon_get_vblank_counter_kms(struct drm_device *dev, unsigned int pipe)
 {
 	int vpos, hpos, stat;
 	u32 count;
 	struct radeon_device *rdev = dev->dev_private;
 
-	if (crtc < 0 || crtc >= rdev->num_crtc) {
-		DRM_ERROR("Invalid crtc %d\n", crtc);
+	if (pipe >= rdev->num_crtc) {
+		DRM_ERROR("Invalid crtc %u\n", pipe);
 		return -EINVAL;
 	}
 
@@ -772,29 +779,29 @@ u32 radeon_get_vblank_counter_kms(struct drm_device *dev, int crtc)
 	 * and start of vsync, so vpos >= 0 means to bump the hw frame counter
 	 * result by 1 to give the proper appearance to caller.
 	 */
-	if (rdev->mode_info.crtcs[crtc]) {
+	if (rdev->mode_info.crtcs[pipe]) {
 		/* Repeat readout if needed to provide stable result if
 		 * we cross start of vsync during the queries.
 		 */
 		do {
-			count = radeon_get_vblank_counter(rdev, crtc);
+			count = radeon_get_vblank_counter(rdev, pipe);
 			/* Ask radeon_get_crtc_scanoutpos to return vpos as
 			 * distance to start of vblank, instead of regular
 			 * vertical scanout pos.
 			 */
 			stat = radeon_get_crtc_scanoutpos(
-				dev, crtc, GET_DISTANCE_TO_VBLANKSTART,
+				dev, pipe, GET_DISTANCE_TO_VBLANKSTART,
 				&vpos, &hpos, NULL, NULL,
-				&rdev->mode_info.crtcs[crtc]->base.hwmode);
-		} while (count != radeon_get_vblank_counter(rdev, crtc));
+				&rdev->mode_info.crtcs[pipe]->base.hwmode);
+		} while (count != radeon_get_vblank_counter(rdev, pipe));
 
 		if (((stat & (DRM_SCANOUTPOS_VALID | DRM_SCANOUTPOS_ACCURATE)) !=
 		    (DRM_SCANOUTPOS_VALID | DRM_SCANOUTPOS_ACCURATE))) {
 			DRM_DEBUG_VBL("Query failed! stat %d\n", stat);
 		}
 		else {
-			DRM_DEBUG_VBL("crtc %d: dist from vblank start %d\n",
-				      crtc, vpos);
+			DRM_DEBUG_VBL("crtc %u: dist from vblank start %d\n",
+				      pipe, vpos);
 
 			/* Bump counter if we are at >= leading edge of vblank,
 			 * but before vsync where vpos would turn negative and
@@ -806,7 +813,7 @@ u32 radeon_get_vblank_counter_kms(struct drm_device *dev, int crtc)
 	}
 	else {
 	    /* Fallback to use value as is. */
-	    count = radeon_get_vblank_counter(rdev, crtc);
+	    count = radeon_get_vblank_counter(rdev, pipe);
 	    DRM_DEBUG_VBL("NULL mode info! Returned count may be wrong.\n");
 	}
 

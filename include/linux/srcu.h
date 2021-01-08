@@ -33,9 +33,9 @@
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
 
-struct srcu_struct_array {
-	unsigned long c[2];
-	unsigned long seq[2];
+struct srcu_array {
+	unsigned long lock_count[2];
+	unsigned long unlock_count[2];
 };
 
 struct rcu_batch {
@@ -46,7 +46,7 @@ struct rcu_batch {
 
 struct srcu_struct {
 	unsigned long completed;
-	struct srcu_struct_array __percpu *per_cpu_ref;
+	struct srcu_array __percpu *per_cpu_ref;
 	spinlock_t queue_lock; /* protect ->batch_queue, ->running */
 	bool running;
 	/* callbacks just queued */
@@ -99,11 +99,26 @@ void process_srcu(struct work_struct *work);
 	}
 
 /*
- * define and init a srcu struct at build time.
- * dont't call init_srcu_struct() nor cleanup_srcu_struct() on it.
+ * Define and initialize a srcu struct at build time.
+ * Do -not- call init_srcu_struct() nor cleanup_srcu_struct() on it.
+ *
+ * Note that although DEFINE_STATIC_SRCU() hides the name from other
+ * files, the per-CPU variable rules nevertheless require that the
+ * chosen name be globally unique.  These rules also prohibit use of
+ * DEFINE_STATIC_SRCU() within a function.  If these rules are too
+ * restrictive, declare the srcu_struct manually.  For example, in
+ * each file:
+ *
+ *	static struct srcu_struct my_srcu;
+ *
+ * Then, before the first use of each my_srcu, manually initialize it:
+ *
+ *	init_srcu_struct(&my_srcu);
+ *
+ * See include/linux/percpu-defs.h for the rules on per-CPU variables.
  */
 #define __DEFINE_SRCU(name, is_static)					\
-	static DEFINE_PER_CPU(struct srcu_struct_array, name##_srcu_array);\
+	static DEFINE_PER_CPU(struct srcu_array, name##_srcu_array);\
 	is_static struct srcu_struct name = __SRCU_STRUCT_INIT(name)
 #define DEFINE_SRCU(name)		__DEFINE_SRCU(name, /* not static */)
 #define DEFINE_STATIC_SRCU(name)	__DEFINE_SRCU(name, static)

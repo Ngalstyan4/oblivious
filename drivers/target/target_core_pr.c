@@ -29,6 +29,8 @@
 #include <linux/list.h>
 #include <linux/vmalloc.h>
 #include <linux/file.h>
+#include <linux/fcntl.h>
+#include <linux/fs.h>
 #include <scsi/scsi_proto.h>
 #include <asm/unaligned.h>
 
@@ -56,10 +58,8 @@ void core_pr_dump_initiator_port(
 	char *buf,
 	u32 size)
 {
-	if (!pr_reg->isid_present_at_reg) {
+	if (!pr_reg->isid_present_at_reg)
 		buf[0] = '\0';
-		return;
-	}
 
 	snprintf(buf, size, ",i,0x%s", pr_reg->pr_reg_isid);
 }
@@ -255,8 +255,7 @@ target_scsi2_reservation_reserve(struct se_cmd *cmd)
 
 	if ((cmd->t_task_cdb[1] & 0x01) &&
 	    (cmd->t_task_cdb[1] & 0x02)) {
-		pr_err("LongIO and Obselete Bits set, returning"
-				" ILLEGAL_REQUEST\n");
+		pr_err("LongIO and Obsolete Bits set, returning ILLEGAL_REQUEST\n");
 		return TCM_UNSUPPORTED_SCSI_OPCODE;
 	}
 	/*
@@ -789,7 +788,7 @@ static struct t10_pr_registration *__core_scsi3_alloc_registration(
 			 * __core_scsi3_add_registration()
 			 */
 			dest_lun = rcu_dereference_check(deve_tmp->se_lun,
-				atomic_read(&deve_tmp->pr_kref.refcount) != 0);
+				kref_read(&deve_tmp->pr_kref) != 0);
 
 			pr_reg_atp = __core_scsi3_do_alloc_registration(dev,
 						nacl_tmp, dest_lun, deve_tmp,
@@ -1459,18 +1458,14 @@ static void core_scsi3_nodeacl_undepend_item(struct se_node_acl *nacl)
 static int core_scsi3_lunacl_depend_item(struct se_dev_entry *se_deve)
 {
 	struct se_lun_acl *lun_acl;
-	struct se_node_acl *nacl;
-	struct se_portal_group *tpg;
+
 	/*
 	 * For nacl->dynamic_node_acl=1
 	 */
 	lun_acl = rcu_dereference_check(se_deve->se_lun_acl,
-				atomic_read(&se_deve->pr_kref.refcount) != 0);
+				kref_read(&se_deve->pr_kref) != 0);
 	if (!lun_acl)
 		return 0;
-
-	nacl = lun_acl->se_lun_nacl;
-	tpg = nacl->se_tpg;
 
 	return target_depend_item(&lun_acl->se_lun_group.cg_item);
 }
@@ -1478,19 +1473,16 @@ static int core_scsi3_lunacl_depend_item(struct se_dev_entry *se_deve)
 static void core_scsi3_lunacl_undepend_item(struct se_dev_entry *se_deve)
 {
 	struct se_lun_acl *lun_acl;
-	struct se_node_acl *nacl;
-	struct se_portal_group *tpg;
+
 	/*
 	 * For nacl->dynamic_node_acl=1
 	 */
 	lun_acl = rcu_dereference_check(se_deve->se_lun_acl,
-				atomic_read(&se_deve->pr_kref.refcount) != 0);
+				kref_read(&se_deve->pr_kref) != 0);
 	if (!lun_acl) {
 		kref_put(&se_deve->pr_kref, target_pr_kref_release);
 		return;
 	}
-	nacl = lun_acl->se_lun_nacl;
-	tpg = nacl->se_tpg;
 
 	target_undepend_item(&lun_acl->se_lun_group.cg_item);
 	kref_put(&se_deve->pr_kref, target_pr_kref_release);
@@ -1767,7 +1759,7 @@ core_scsi3_decode_spec_i_port(
 		 * 2nd loop which will never fail.
 		 */
 		dest_lun = rcu_dereference_check(dest_se_deve->se_lun,
-				atomic_read(&dest_se_deve->pr_kref.refcount) != 0);
+				kref_read(&dest_se_deve->pr_kref) != 0);
 
 		dest_pr_reg = __core_scsi3_alloc_registration(cmd->se_dev,
 					dest_node_acl, dest_lun, dest_se_deve,
@@ -1994,7 +1986,7 @@ static int __core_scsi3_write_aptpl_to_file(
 		return -EMSGSIZE;
 	}
 
-	snprintf(path, 512, "/var/target/pr/aptpl_%s", &wwn->unit_serial[0]);
+	snprintf(path, 512, "%s/pr/aptpl_%s", db_root, &wwn->unit_serial[0]);
 	file = filp_open(path, flags, 0600);
 	if (IS_ERR(file)) {
 		pr_err("filp_open(%s) for APTPL metadata"
@@ -3474,7 +3466,7 @@ after_iport_check:
 					iport_ptr);
 	if (!dest_pr_reg) {
 		struct se_lun *dest_lun = rcu_dereference_check(dest_se_deve->se_lun,
-				atomic_read(&dest_se_deve->pr_kref.refcount) != 0);
+				kref_read(&dest_se_deve->pr_kref) != 0);
 
 		spin_unlock(&dev->dev_reservation_lock);
 		if (core_scsi3_alloc_registration(cmd->se_dev, dest_node_acl,

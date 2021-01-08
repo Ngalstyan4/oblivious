@@ -909,7 +909,8 @@ int chsc_determine_channel_path_desc(struct chp_id chpid, int fmt, int rfmt,
 	struct chsc_scpd *scpd_area;
 	int ccode, ret;
 
-	if ((rfmt == 1) && !css_general_characteristics.fcs)
+	if ((rfmt == 1 || rfmt == 0) && c == 1 &&
+	    !css_general_characteristics.fcs)
 		return -EINVAL;
 	if ((rfmt == 2) && !css_general_characteristics.cib)
 		return -EINVAL;
@@ -941,7 +942,6 @@ EXPORT_SYMBOL_GPL(chsc_determine_channel_path_desc);
 int chsc_determine_base_channel_path_desc(struct chp_id chpid,
 					  struct channel_path_desc *desc)
 {
-	struct chsc_response_struct *chsc_resp;
 	struct chsc_scpd *scpd_area;
 	unsigned long flags;
 	int ret;
@@ -951,8 +951,8 @@ int chsc_determine_base_channel_path_desc(struct chp_id chpid,
 	ret = chsc_determine_channel_path_desc(chpid, 0, 0, 0, 0, scpd_area);
 	if (ret)
 		goto out;
-	chsc_resp = (void *)&scpd_area->response;
-	memcpy(desc, &chsc_resp->data, sizeof(*desc));
+
+	memcpy(desc, scpd_area->data, sizeof(*desc));
 out:
 	spin_unlock_irqrestore(&chsc_page_lock, flags);
 	return ret;
@@ -961,18 +961,17 @@ out:
 int chsc_determine_fmt1_channel_path_desc(struct chp_id chpid,
 					  struct channel_path_desc_fmt1 *desc)
 {
-	struct chsc_response_struct *chsc_resp;
 	struct chsc_scpd *scpd_area;
 	unsigned long flags;
 	int ret;
 
 	spin_lock_irqsave(&chsc_page_lock, flags);
 	scpd_area = chsc_page;
-	ret = chsc_determine_channel_path_desc(chpid, 0, 0, 1, 0, scpd_area);
+	ret = chsc_determine_channel_path_desc(chpid, 0, 1, 1, 0, scpd_area);
 	if (ret)
 		goto out;
-	chsc_resp = (void *)&scpd_area->response;
-	memcpy(desc, &chsc_resp->data, sizeof(*desc));
+
+	memcpy(desc, scpd_area->data, sizeof(*desc));
 out:
 	spin_unlock_irqrestore(&chsc_page_lock, flags);
 	return ret;
@@ -1023,7 +1022,7 @@ int chsc_get_channel_measurement_chars(struct channel_path *chp)
 	chp->cmg = -1;
 
 	if (!css_chsc_characteristics.scmc || !css_chsc_characteristics.secm)
-		return 0;
+		return -EINVAL;
 
 	spin_lock_irqsave(&chsc_page_lock, flags);
 	memset(chsc_page, 0, PAGE_SIZE);
@@ -1132,6 +1131,52 @@ int chsc_enable_facility(int operation_code)
 	return ret;
 }
 
+int __init chsc_get_cssid(int idx)
+{
+	struct {
+		struct chsc_header request;
+		u8 atype;
+		u32 : 24;
+		u32 reserved1[6];
+		struct chsc_header response;
+		u32 reserved2[3];
+		struct {
+			u8 cssid;
+			u32 : 24;
+		} list[0];
+	} __packed *sdcal_area;
+	int ret;
+
+	spin_lock_irq(&chsc_page_lock);
+	memset(chsc_page, 0, PAGE_SIZE);
+	sdcal_area = chsc_page;
+	sdcal_area->request.length = 0x0020;
+	sdcal_area->request.code = 0x0034;
+	sdcal_area->atype = 4;
+
+	ret = chsc(sdcal_area);
+	if (ret) {
+		ret = (ret == 3) ? -ENODEV : -EBUSY;
+		goto exit;
+	}
+
+	ret = chsc_error_from_response(sdcal_area->response.code);
+	if (ret) {
+		CIO_CRW_EVENT(2, "chsc: sdcal failed (rc=%04x)\n",
+			      sdcal_area->response.code);
+		goto exit;
+	}
+
+	if ((addr_t) &sdcal_area->list[idx] <
+	    (addr_t) &sdcal_area->response + sdcal_area->response.length)
+		ret = sdcal_area->list[idx].cssid;
+	else
+		ret = -ENODEV;
+exit:
+	spin_unlock_irq(&chsc_page_lock);
+	return ret;
+}
+
 struct css_general_char css_general_characteristics;
 struct css_chsc_char css_chsc_characteristics;
 
@@ -1180,7 +1225,7 @@ exit:
 EXPORT_SYMBOL_GPL(css_general_characteristics);
 EXPORT_SYMBOL_GPL(css_chsc_characteristics);
 
-int chsc_sstpc(void *page, unsigned int op, u16 ctrl)
+int chsc_sstpc(void *page, unsigned int op, u16 ctrl, u64 *clock_delta)
 {
 	struct {
 		struct chsc_header request;
@@ -1190,7 +1235,9 @@ int chsc_sstpc(void *page, unsigned int op, u16 ctrl)
 		unsigned int ctrl : 16;
 		unsigned int rsvd2[5];
 		struct chsc_header response;
-		unsigned int rsvd3[7];
+		unsigned int rsvd3[3];
+		u64 clock_delta;
+		unsigned int rsvd4[2];
 	} __attribute__ ((packed)) *rr;
 	int rc;
 
@@ -1204,6 +1251,8 @@ int chsc_sstpc(void *page, unsigned int op, u16 ctrl)
 	if (rc)
 		return -EIO;
 	rc = (rr->response.code == 0x0001) ? 0 : -EIO;
+	if (clock_delta)
+		*clock_delta = rr->clock_delta;
 	return rc;
 }
 
@@ -1213,7 +1262,7 @@ int chsc_sstpi(void *page, void *result, size_t size)
 		struct chsc_header request;
 		unsigned int rsvd0[3];
 		struct chsc_header response;
-		char data[size];
+		char data[];
 	} __attribute__ ((packed)) *rr;
 	int rc;
 

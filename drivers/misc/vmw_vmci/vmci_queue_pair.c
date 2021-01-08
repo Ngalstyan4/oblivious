@@ -728,7 +728,7 @@ static void qp_release_pages(struct page **pages,
 		if (dirty)
 			set_page_dirty(pages[i]);
 
-		page_cache_release(pages[i]);
+		put_page(pages[i]);
 		pages[i] = NULL;
 	}
 }
@@ -2928,7 +2928,7 @@ int vmci_qpair_get_produce_indexes(const struct vmci_qp *qpair,
 EXPORT_SYMBOL_GPL(vmci_qpair_get_produce_indexes);
 
 /*
- * vmci_qpair_get_consume_indexes() - Retrieves the indexes of the comsumer.
+ * vmci_qpair_get_consume_indexes() - Retrieves the indexes of the consumer.
  * @qpair:      Pointer to the queue pair struct.
  * @consumer_tail:      Reference used for storing consumer tail index.
  * @producer_head:      Reference used for storing the producer head index.

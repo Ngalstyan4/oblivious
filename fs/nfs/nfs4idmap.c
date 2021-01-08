@@ -201,7 +201,7 @@ int nfs_idmap_init(void)
 				GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, cred,
 				(KEY_POS_ALL & ~KEY_POS_SETATTR) |
 				KEY_USR_VIEW | KEY_USR_READ,
-				KEY_ALLOC_NOT_IN_QUOTA, NULL);
+				KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
 	if (IS_ERR(keyring)) {
 		ret = PTR_ERR(keyring);
 		goto failed_put_cred;
@@ -316,7 +316,7 @@ static ssize_t nfs_idmap_get_key(const char *name, size_t namelen,
 	if (ret < 0)
 		goto out_up;
 
-	payload = user_key_payload(rkey);
+	payload = user_key_payload_rcu(rkey);
 	if (IS_ERR_OR_NULL(payload)) {
 		ret = PTR_ERR(payload);
 		goto out_up;
@@ -567,13 +567,9 @@ static int nfs_idmap_legacy_upcall(struct key_construction *cons,
 	struct idmap_msg *im;
 	struct idmap *idmap = (struct idmap *)aux;
 	struct key *key = cons->key;
-	int ret = -ENOKEY;
-
-	if (!aux)
-		goto out1;
+	int ret = -ENOMEM;
 
 	/* msg and im are freed in idmap_pipe_destroy_msg */
-	ret = -ENOMEM;
 	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (!data)
 		goto out1;

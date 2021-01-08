@@ -54,6 +54,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/sched/mm.h>
 #include <linux/jiffies.h>
 #include <linux/slab.h>
 #include <linux/idr.h>
@@ -62,7 +63,7 @@
 #include <linux/export.h>
 #include <net/tcp.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "heartbeat.h"
 #include "tcp.h"
@@ -97,7 +98,7 @@
 	typeof(sc) __sc = (sc);						\
 	mlog(ML_SOCKET, "[sc %p refs %d sock %p node %u page %p "	\
 	     "pg_off %zu] " fmt, __sc,					\
-	     atomic_read(&__sc->sc_kref.refcount), __sc->sc_sock,	\
+	     kref_read(&__sc->sc_kref), __sc->sc_sock,	\
 	    __sc->sc_node->nd_num, __sc->sc_page, __sc->sc_page_off ,	\
 	    ##args);							\
 } while (0)
@@ -600,10 +601,11 @@ static void o2net_set_nn_state(struct o2net_node *nn,
 static void o2net_data_ready(struct sock *sk)
 {
 	void (*ready)(struct sock *sk);
+	struct o2net_sock_container *sc;
 
-	read_lock(&sk->sk_callback_lock);
-	if (sk->sk_user_data) {
-		struct o2net_sock_container *sc = sk->sk_user_data;
+	read_lock_bh(&sk->sk_callback_lock);
+	sc = sk->sk_user_data;
+	if (sc) {
 		sclog(sc, "data_ready hit\n");
 		o2net_set_data_ready_time(sc);
 		o2net_sc_queue_work(sc, &sc->sc_rx_work);
@@ -611,7 +613,7 @@ static void o2net_data_ready(struct sock *sk)
 	} else {
 		ready = sk->sk_data_ready;
 	}
-	read_unlock(&sk->sk_callback_lock);
+	read_unlock_bh(&sk->sk_callback_lock);
 
 	ready(sk);
 }
@@ -622,7 +624,7 @@ static void o2net_state_change(struct sock *sk)
 	void (*state_change)(struct sock *sk);
 	struct o2net_sock_container *sc;
 
-	read_lock(&sk->sk_callback_lock);
+	read_lock_bh(&sk->sk_callback_lock);
 	sc = sk->sk_user_data;
 	if (sc == NULL) {
 		state_change = sk->sk_state_change;
@@ -649,7 +651,7 @@ static void o2net_state_change(struct sock *sk)
 		break;
 	}
 out:
-	read_unlock(&sk->sk_callback_lock);
+	read_unlock_bh(&sk->sk_callback_lock);
 	state_change(sk);
 }
 
@@ -1617,16 +1619,12 @@ static void o2net_start_connect(struct work_struct *work)
 
 	/* watch for racing with tearing a node down */
 	node = o2nm_get_node_by_num(o2net_num_from_nn(nn));
-	if (node == NULL) {
-		ret = 0;
+	if (node == NULL)
 		goto out;
-	}
 
 	mynode = o2nm_get_node_by_num(o2nm_this_node());
-	if (mynode == NULL) {
-		ret = 0;
+	if (mynode == NULL)
 		goto out;
-	}
 
 	spin_lock(&nn->nn_lock);
 	/*
@@ -1865,7 +1863,7 @@ static int o2net_accept_one(struct socket *sock, int *more)
 
 	new_sock->type = sock->type;
 	new_sock->ops = sock->ops;
-	ret = sock->ops->accept(sock, new_sock, O_NONBLOCK);
+	ret = sock->ops->accept(sock, new_sock, O_NONBLOCK, false);
 	if (ret < 0)
 		goto out;
 
@@ -2012,7 +2010,7 @@ static void o2net_listen_data_ready(struct sock *sk)
 {
 	void (*ready)(struct sock *sk);
 
-	read_lock(&sk->sk_callback_lock);
+	read_lock_bh(&sk->sk_callback_lock);
 	ready = sk->sk_user_data;
 	if (ready == NULL) { /* check for teardown race */
 		ready = sk->sk_data_ready;
@@ -2039,7 +2037,7 @@ static void o2net_listen_data_ready(struct sock *sk)
 	}
 
 out:
-	read_unlock(&sk->sk_callback_lock);
+	read_unlock_bh(&sk->sk_callback_lock);
 	if (ready != NULL)
 		ready(sk);
 }
@@ -2107,7 +2105,7 @@ int o2net_start_listening(struct o2nm_node *node)
 	BUG_ON(o2net_listen_sock != NULL);
 
 	mlog(ML_KTHREAD, "starting o2net thread...\n");
-	o2net_wq = create_singlethread_workqueue("o2net");
+	o2net_wq = alloc_ordered_workqueue("o2net", WQ_MEM_RECLAIM);
 	if (o2net_wq == NULL) {
 		mlog(ML_ERROR, "unable to launch o2net thread\n");
 		return -ENOMEM; /* ? */

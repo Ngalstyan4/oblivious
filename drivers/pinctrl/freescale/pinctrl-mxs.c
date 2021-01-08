@@ -12,7 +12,6 @@
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/pinctrl/machine.h>
@@ -195,16 +194,6 @@ static int mxs_pinctrl_get_func_groups(struct pinctrl_dev *pctldev,
 	return 0;
 }
 
-static void mxs_pinctrl_rmwl(u32 value, u32 mask, u8 shift, void __iomem *reg)
-{
-	u32 tmp;
-
-	tmp = readl(reg);
-	tmp &= ~(mask << shift);
-	tmp |= value << shift;
-	writel(tmp, reg);
-}
-
 static int mxs_pinctrl_set_mux(struct pinctrl_dev *pctldev, unsigned selector,
 			       unsigned group)
 {
@@ -222,7 +211,8 @@ static int mxs_pinctrl_set_mux(struct pinctrl_dev *pctldev, unsigned selector,
 		reg += bank * 0x20 + pin / 16 * 0x10;
 		shift = pin % 16 * 2;
 
-		mxs_pinctrl_rmwl(g->muxsel[i], 0x3, shift, reg);
+		writel(0x3 << shift, reg + CLR);
+		writel(g->muxsel[i] << shift, reg + SET);
 	}
 
 	return 0;
@@ -289,7 +279,8 @@ static int mxs_pinconf_group_set(struct pinctrl_dev *pctldev,
 			/* mA */
 			if (config & MA_PRESENT) {
 				shift = pin % 8 * 4;
-				mxs_pinctrl_rmwl(ma, 0x3, shift, reg);
+				writel(0x3 << shift, reg + CLR);
+				writel(ma << shift, reg + SET);
 			}
 
 			/* vol */
@@ -561,14 +552,3 @@ err:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mxs_pinctrl_probe);
-
-int mxs_pinctrl_remove(struct platform_device *pdev)
-{
-	struct mxs_pinctrl_data *d = platform_get_drvdata(pdev);
-
-	pinctrl_unregister(d->pctl);
-	iounmap(d->base);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(mxs_pinctrl_remove);

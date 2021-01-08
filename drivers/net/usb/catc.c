@@ -42,7 +42,7 @@
 #include <linux/crc32.h>
 #include <linux/bitops.h>
 #include <linux/gfp.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #undef DEBUG
 
@@ -376,7 +376,7 @@ static int catc_tx_run(struct catc *catc)
 	catc->tx_idx = !catc->tx_idx;
 	catc->tx_ptr = 0;
 
-	catc->netdev->trans_start = jiffies;
+	netif_trans_update(catc->netdev);
 	return status;
 }
 
@@ -389,7 +389,7 @@ static void catc_tx_done(struct urb *urb)
 	if (status == -ECONNRESET) {
 		dev_dbg(&urb->dev->dev, "Tx Reset.\n");
 		urb->status = 0;
-		catc->netdev->trans_start = jiffies;
+		netif_trans_update(catc->netdev);
 		catc->netdev->stats.tx_errors++;
 		clear_bit(TX_RUNNING, &catc->flags);
 		netif_wake_queue(catc->netdev);
@@ -761,7 +761,6 @@ static const struct net_device_ops catc_netdev_ops = {
 
 	.ndo_tx_timeout		= catc_tx_timeout,
 	.ndo_set_rx_mode	= catc_set_multicast_list,
-	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_set_mac_address 	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 };

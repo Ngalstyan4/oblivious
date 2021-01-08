@@ -616,7 +616,6 @@ static u8 omap_w1_read_byte(void *_hdq)
 
 	hdq_disable_interrupt(hdq_data, OMAP_HDQ_CTRL_STATUS,
 			      ~OMAP_HDQ_CTRL_STATUS_INTERRUPTMASK);
-	hdq_data->hdq_usecount = 0;
 
 	/* Write followed by a read, release the module */
 	if (hdq_data->init_trans) {
@@ -716,7 +715,7 @@ static int omap_hdq_probe(struct platform_device *pdev)
 	ret = _omap_hdq_reset(hdq_data);
 	if (ret) {
 		dev_dbg(&pdev->dev, "reset failed\n");
-		return -EINVAL;
+		goto err_irq;
 	}
 
 	rev = hdq_reg_in(hdq_data, OMAP_HDQ_REVISION);

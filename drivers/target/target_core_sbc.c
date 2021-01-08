@@ -24,6 +24,7 @@
 #include <linux/module.h>
 #include <linux/ratelimit.h>
 #include <linux/crc-t10dif.h>
+#include <linux/t10-pi.h>
 #include <asm/unaligned.h>
 #include <scsi/scsi_proto.h>
 #include <scsi/scsi_tcq.h>
@@ -141,8 +142,16 @@ sbc_emulate_readcapacity_16(struct se_cmd *cmd)
 	 * Set Thin Provisioning Enable bit following sbc3r22 in section
 	 * READ CAPACITY (16) byte 14 if emulate_tpu or emulate_tpws is enabled.
 	 */
-	if (dev->dev_attrib.emulate_tpu || dev->dev_attrib.emulate_tpws)
+	if (dev->dev_attrib.emulate_tpu || dev->dev_attrib.emulate_tpws) {
 		buf[14] |= 0x80;
+
+		/*
+		 * LBPRZ signifies that zeroes will be read back from an LBA after
+		 * an UNMAP or WRITE SAME w/ unmap bit (sbc3r36 5.16.2)
+		 */
+		if (dev->dev_attrib.unmap_zeroes_data)
+			buf[14] |= 0x40;
+	}
 
 	rbuf = transport_kmap_data_sg(cmd);
 	if (rbuf) {
@@ -498,11 +507,8 @@ static sense_reason_t compare_and_write_callback(struct se_cmd *cmd, bool succes
 	 * been failed with a non-zero SCSI status.
 	 */
 	if (cmd->scsi_status) {
-		pr_debug("compare_and_write_callback: non zero scsi_status:"
+		pr_err("compare_and_write_callback: non zero scsi_status:"
 			" 0x%02x\n", cmd->scsi_status);
-		*post_ret = 1;
-		if (cmd->scsi_status == SAM_STAT_CHECK_CONDITION)
-			ret = TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
 		goto out;
 	}
 
@@ -598,7 +604,7 @@ static sense_reason_t compare_and_write_callback(struct se_cmd *cmd, bool succes
 
 	spin_lock_irq(&cmd->t_state_lock);
 	cmd->t_state = TRANSPORT_PROCESSING;
-	cmd->transport_state |= CMD_T_ACTIVE|CMD_T_BUSY|CMD_T_SENT;
+	cmd->transport_state |= CMD_T_ACTIVE | CMD_T_SENT;
 	spin_unlock_irq(&cmd->t_state_lock);
 
 	__target_execute_cmd(cmd, false);

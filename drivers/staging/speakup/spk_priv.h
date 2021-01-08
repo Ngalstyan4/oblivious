@@ -16,10 +16,6 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #ifndef _SPEAKUP_PRIVATE_H
 #define _SPEAKUP_PRIVATE_H
@@ -68,8 +64,8 @@ void spk_synth_flush(struct spk_synth *synth);
 int spk_synth_is_alive_nop(struct spk_synth *synth);
 int spk_synth_is_alive_restart(struct spk_synth *synth);
 void synth_printf(const char *buf, ...);
-int synth_request_region(u_long, u_long);
-int synth_release_region(u_long, u_long);
+int synth_request_region(unsigned long start, unsigned long n);
+int synth_release_region(unsigned long start, unsigned long n);
 int synth_add(struct spk_synth *in_synth);
 void synth_remove(struct spk_synth *in_synth);
 

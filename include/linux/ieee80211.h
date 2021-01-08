@@ -7,6 +7,7 @@
  * Copyright (c) 2005, Devicescape Software, Inc.
  * Copyright (c) 2006, Michael Wu <flamingice@sourmilk.net>
  * Copyright (c) 2013 - 2014 Intel Mobile Communications GmbH
+ * Copyright (c) 2016 Intel Deutschland GmbH
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -18,6 +19,7 @@
 
 #include <linux/types.h>
 #include <linux/if_ether.h>
+#include <linux/etherdevice.h>
 #include <asm/byteorder.h>
 #include <asm/unaligned.h>
 
@@ -163,6 +165,17 @@ static inline u16 ieee80211_sn_sub(u16 sn1, u16 sn2)
 /* 30 byte 4 addr hdr, 2 byte QoS, 2304 byte MSDU, 12 byte crypt, 4 byte FCS */
 #define IEEE80211_MAX_FRAME_LEN		2352
 
+/* Maximal size of an A-MSDU that can be transported in a HT BA session */
+#define IEEE80211_MAX_MPDU_LEN_HT_BA		4095
+
+/* Maximal size of an A-MSDU */
+#define IEEE80211_MAX_MPDU_LEN_HT_3839		3839
+#define IEEE80211_MAX_MPDU_LEN_HT_7935		7935
+
+#define IEEE80211_MAX_MPDU_LEN_VHT_3895		3895
+#define IEEE80211_MAX_MPDU_LEN_VHT_7991		7991
+#define IEEE80211_MAX_MPDU_LEN_VHT_11454	11454
+
 #define IEEE80211_MAX_SSID_LEN		32
 
 #define IEEE80211_MAX_MESH_ID_LEN	32
@@ -172,6 +185,8 @@ static inline u16 ieee80211_sn_sub(u16 sn1, u16 sn2)
 
 /* number of user priorities 802.11 uses */
 #define IEEE80211_NUM_UPS		8
+/* number of ACs */
+#define IEEE80211_NUM_ACS		4
 
 #define IEEE80211_QOS_CTL_LEN		2
 /* 1d tag mask */
@@ -629,6 +644,16 @@ static inline bool ieee80211_is_first_frag(__le16 seq_ctrl)
 	return (seq_ctrl & cpu_to_le16(IEEE80211_SCTL_FRAG)) == 0;
 }
 
+/**
+ * ieee80211_is_frag - check if a frame is a fragment
+ * @hdr: 802.11 header of the frame
+ */
+static inline bool ieee80211_is_frag(struct ieee80211_hdr *hdr)
+{
+	return ieee80211_has_morefrags(hdr->frame_control) ||
+	       hdr->seq_ctrl & cpu_to_le16(IEEE80211_SCTL_FRAG);
+}
+
 struct ieee80211s_hdr {
 	u8 flags;
 	u8 ttl;
@@ -843,6 +868,8 @@ enum ieee80211_vht_opmode_bits {
 };
 
 #define WLAN_SA_QUERY_TR_ID_LEN 2
+#define WLAN_MEMBERSHIP_LEN 8
+#define WLAN_USER_POSITION_LEN 16
 
 /**
  * struct ieee80211_tpc_report_ie
@@ -991,18 +1018,34 @@ struct ieee80211_mgmt {
 				} __packed vht_opmode_notif;
 				struct {
 					u8 action_code;
+					u8 membership[WLAN_MEMBERSHIP_LEN];
+					u8 position[WLAN_USER_POSITION_LEN];
+				} __packed vht_group_notif;
+				struct {
+					u8 action_code;
 					u8 dialog_token;
 					u8 tpc_elem_id;
 					u8 tpc_elem_length;
 					struct ieee80211_tpc_report_ie tpc;
 				} __packed tpc_report;
+				struct {
+					u8 action_code;
+					u8 dialog_token;
+					u8 follow_up;
+					u8 tod[6];
+					u8 toa[6];
+					__le16 tod_error;
+					__le16 toa_error;
+					u8 variable[0];
+				} __packed ftm;
 			} u;
 		} __packed action;
 	} u;
 } __packed __aligned(2);
 
-/* Supported Rates value encodings in 802.11n-2009 7.3.2.2 */
+/* Supported rates membership selectors */
 #define BSS_MEMBERSHIP_SELECTOR_HT_PHY	127
+#define BSS_MEMBERSHIP_SELECTOR_VHT_PHY	126
 
 /* mgmt header + 1 byte category code */
 #define IEEE80211_MIN_ACTION_SIZE offsetof(struct ieee80211_mgmt, u.action.u)
@@ -1498,6 +1541,7 @@ struct ieee80211_vht_operation {
 #define IEEE80211_VHT_CAP_MAX_MPDU_LENGTH_3895			0x00000000
 #define IEEE80211_VHT_CAP_MAX_MPDU_LENGTH_7991			0x00000001
 #define IEEE80211_VHT_CAP_MAX_MPDU_LENGTH_11454			0x00000002
+#define IEEE80211_VHT_CAP_MAX_MPDU_MASK				0x00000003
 #define IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160MHZ		0x00000004
 #define IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160_80PLUS80MHZ	0x00000008
 #define IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_MASK			0x0000000C
@@ -1535,6 +1579,9 @@ struct ieee80211_vht_operation {
 #define WLAN_AUTH_SHARED_KEY 1
 #define WLAN_AUTH_FT 2
 #define WLAN_AUTH_SAE 3
+#define WLAN_AUTH_FILS_SK 4
+#define WLAN_AUTH_FILS_SK_PFS 5
+#define WLAN_AUTH_FILS_PK 6
 #define WLAN_AUTH_LEAP 128
 
 #define WLAN_AUTH_CHALLENGE_LEN 128
@@ -1919,6 +1966,26 @@ enum ieee80211_eid {
 
 	WLAN_EID_VENDOR_SPECIFIC = 221,
 	WLAN_EID_QOS_PARAMETER = 222,
+	WLAN_EID_CAG_NUMBER = 237,
+	WLAN_EID_AP_CSN = 239,
+	WLAN_EID_FILS_INDICATION = 240,
+	WLAN_EID_DILS = 241,
+	WLAN_EID_FRAGMENT = 242,
+	WLAN_EID_EXTENSION = 255
+};
+
+/* Element ID Extensions for Element ID 255 */
+enum ieee80211_eid_ext {
+	WLAN_EID_EXT_ASSOC_DELAY_INFO = 1,
+	WLAN_EID_EXT_FILS_REQ_PARAMS = 2,
+	WLAN_EID_EXT_FILS_KEY_CONFIRM = 3,
+	WLAN_EID_EXT_FILS_SESSION = 4,
+	WLAN_EID_EXT_FILS_HLP_CONTAINER = 5,
+	WLAN_EID_EXT_FILS_IP_ADDR_ASSIGN = 6,
+	WLAN_EID_EXT_KEY_DELIVERY = 7,
+	WLAN_EID_EXT_FILS_WRAPPED_DATA = 8,
+	WLAN_EID_EXT_FILS_PUBLIC_KEY = 12,
+	WLAN_EID_EXT_FILS_NONCE = 13,
 };
 
 /* Action category code */
@@ -2032,6 +2099,9 @@ enum ieee80211_key_len {
 #define IEEE80211_GCMP_MIC_LEN		16
 #define IEEE80211_GCMP_PN_LEN		6
 
+#define FILS_NONCE_LEN			16
+#define FILS_MAX_KEK_LEN		64
+
 /* Public action codes */
 enum ieee80211_pub_actioncode {
 	WLAN_PUB_ACTION_EXT_CHANSW_ANN = 4,
@@ -2078,6 +2148,16 @@ enum ieee80211_tdls_actioncode {
 
 #define WLAN_EXT_CAPA8_TDLS_WIDE_BW_ENABLED	BIT(5)
 #define WLAN_EXT_CAPA8_OPMODE_NOTIF	BIT(6)
+
+/* Defines the maximal number of MSDUs in an A-MSDU. */
+#define WLAN_EXT_CAPA8_MAX_MSDU_IN_AMSDU_LSB	BIT(7)
+#define WLAN_EXT_CAPA9_MAX_MSDU_IN_AMSDU_MSB	BIT(0)
+
+/*
+ * Fine Timing Measurement Initiator - bit 71 of @WLAN_EID_EXT_CAPABILITY
+ * information element
+ */
+#define WLAN_EXT_CAPA9_FTM_INITIATOR	BIT(7)
 
 /* TDLS specific payload type in the LLC/SNAP header */
 #define WLAN_TDLS_SNAP_RFTYPE	0x2
@@ -2245,31 +2325,33 @@ enum ieee80211_sa_query_action {
 };
 
 
-/* cipher suite selectors */
-#define WLAN_CIPHER_SUITE_USE_GROUP	0x000FAC00
-#define WLAN_CIPHER_SUITE_WEP40		0x000FAC01
-#define WLAN_CIPHER_SUITE_TKIP		0x000FAC02
-/* reserved: 				0x000FAC03 */
-#define WLAN_CIPHER_SUITE_CCMP		0x000FAC04
-#define WLAN_CIPHER_SUITE_WEP104	0x000FAC05
-#define WLAN_CIPHER_SUITE_AES_CMAC	0x000FAC06
-#define WLAN_CIPHER_SUITE_GCMP		0x000FAC08
-#define WLAN_CIPHER_SUITE_GCMP_256	0x000FAC09
-#define WLAN_CIPHER_SUITE_CCMP_256	0x000FAC0A
-#define WLAN_CIPHER_SUITE_BIP_GMAC_128	0x000FAC0B
-#define WLAN_CIPHER_SUITE_BIP_GMAC_256	0x000FAC0C
-#define WLAN_CIPHER_SUITE_BIP_CMAC_256	0x000FAC0D
+#define SUITE(oui, id)	(((oui) << 8) | (id))
 
-#define WLAN_CIPHER_SUITE_SMS4		0x00147201
+/* cipher suite selectors */
+#define WLAN_CIPHER_SUITE_USE_GROUP	SUITE(0x000FAC, 0)
+#define WLAN_CIPHER_SUITE_WEP40		SUITE(0x000FAC, 1)
+#define WLAN_CIPHER_SUITE_TKIP		SUITE(0x000FAC, 2)
+/* reserved: 				SUITE(0x000FAC, 3) */
+#define WLAN_CIPHER_SUITE_CCMP		SUITE(0x000FAC, 4)
+#define WLAN_CIPHER_SUITE_WEP104	SUITE(0x000FAC, 5)
+#define WLAN_CIPHER_SUITE_AES_CMAC	SUITE(0x000FAC, 6)
+#define WLAN_CIPHER_SUITE_GCMP		SUITE(0x000FAC, 8)
+#define WLAN_CIPHER_SUITE_GCMP_256	SUITE(0x000FAC, 9)
+#define WLAN_CIPHER_SUITE_CCMP_256	SUITE(0x000FAC, 10)
+#define WLAN_CIPHER_SUITE_BIP_GMAC_128	SUITE(0x000FAC, 11)
+#define WLAN_CIPHER_SUITE_BIP_GMAC_256	SUITE(0x000FAC, 12)
+#define WLAN_CIPHER_SUITE_BIP_CMAC_256	SUITE(0x000FAC, 13)
+
+#define WLAN_CIPHER_SUITE_SMS4		SUITE(0x001472, 1)
 
 /* AKM suite selectors */
-#define WLAN_AKM_SUITE_8021X		0x000FAC01
-#define WLAN_AKM_SUITE_PSK		0x000FAC02
-#define WLAN_AKM_SUITE_8021X_SHA256	0x000FAC05
-#define WLAN_AKM_SUITE_PSK_SHA256	0x000FAC06
-#define WLAN_AKM_SUITE_TDLS		0x000FAC07
-#define WLAN_AKM_SUITE_SAE		0x000FAC08
-#define WLAN_AKM_SUITE_FT_OVER_SAE	0x000FAC09
+#define WLAN_AKM_SUITE_8021X		SUITE(0x000FAC, 1)
+#define WLAN_AKM_SUITE_PSK		SUITE(0x000FAC, 2)
+#define WLAN_AKM_SUITE_8021X_SHA256	SUITE(0x000FAC, 5)
+#define WLAN_AKM_SUITE_PSK_SHA256	SUITE(0x000FAC, 6)
+#define WLAN_AKM_SUITE_TDLS		SUITE(0x000FAC, 7)
+#define WLAN_AKM_SUITE_SAE		SUITE(0x000FAC, 8)
+#define WLAN_AKM_SUITE_FT_OVER_SAE	SUITE(0x000FAC, 9)
 
 #define WLAN_MAX_KEY_LEN		32
 
@@ -2414,7 +2496,7 @@ static inline bool _ieee80211_is_robust_mgmt_frame(struct ieee80211_hdr *hdr)
  */
 static inline bool ieee80211_is_robust_mgmt_frame(struct sk_buff *skb)
 {
-	if (skb->len < 25)
+	if (skb->len < IEEE80211_MIN_ACTION_SIZE)
 		return false;
 	return _ieee80211_is_robust_mgmt_frame((void *)skb->data);
 }
@@ -2434,6 +2516,35 @@ static inline bool ieee80211_is_public_action(struct ieee80211_hdr *hdr,
 	if (!ieee80211_is_action(hdr->frame_control))
 		return false;
 	return mgmt->u.action.category == WLAN_CATEGORY_PUBLIC;
+}
+
+/**
+ * _ieee80211_is_group_privacy_action - check if frame is a group addressed
+ * privacy action frame
+ * @hdr: the frame
+ */
+static inline bool _ieee80211_is_group_privacy_action(struct ieee80211_hdr *hdr)
+{
+	struct ieee80211_mgmt *mgmt = (void *)hdr;
+
+	if (!ieee80211_is_action(hdr->frame_control) ||
+	    !is_multicast_ether_addr(hdr->addr1))
+		return false;
+
+	return mgmt->u.action.category == WLAN_CATEGORY_MESH_ACTION ||
+	       mgmt->u.action.category == WLAN_CATEGORY_MULTIHOP_ACTION;
+}
+
+/**
+ * ieee80211_is_group_privacy_action - check if frame is a group addressed
+ * privacy action frame
+ * @skb: the skb containing the frame, length will be checked
+ */
+static inline bool ieee80211_is_group_privacy_action(struct sk_buff *skb)
+{
+	if (skb->len < IEEE80211_MIN_ACTION_SIZE)
+		return false;
+	return _ieee80211_is_group_privacy_action((void *)skb->data);
 }
 
 /**

@@ -29,6 +29,11 @@
 #endif
 
 #ifdef CONFIG_DYNAMIC_FTRACE
+#ifdef CONFIG_OLD_MCOUNT
+#define OLD_MCOUNT_ADDR	((unsigned long) mcount)
+#define OLD_FTRACE_ADDR ((unsigned long) ftrace_caller_old)
+
+#define	OLD_NOP		0xe1a00000	/* mov r0, r0 */
 
 static int __ftrace_modify_code(void *data)
 {
@@ -45,12 +50,6 @@ void arch_ftrace_update_code(int command)
 {
 	stop_machine(__ftrace_modify_code, &command, NULL);
 }
-
-#ifdef CONFIG_OLD_MCOUNT
-#define OLD_MCOUNT_ADDR	((unsigned long) mcount)
-#define OLD_FTRACE_ADDR ((unsigned long) ftrace_caller_old)
-
-#define	OLD_NOP		0xe1a00000	/* mov r0, r0 */
 
 static unsigned long ftrace_nop_replace(struct dyn_ftrace *rec)
 {
@@ -219,7 +218,7 @@ void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr,
 	}
 
 	err = ftrace_push_return_trace(old, self_addr, &trace.depth,
-				       frame_pointer);
+				       frame_pointer, NULL);
 	if (err == -EBUSY) {
 		*parent = old;
 		return;

@@ -82,6 +82,7 @@ static int pid[SNDRV_CARDS] = { [0 ... (SNDRV_CARDS-1)] = -1 };
 static int device_setup[SNDRV_CARDS]; /* device parameter for this card */
 static bool ignore_ctl_error;
 static bool autoclock = true;
+static char *quirk_alias[SNDRV_CARDS];
 
 module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for the USB audio adapter.");
@@ -100,6 +101,8 @@ MODULE_PARM_DESC(ignore_ctl_error,
 		 "Ignore errors from USB controller for mixer interfaces.");
 module_param(autoclock, bool, 0444);
 MODULE_PARM_DESC(autoclock, "Enable auto-clock selection for UAC2 devices (default: yes).");
+module_param_array(quirk_alias, charp, NULL, 0444);
+MODULE_PARM_DESC(quirk_alias, "Quirk aliases, e.g. 0123abcd:5678beef.");
 
 /*
  * we keep the snd_usb_audio_t instances by ourselves for merging
@@ -171,8 +174,9 @@ static int snd_usb_create_stream(struct snd_usb_audio *chip, int ctrlif, int int
 	if ((altsd->bInterfaceClass == USB_CLASS_AUDIO ||
 	     altsd->bInterfaceClass == USB_CLASS_VENDOR_SPEC) &&
 	    altsd->bInterfaceSubClass == USB_SUBCLASS_MIDISTREAMING) {
-		int err = snd_usbmidi_create(chip->card, iface,
-					     &chip->midi_list, NULL);
+		int err = __snd_usbmidi_create(chip->card, iface,
+					     &chip->midi_list, NULL,
+					     chip->usb_id);
 		if (err < 0) {
 			dev_err(&dev->dev,
 				"%u:%d: cannot create sequencer device\n",
@@ -217,7 +221,6 @@ static int snd_usb_create_streams(struct snd_usb_audio *chip, int ctrlif)
 	struct usb_interface_descriptor *altsd;
 	void *control_header;
 	int i, protocol;
-	int rest_bytes;
 
 	/* find audiocontrol interface */
 	host_iface = &usb_ifnum_to_if(dev, ctrlif)->altsetting[0];
@@ -232,15 +235,6 @@ static int snd_usb_create_streams(struct snd_usb_audio *chip, int ctrlif)
 		return -EINVAL;
 	}
 
-	rest_bytes = (void *)(host_iface->extra + host_iface->extralen) -
-		control_header;
-
-	/* just to be sure -- this shouldn't hit at all */
-	if (rest_bytes <= 0) {
-		dev_err(&dev->dev, "invalid control header\n");
-		return -EINVAL;
-	}
-
 	switch (protocol) {
 	default:
 		dev_warn(&dev->dev,
@@ -251,18 +245,8 @@ static int snd_usb_create_streams(struct snd_usb_audio *chip, int ctrlif)
 	case UAC_VERSION_1: {
 		struct uac1_ac_header_descriptor *h1 = control_header;
 
-		if (rest_bytes < sizeof(*h1)) {
-			dev_err(&dev->dev, "too short v1 buffer descriptor\n");
-			return -EINVAL;
-		}
-
 		if (!h1->bInCollection) {
 			dev_info(&dev->dev, "skipping empty audio interface (v1)\n");
-			return -EINVAL;
-		}
-
-		if (rest_bytes < h1->bLength) {
-			dev_err(&dev->dev, "invalid buffer length (v1)\n");
 			return -EINVAL;
 		}
 
@@ -330,6 +314,8 @@ static int snd_usb_audio_free(struct snd_usb_audio *chip)
 		snd_usb_endpoint_free(ep);
 
 	mutex_destroy(&chip->mutex);
+	if (!atomic_read(&chip->shutdown))
+		dev_set_drvdata(&chip->dev->dev, NULL);
 	kfree(chip);
 	return 0;
 }
@@ -364,6 +350,7 @@ static int snd_usb_audio_create(struct usb_interface *intf,
 	case USB_SPEED_HIGH:
 	case USB_SPEED_WIRELESS:
 	case USB_SPEED_SUPER:
+	case USB_SPEED_SUPER_PLUS:
 		break;
 	default:
 		dev_err(&dev->dev, "unknown device speed %d\n", snd_usb_get_speed(dev));
@@ -464,6 +451,9 @@ static int snd_usb_audio_create(struct usb_interface *intf,
 	case USB_SPEED_SUPER:
 		strlcat(card->longname, ", super speed", sizeof(card->longname));
 		break;
+	case USB_SPEED_SUPER_PLUS:
+		strlcat(card->longname, ", super speed plus", sizeof(card->longname));
+		break;
 	default:
 		break;
 	}
@@ -472,6 +462,48 @@ static int snd_usb_audio_create(struct usb_interface *intf,
 
 	*rchip = chip;
 	return 0;
+}
+
+/* look for a matching quirk alias id */
+static bool get_alias_id(struct usb_device *dev, unsigned int *id)
+{
+	int i;
+	unsigned int src, dst;
+
+	for (i = 0; i < ARRAY_SIZE(quirk_alias); i++) {
+		if (!quirk_alias[i] ||
+		    sscanf(quirk_alias[i], "%x:%x", &src, &dst) != 2 ||
+		    src != *id)
+			continue;
+		dev_info(&dev->dev,
+			 "device (%04x:%04x): applying quirk alias %04x:%04x\n",
+			 USB_ID_VENDOR(*id), USB_ID_PRODUCT(*id),
+			 USB_ID_VENDOR(dst), USB_ID_PRODUCT(dst));
+		*id = dst;
+		return true;
+	}
+
+	return false;
+}
+
+static struct usb_device_id usb_audio_ids[]; /* defined below */
+
+/* look for the corresponding quirk */
+static const struct snd_usb_audio_quirk *
+get_alias_quirk(struct usb_device *dev, unsigned int id)
+{
+	const struct usb_device_id *p;
+
+	for (p = usb_audio_ids; p->match_flags; p++) {
+		/* FIXME: this checks only vendor:product pair in the list */
+		if ((p->match_flags & USB_DEVICE_ID_MATCH_DEVICE) ==
+		    USB_DEVICE_ID_MATCH_DEVICE &&
+		    p->idVendor == USB_ID_VENDOR(id) &&
+		    p->idProduct == USB_ID_PRODUCT(id))
+			return (const struct snd_usb_audio_quirk *)p->driver_info;
+	}
+
+	return NULL;
 }
 
 /*
@@ -500,10 +532,12 @@ static int usb_audio_probe(struct usb_interface *intf,
 	ifnum = get_iface_desc(alts)->bInterfaceNumber;
 	id = USB_ID(le16_to_cpu(dev->descriptor.idVendor),
 		    le16_to_cpu(dev->descriptor.idProduct));
+	if (get_alias_id(dev, &id))
+		quirk = get_alias_quirk(dev, id);
 	if (quirk && quirk->ifnum >= 0 && ifnum != quirk->ifnum)
 		return -ENXIO;
 
-	err = snd_usb_apply_boot_quirk(dev, intf, quirk);
+	err = snd_usb_apply_boot_quirk(dev, intf, quirk, id);
 	if (err < 0)
 		return err;
 
@@ -547,6 +581,7 @@ static int usb_audio_probe(struct usb_interface *intf,
 			goto __error;
 		}
 	}
+	dev_set_drvdata(&dev->dev, chip);
 
 	/*
 	 * For devices with more than one control interface, we assume the

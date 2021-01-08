@@ -16,6 +16,7 @@
 #include <linux/kmod.h>
 #include <linux/ctype.h>
 #include <linux/genhd.h>
+#include <linux/dax.h>
 #include <linux/blktrace_api.h>
 
 #include "partitions/check.h"
@@ -216,10 +217,21 @@ static void part_release(struct device *dev)
 	kfree(p);
 }
 
+static int part_uevent(struct device *dev, struct kobj_uevent_env *env)
+{
+	struct hd_struct *part = dev_to_part(dev);
+
+	add_uevent_var(env, "PARTN=%u", part->partno);
+	if (part->info && part->info->volname[0])
+		add_uevent_var(env, "PARTNAME=%s", part->info->volname);
+	return 0;
+}
+
 struct device_type part_type = {
 	.name		= "partition",
 	.groups		= part_attr_groups,
 	.release	= part_release,
+	.uevent		= part_uevent,
 };
 
 static void delete_partition_rcu_cb(struct rcu_head *head)
@@ -418,6 +430,56 @@ static int drop_partitions(struct gendisk *disk, struct block_device *bdev)
 	return 0;
 }
 
+static bool part_zone_aligned(struct gendisk *disk,
+			      struct block_device *bdev,
+			      sector_t from, sector_t size)
+{
+	unsigned int zone_sectors = bdev_zone_sectors(bdev);
+
+	/*
+	 * If this function is called, then the disk is a zoned block device
+	 * (host-aware or host-managed). This can be detected even if the
+	 * zoned block device support is disabled (CONFIG_BLK_DEV_ZONED not
+	 * set). In this case, however, only host-aware devices will be seen
+	 * as a block device is not created for host-managed devices. Without
+	 * zoned block device support, host-aware drives can still be used as
+	 * regular block devices (no zone operation) and their zone size will
+	 * be reported as 0. Allow this case.
+	 */
+	if (!zone_sectors)
+		return true;
+
+	/*
+	 * Check partition start and size alignement. If the drive has a
+	 * smaller last runt zone, ignore it and allow the partition to
+	 * use it. Check the zone size too: it should be a power of 2 number
+	 * of sectors.
+	 */
+	if (WARN_ON_ONCE(!is_power_of_2(zone_sectors))) {
+		u32 rem;
+
+		div_u64_rem(from, zone_sectors, &rem);
+		if (rem)
+			return false;
+		if ((from + size) < get_capacity(disk)) {
+			div_u64_rem(size, zone_sectors, &rem);
+			if (rem)
+				return false;
+		}
+
+	} else {
+
+		if (from & (zone_sectors - 1))
+			return false;
+		if ((from + size) < get_capacity(disk) &&
+		    (size & (zone_sectors - 1)))
+			return false;
+
+	}
+
+	return true;
+}
+
 int rescan_partitions(struct gendisk *disk, struct block_device *bdev)
 {
 	struct parsed_partitions *state = NULL;
@@ -435,6 +497,7 @@ rescan:
 
 	if (disk->fops->revalidate_disk)
 		disk->fops->revalidate_disk(disk);
+	blk_integrity_revalidate(disk);
 	check_disk_size_change(disk, bdev);
 	bdev->bd_invalidated = 0;
 	if (!get_capacity(disk) || !(state = check_partition(disk, bdev)))
@@ -482,7 +545,6 @@ rescan:
 	/* add partitions */
 	for (p = 1; p < state->limit; p++) {
 		sector_t size, from;
-		struct partition_meta_info *info = NULL;
 
 		size = state->parts[p].size;
 		if (!size)
@@ -517,8 +579,21 @@ rescan:
 			}
 		}
 
-		if (state->parts[p].has_info)
-			info = &state->parts[p].info;
+		/*
+		 * On a zoned block device, partitions should be aligned on the
+		 * device zone size (i.e. zone boundary crossing not allowed).
+		 * Otherwise, resetting the write pointer of the last zone of
+		 * one partition may impact the following partition.
+		 */
+		if (bdev_is_zoned(bdev) &&
+		    !part_zone_aligned(disk, bdev, from, size)) {
+			printk(KERN_WARNING
+			       "%s: p%d start %llu+%llu is not zone aligned\n",
+			       disk->disk_name, p, (unsigned long long) from,
+			       (unsigned long long) size);
+			continue;
+		}
+
 		part = add_partition(disk, p, from, size,
 				     state->parts[p].flags,
 				     &state->parts[p].info);
@@ -556,20 +631,31 @@ int invalidate_partitions(struct gendisk *disk, struct block_device *bdev)
 	return 0;
 }
 
-unsigned char *read_dev_sector(struct block_device *bdev, sector_t n, Sector *p)
+static struct page *read_pagecache_sector(struct block_device *bdev, sector_t n)
 {
 	struct address_space *mapping = bdev->bd_inode->i_mapping;
+
+	return read_mapping_page(mapping, (pgoff_t)(n >> (PAGE_SHIFT-9)),
+				 NULL);
+}
+
+unsigned char *read_dev_sector(struct block_device *bdev, sector_t n, Sector *p)
+{
 	struct page *page;
 
-	page = read_mapping_page(mapping, (pgoff_t)(n >> (PAGE_CACHE_SHIFT-9)),
-				 NULL);
+	/* don't populate page cache for dax capable devices */
+	if (IS_DAX(bdev->bd_inode))
+		page = read_dax_sector(bdev, n);
+	else
+		page = read_pagecache_sector(bdev, n);
+
 	if (!IS_ERR(page)) {
 		if (PageError(page))
 			goto fail;
 		p->v = page;
-		return (unsigned char *)page_address(page) +  ((n & ((1 << (PAGE_CACHE_SHIFT - 9)) - 1)) << 9);
+		return (unsigned char *)page_address(page) +  ((n & ((1 << (PAGE_SHIFT - 9)) - 1)) << 9);
 fail:
-		page_cache_release(page);
+		put_page(page);
 	}
 	p->v = NULL;
 	return NULL;

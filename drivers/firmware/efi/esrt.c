@@ -16,6 +16,7 @@
 #include <linux/device.h>
 #include <linux/efi.h>
 #include <linux/init.h>
+#include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/kobject.h>
 #include <linux/list.h>
@@ -105,7 +106,7 @@ static const struct sysfs_ops esre_attr_ops = {
 };
 
 /* Generic ESRT Entry ("ESRE") support. */
-static ssize_t fw_class_show(struct esre_entry *entry, char *buf)
+static ssize_t esre_fw_class_show(struct esre_entry *entry, char *buf)
 {
 	char *str = buf;
 
@@ -116,16 +117,18 @@ static ssize_t fw_class_show(struct esre_entry *entry, char *buf)
 	return str - buf;
 }
 
-static struct esre_attribute esre_fw_class = __ATTR_RO_MODE(fw_class, 0400);
+static struct esre_attribute esre_fw_class = __ATTR(fw_class, 0400,
+	esre_fw_class_show, NULL);
 
 #define esre_attr_decl(name, size, fmt) \
-static ssize_t name##_show(struct esre_entry *entry, char *buf) \
+static ssize_t esre_##name##_show(struct esre_entry *entry, char *buf) \
 { \
 	return sprintf(buf, fmt "\n", \
 		       le##size##_to_cpu(entry->esre.esre1->name)); \
 } \
 \
-static struct esre_attribute esre_##name = __ATTR_RO_MODE(name, 0400)
+static struct esre_attribute esre_##name = __ATTR(name, 0400, \
+	esre_##name##_show, NULL)
 
 esre_attr_decl(fw_type, 32, "%u");
 esre_attr_decl(fw_version, 32, "%u");
@@ -165,13 +168,10 @@ static struct kset *esrt_kset;
 static int esre_create_sysfs_entry(void *esre, int entry_num)
 {
 	struct esre_entry *entry;
-	char name[20];
 
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry)
 		return -ENOMEM;
-
-	sprintf(name, "entry%d", entry_num);
 
 	entry->kobj.kset = esrt_kset;
 
@@ -180,7 +180,7 @@ static int esre_create_sysfs_entry(void *esre, int entry_num)
 
 		entry->esre.esre1 = esre;
 		rc = kobject_init_and_add(&entry->kobj, &esre1_ktype, NULL,
-					  "%s", name);
+					  "entry%d", entry_num);
 		if (rc) {
 			kfree(entry);
 			return rc;
@@ -193,13 +193,14 @@ static int esre_create_sysfs_entry(void *esre, int entry_num)
 
 /* support for displaying ESRT fields at the top level */
 #define esrt_attr_decl(name, size, fmt) \
-static ssize_t name##_show(struct kobject *kobj, \
+static ssize_t esrt_##name##_show(struct kobject *kobj, \
 				  struct kobj_attribute *attr, char *buf)\
 { \
 	return sprintf(buf, fmt "\n", le##size##_to_cpu(esrt->name)); \
 } \
 \
-static struct kobj_attribute esrt_##name = __ATTR_RO_MODE(name, 0400)
+static struct kobj_attribute esrt_##name = __ATTR(name, 0400, \
+	esrt_##name##_show, NULL)
 
 esrt_attr_decl(fw_resource_count, 32, "%u");
 esrt_attr_decl(fw_resource_count_max, 32, "%u");
@@ -235,7 +236,7 @@ static struct attribute_group esrt_attr_group = {
 };
 
 /*
- * remap the table, copy it to kmalloced pages, and unmap it.
+ * remap the table, validate it, mark it reserved and unmap it.
  */
 void __init efi_esrt_init(void)
 {
@@ -268,7 +269,7 @@ void __init efi_esrt_init(void)
 	max -= efi.esrt;
 
 	if (max < size) {
-		pr_err("ESRT header doen't fit on single memory map entry. (size: %zu max: %zu)\n",
+		pr_err("ESRT header doesn't fit on single memory map entry. (size: %zu max: %zu)\n",
 		       size, max);
 		return;
 	}
@@ -335,7 +336,7 @@ void __init efi_esrt_init(void)
 
 	end = esrt_data + size;
 	pr_info("Reserving ESRT space from %pa to %pa.\n", &esrt_data, &end);
-	memblock_reserve(esrt_data, esrt_data_size);
+	efi_mem_reserve(esrt_data, esrt_data_size);
 
 	pr_debug("esrt-init: loaded.\n");
 err_memunmap:
@@ -382,27 +383,17 @@ static void cleanup_entry_list(void)
 static int __init esrt_sysfs_init(void)
 {
 	int error;
-	struct efi_system_resource_table __iomem *ioesrt;
 
 	pr_debug("esrt-sysfs: loading.\n");
 	if (!esrt_data || !esrt_data_size)
 		return -ENOSYS;
 
-	ioesrt = ioremap(esrt_data, esrt_data_size);
-	if (!ioesrt) {
-		pr_err("ioremap(%pa, %zu) failed.\n", &esrt_data,
+	esrt = memremap(esrt_data, esrt_data_size, MEMREMAP_WB);
+	if (!esrt) {
+		pr_err("memremap(%pa, %zu) failed.\n", &esrt_data,
 		       esrt_data_size);
 		return -ENOMEM;
 	}
-
-	esrt = kmalloc(esrt_data_size, GFP_KERNEL);
-	if (!esrt) {
-		pr_err("kmalloc failed. (wanted %zu bytes)\n", esrt_data_size);
-		iounmap(ioesrt);
-		return -ENOMEM;
-	}
-
-	memcpy_fromio(esrt, ioesrt, esrt_data_size);
 
 	esrt_kobj = kobject_create_and_add("esrt", efi_kobj);
 	if (!esrt_kobj) {
@@ -428,8 +419,6 @@ static int __init esrt_sysfs_init(void)
 	error = register_entries();
 	if (error)
 		goto err_cleanup_list;
-
-	memblock_remove(esrt_data, esrt_data_size);
 
 	pr_debug("esrt-sysfs: loaded.\n");
 

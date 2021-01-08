@@ -16,6 +16,7 @@
 #include <linux/parser.h>
 #include <linux/magic.h>
 #include <linux/sched.h>
+#include <linux/cred.h>
 #include <linux/slab.h>
 #include <linux/writeback.h>
 #include <linux/blkdev.h>
@@ -32,7 +33,7 @@ affs_commit_super(struct super_block *sb, int wait)
 	struct affs_root_tail *tail = AFFS_ROOT_TAIL(sb, bh);
 
 	lock_buffer(bh);
-	secs_to_datestamp(get_seconds(), &tail->disk_change);
+	affs_secs_to_datestamp(ktime_get_real_seconds(), &tail->disk_change);
 	affs_fix_checksum(sb, bh);
 	unlock_buffer(bh);
 
@@ -132,7 +133,7 @@ static int __init init_inodecache(void)
 	affs_inode_cachep = kmem_cache_create("affs_inode_cache",
 					     sizeof(struct affs_inode_info),
 					     0, (SLAB_RECLAIM_ACCOUNT|
-						SLAB_MEM_SPREAD),
+						SLAB_MEM_SPREAD|SLAB_ACCOUNT),
 					     init_once);
 	if (affs_inode_cachep == NULL)
 		return -ENOMEM;
@@ -507,6 +508,7 @@ got_root:
 		return -ENOMEM;
 	}
 
+	sb->s_export_op = &affs_export_ops;
 	pr_debug("s_flags=%lX\n", sb->s_flags);
 	return 0;
 }

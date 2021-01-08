@@ -3,7 +3,7 @@
  *
  *  Copyright (C) 2008  Qumranet, Inc.
  *  Copyright (C) 2008  SGI
- *             Christoph Lameter <clameter@sgi.com>
+ *             Christoph Lameter <cl@linux.com>
  *
  *  This work is licensed under the terms of the GNU GPL, version 2. See
  *  the COPYING file in the top-level directory.
@@ -17,6 +17,7 @@
 #include <linux/srcu.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
+#include <linux/sched/mm.h>
 #include <linux/slab.h>
 
 /* global SRCU for all MMs */
@@ -275,7 +276,7 @@ static int do_mmu_notifier_register(struct mmu_notifier *mn,
 		mm->mmu_notifier_mm = mmu_notifier_mm;
 		mmu_notifier_mm = NULL;
 	}
-	atomic_inc(&mm->mm_count);
+	mmgrab(mm);
 
 	/*
 	 * Serialize the update against mmu_notifier_unregister. A

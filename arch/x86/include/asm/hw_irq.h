@@ -130,6 +130,11 @@ struct irq_alloc_info {
 			char		*uv_name;
 		};
 #endif
+#if IS_ENABLED(CONFIG_VMD)
+		struct {
+			struct msi_desc *desc;
+		};
+#endif
 	};
 };
 
@@ -164,20 +169,6 @@ extern atomic_t irq_mis_count;
 
 extern void elcr_set_level_irq(unsigned int irq);
 
-/* SMP */
-extern __visible void smp_apic_timer_interrupt(struct pt_regs *);
-extern __visible void smp_spurious_interrupt(struct pt_regs *);
-extern __visible void smp_x86_platform_ipi(struct pt_regs *);
-extern __visible void smp_error_interrupt(struct pt_regs *);
-#ifdef CONFIG_X86_IO_APIC
-extern asmlinkage void smp_irq_move_cleanup_interrupt(void);
-#endif
-#ifdef CONFIG_SMP
-extern __visible void smp_reschedule_interrupt(struct pt_regs *);
-extern __visible void smp_call_function_interrupt(struct pt_regs *);
-extern __visible void smp_call_function_single_interrupt(struct pt_regs *);
-#endif
-
 extern char irq_entries_start[];
 #ifdef CONFIG_TRACING
 #define trace_irq_entries_start irq_entries_start
@@ -187,7 +178,7 @@ extern char irq_entries_start[];
 #define VECTOR_RETRIGGERED	((void *)~0UL)
 
 typedef struct irq_desc* vector_irq_t[NR_VECTORS];
-DECLARE_PER_CPU_USER_MAPPED(vector_irq_t, vector_irq);
+DECLARE_PER_CPU(vector_irq_t, vector_irq);
 
 #endif /* !ASSEMBLY_ */
 

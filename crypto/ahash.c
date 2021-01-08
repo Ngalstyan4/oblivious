@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/seq_file.h>
 #include <linux/cryptouser.h>
+#include <linux/compiler.h>
 #include <net/netlink.h>
 
 #include "internal.h"
@@ -167,24 +168,6 @@ int crypto_ahash_walk_first(struct ahash_request *req,
 	return hash_walk_new_entry(walk);
 }
 EXPORT_SYMBOL_GPL(crypto_ahash_walk_first);
-
-int crypto_hash_walk_first_compat(struct hash_desc *hdesc,
-				  struct crypto_hash_walk *walk,
-				  struct scatterlist *sg, unsigned int len)
-{
-	walk->total = len;
-
-	if (!walk->total) {
-		walk->entrylen = 0;
-		return 0;
-	}
-
-	walk->alignmask = crypto_hash_alignmask(hdesc->tfm);
-	walk->sg = sg;
-	walk->flags = hdesc->flags & CRYPTO_TFM_REQ_MASK;
-
-	return hash_walk_new_entry(walk);
-}
 
 static int ahash_setkey_unaligned(struct crypto_ahash *tfm, const u8 *key,
 				unsigned int keylen)
@@ -500,10 +483,10 @@ static int crypto_ahash_init_tfm(struct crypto_tfm *tfm)
 
 static unsigned int crypto_ahash_extsize(struct crypto_alg *alg)
 {
-	if (alg->cra_type == &crypto_ahash_type)
-		return alg->cra_ctxsize;
+	if (alg->cra_type != &crypto_ahash_type)
+		return sizeof(struct crypto_shash *);
 
-	return sizeof(struct crypto_shash *);
+	return crypto_alg_extsize(alg);
 }
 
 #ifdef CONFIG_NET
@@ -532,7 +515,7 @@ static int crypto_ahash_report(struct sk_buff *skb, struct crypto_alg *alg)
 #endif
 
 static void crypto_ahash_show(struct seq_file *m, struct crypto_alg *alg)
-	__attribute__ ((unused));
+	__maybe_unused;
 static void crypto_ahash_show(struct seq_file *m, struct crypto_alg *alg)
 {
 	seq_printf(m, "type         : ahash\n");
@@ -563,6 +546,12 @@ struct crypto_ahash *crypto_alloc_ahash(const char *alg_name, u32 type,
 	return crypto_alloc_tfm(alg_name, &crypto_ahash_type, type, mask);
 }
 EXPORT_SYMBOL_GPL(crypto_alloc_ahash);
+
+int crypto_has_ahash(const char *alg_name, u32 type, u32 mask)
+{
+	return crypto_type_has_alg(alg_name, &crypto_ahash_type, type, mask);
+}
+EXPORT_SYMBOL_GPL(crypto_has_ahash);
 
 static int ahash_prepare_alg(struct ahash_alg *alg)
 {
@@ -636,17 +625,6 @@ struct hash_alg_common *ahash_attr_alg(struct rtattr *rta, u32 type, u32 mask)
 	return IS_ERR(alg) ? ERR_CAST(alg) : __crypto_hash_alg_common(alg);
 }
 EXPORT_SYMBOL_GPL(ahash_attr_alg);
-
-bool crypto_hash_alg_has_setkey(struct hash_alg_common *halg)
-{
-	struct crypto_alg *alg = &halg->base;
-
-	if (alg->cra_type != &crypto_ahash_type)
-		return crypto_shash_alg_has_setkey(__crypto_shash_alg(alg));
-
-	return __crypto_ahash_alg(alg)->setkey != NULL;
-}
-EXPORT_SYMBOL_GPL(crypto_hash_alg_has_setkey);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Asynchronous cryptographic hash type");

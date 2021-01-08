@@ -14,8 +14,8 @@
 #include <linux/fs.h>
 #include <linux/platform_device.h>
 #include <linux/irq.h>
+#include <linux/gpio.h>
 
-#include <asm/gpio.h>
 #include <asm/io.h>
 
 #include <mach/portmux.h>
@@ -203,7 +203,7 @@ fail:
 
 static int direction_input(struct gpio_chip *chip, unsigned offset)
 {
-	struct pio_device *pio = container_of(chip, struct pio_device, chip);
+	struct pio_device *pio = gpiochip_get_data(chip);
 	u32 mask = 1 << offset;
 
 	if (!(pio_readl(pio, PSR) & mask))
@@ -215,7 +215,7 @@ static int direction_input(struct gpio_chip *chip, unsigned offset)
 
 static int gpio_get(struct gpio_chip *chip, unsigned offset)
 {
-	struct pio_device *pio = container_of(chip, struct pio_device, chip);
+	struct pio_device *pio = gpiochip_get_data(chip);
 
 	return (pio_readl(pio, PDSR) >> offset) & 1;
 }
@@ -224,7 +224,7 @@ static void gpio_set(struct gpio_chip *chip, unsigned offset, int value);
 
 static int direction_output(struct gpio_chip *chip, unsigned offset, int value)
 {
-	struct pio_device *pio = container_of(chip, struct pio_device, chip);
+	struct pio_device *pio = gpiochip_get_data(chip);
 	u32 mask = 1 << offset;
 
 	if (!(pio_readl(pio, PSR) & mask))
@@ -237,7 +237,7 @@ static int direction_output(struct gpio_chip *chip, unsigned offset, int value)
 
 static void gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 {
-	struct pio_device *pio = container_of(chip, struct pio_device, chip);
+	struct pio_device *pio = gpiochip_get_data(chip);
 	u32 mask = 1 << offset;
 
 	if (value)
@@ -335,7 +335,7 @@ gpio_irq_setup(struct pio_device *pio, int irq, int gpio_irq)
  */
 static void pio_bank_show(struct seq_file *s, struct gpio_chip *chip)
 {
-	struct pio_device *pio = container_of(chip, struct pio_device, chip);
+	struct pio_device *pio = gpiochip_get_data(chip);
 	u32			psr, osr, imr, pdsr, pusr, ifsr, mdsr;
 	unsigned		i;
 	u32			mask;
@@ -367,13 +367,13 @@ static void pio_bank_show(struct seq_file *s, struct gpio_chip *chip)
 			(mask & pdsr) ? "hi" : "lo",
 			(mask & pusr) ? "  " : "up");
 		if (ifsr & mask)
-			seq_printf(s, " deglitch");
+			seq_puts(s, " deglitch");
 		if ((osr & mdsr) & mask)
-			seq_printf(s, " open-drain");
+			seq_puts(s, " open-drain");
 		if (imr & mask)
 			seq_printf(s, " irq-%d edge-both",
 				gpio_to_irq(chip->base + i));
-		seq_printf(s, "\n");
+		seq_putc(s, '\n');
 	}
 }
 
@@ -397,7 +397,7 @@ static int __init pio_probe(struct platform_device *pdev)
 	pio->chip.label = pio->name;
 	pio->chip.base = pdev->id * 32;
 	pio->chip.ngpio = 32;
-	pio->chip.dev = &pdev->dev;
+	pio->chip.parent = &pdev->dev;
 	pio->chip.owner = THIS_MODULE;
 
 	pio->chip.direction_input = direction_input;
@@ -406,7 +406,7 @@ static int __init pio_probe(struct platform_device *pdev)
 	pio->chip.set = gpio_set;
 	pio->chip.dbg_show = pio_bank_show;
 
-	gpiochip_add(&pio->chip);
+	gpiochip_add_data(&pio->chip, pio);
 
 	gpio_irq_setup(pio, irq, gpio_irq_base);
 

@@ -45,6 +45,7 @@
 #include <linux/kernel.h>
 #include <linux/bug.h>
 #include <linux/sched.h>
+#include <linux/rculist.h>
 
 extern const struct bug_entry __start___bug_table[], __stop___bug_table[];
 
@@ -167,19 +168,8 @@ enum bug_trap_type report_bug(unsigned long bugaddr, struct pt_regs *regs)
 
 	if (warning) {
 		/* this is a WARN_ON rather than BUG/BUG_ON */
-		pr_warn("------------[ cut here ]------------\n");
-
-		if (file)
-			pr_warn("WARNING: at %s:%u\n", file, line);
-		else
-			pr_warn("WARNING: at %p [verbose debug info unavailable]\n",
-				(void *)bugaddr);
-
-		print_modules();
-		show_regs(regs);
-		print_oops_end_marker();
-		/* Just a warning, don't kill lockdep. */
-		add_taint(BUG_GET_TAINT(bug), LOCKDEP_STILL_OK);
+		__warn(file, line, (void *)bugaddr, BUG_GET_TAINT(bug), regs,
+		       NULL);
 		return BUG_TRAP_TYPE_WARN;
 	}
 

@@ -56,7 +56,7 @@ Scott Hill shill@gtcocalcomp.com
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/usb.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/unaligned.h>
 #include <asm/byteorder.h>
 #include <linux/bitops.h>
@@ -104,7 +104,6 @@ MODULE_DEVICE_TABLE (usb, gtco_usbid_table);
 struct gtco {
 
 	struct input_dev  *inputdevice; /* input device struct pointer  */
-	struct usb_device *usbdev; /* the usb device for this device */
 	struct usb_interface *intf;	/* the usb interface for this device */
 	struct urb        *urbinfo;	 /* urb for incoming reports      */
 	dma_addr_t        buf_dma;  /* dma addr of the data buffer*/
@@ -231,17 +230,13 @@ static void parse_hid_report_descriptor(struct gtco *device, char * report,
 
 	/* Walk  this report and pull out the info we need */
 	while (i < length) {
-		prefix = report[i++];
+		prefix = report[i];
+
+		/* Skip over prefix */
+		i++;
 
 		/* Determine data size and save the data in the proper variable */
-		size = (1U << PREF_SIZE(prefix)) >> 1;
-		if (i + size > length) {
-			dev_err(ddev,
-				"Not enough data (need %d, have %d)\n",
-				i + size, length);
-			break;
-		}
-
+		size = PREF_SIZE(prefix);
 		switch (size) {
 		case 1:
 			data = report[i];
@@ -249,7 +244,8 @@ static void parse_hid_report_descriptor(struct gtco *device, char * report,
 		case 2:
 			data16 = get_unaligned_le16(&report[i]);
 			break;
-		case 4:
+		case 3:
+			size = 4;
 			data32 = get_unaligned_le32(&report[i]);
 			break;
 		}
@@ -543,7 +539,7 @@ static int gtco_input_open(struct input_dev *inputdev)
 {
 	struct gtco *device = input_get_drvdata(inputdev);
 
-	device->urbinfo->dev = device->usbdev;
+	device->urbinfo->dev = interface_to_usbdev(device->intf);
 	if (usb_submit_urb(device->urbinfo, GFP_KERNEL))
 		return -EIO;
 
@@ -827,6 +823,7 @@ static int gtco_probe(struct usb_interface *usbinterface,
 	int                     result = 0, retry;
 	int			error;
 	struct usb_endpoint_descriptor *endpoint;
+	struct usb_device	*udev = interface_to_usbdev(usbinterface);
 
 	/* Allocate memory for device structure */
 	gtco = kzalloc(sizeof(struct gtco), GFP_KERNEL);
@@ -841,11 +838,10 @@ static int gtco_probe(struct usb_interface *usbinterface,
 	gtco->inputdevice = input_dev;
 
 	/* Save interface information */
-	gtco->usbdev = interface_to_usbdev(usbinterface);
 	gtco->intf = usbinterface;
 
 	/* Allocate some data for incoming reports */
-	gtco->buffer = usb_alloc_coherent(gtco->usbdev, REPORT_MAX_SIZE,
+	gtco->buffer = usb_alloc_coherent(udev, REPORT_MAX_SIZE,
 					  GFP_KERNEL, &gtco->buf_dma);
 	if (!gtco->buffer) {
 		dev_err(&usbinterface->dev, "No more memory for us buffers\n");
@@ -910,8 +906,8 @@ static int gtco_probe(struct usb_interface *usbinterface,
 
 	/* Couple of tries to get reply */
 	for (retry = 0; retry < 3; retry++) {
-		result = usb_control_msg(gtco->usbdev,
-					 usb_rcvctrlpipe(gtco->usbdev, 0),
+		result = usb_control_msg(udev,
+					 usb_rcvctrlpipe(udev, 0),
 					 USB_REQ_GET_DESCRIPTOR,
 					 USB_RECIP_INTERFACE | USB_DIR_IN,
 					 REPORT_DEVICE_TYPE << 8,
@@ -939,7 +935,7 @@ static int gtco_probe(struct usb_interface *usbinterface,
 	}
 
 	/* Create a device file node */
-	usb_make_path(gtco->usbdev, gtco->usbpath, sizeof(gtco->usbpath));
+	usb_make_path(udev, gtco->usbpath, sizeof(gtco->usbpath));
 	strlcat(gtco->usbpath, "/input0", sizeof(gtco->usbpath));
 
 	/* Set Input device functions */
@@ -956,15 +952,15 @@ static int gtco_probe(struct usb_interface *usbinterface,
 	gtco_setup_caps(input_dev);
 
 	/* Set input device required ID information */
-	usb_to_input_id(gtco->usbdev, &input_dev->id);
+	usb_to_input_id(udev, &input_dev->id);
 	input_dev->dev.parent = &usbinterface->dev;
 
 	/* Setup the URB, it will be posted later on open of input device */
 	endpoint = &usbinterface->altsetting[0].endpoint[0].desc;
 
 	usb_fill_int_urb(gtco->urbinfo,
-			 gtco->usbdev,
-			 usb_rcvintpipe(gtco->usbdev,
+			 udev,
+			 usb_rcvintpipe(udev,
 					endpoint->bEndpointAddress),
 			 gtco->buffer,
 			 REPORT_MAX_SIZE,
@@ -988,7 +984,7 @@ static int gtco_probe(struct usb_interface *usbinterface,
  err_free_urb:
 	usb_free_urb(gtco->urbinfo);
  err_free_buf:
-	usb_free_coherent(gtco->usbdev, REPORT_MAX_SIZE,
+	usb_free_coherent(udev, REPORT_MAX_SIZE,
 			  gtco->buffer, gtco->buf_dma);
  err_free_devs:
 	input_free_device(input_dev);
@@ -1005,13 +1001,14 @@ static void gtco_disconnect(struct usb_interface *interface)
 {
 	/* Grab private device ptr */
 	struct gtco *gtco = usb_get_intfdata(interface);
+	struct usb_device *udev = interface_to_usbdev(interface);
 
 	/* Now reverse all the registration stuff */
 	if (gtco) {
 		input_unregister_device(gtco->inputdevice);
 		usb_kill_urb(gtco->urbinfo);
 		usb_free_urb(gtco->urbinfo);
-		usb_free_coherent(gtco->usbdev, REPORT_MAX_SIZE,
+		usb_free_coherent(udev, REPORT_MAX_SIZE,
 				  gtco->buffer, gtco->buf_dma);
 		kfree(gtco);
 	}

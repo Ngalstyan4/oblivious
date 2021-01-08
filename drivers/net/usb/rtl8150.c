@@ -14,7 +14,7 @@
 #include <linux/mii.h>
 #include <linux/ethtool.h>
 #include <linux/usb.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 /* Version Information */
 #define DRIVER_VERSION "v0.6.2 (2004/08/27)"
@@ -471,7 +471,7 @@ static void write_bulk_callback(struct urb *urb)
 	if (status)
 		dev_info(&urb->dev->dev, "%s: Tx status %d\n",
 			 dev->netdev->name, status);
-	dev->netdev->trans_start = jiffies;
+	netif_trans_update(dev->netdev);
 	netif_wake_queue(dev->netdev);
 }
 
@@ -714,7 +714,7 @@ static netdev_tx_t rtl8150_start_xmit(struct sk_buff *skb,
 	} else {
 		netdev->stats.tx_packets++;
 		netdev->stats.tx_bytes += skb->len;
-		netdev->trans_start = jiffies;
+		netif_trans_update(netdev);
 	}
 
 	return NETDEV_TX_OK;
@@ -867,7 +867,6 @@ static const struct net_device_ops rtl8150_netdev_ops = {
 	.ndo_set_rx_mode	= rtl8150_set_multicast,
 	.ndo_set_mac_address	= rtl8150_set_mac_address,
 
-	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 };
 

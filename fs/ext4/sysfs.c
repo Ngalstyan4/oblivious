@@ -100,7 +100,7 @@ static ssize_t reserved_clusters_store(struct ext4_attr *a,
 	int ret;
 
 	ret = kstrtoull(skip_spaces(buf), 0, &val);
-	if (ret || val >= clusters)
+	if (!ret || val >= clusters)
 		return -EINVAL;
 
 	atomic64_set(&sbi->s_resv_clusters, val);
@@ -363,7 +363,6 @@ static int name##_open(struct inode *inode, struct file *file) \
 } \
 \
 static const struct file_operations ext4_seq_##name##_fops = { \
-	.owner		= THIS_MODULE, \
 	.open		= name##_open, \
 	.read		= seq_read, \
 	.llseek		= seq_lseek, \
