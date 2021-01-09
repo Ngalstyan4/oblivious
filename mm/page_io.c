@@ -375,6 +375,7 @@ int swap_readpage(struct page *page)
 out:
 	return ret;
 }
+EXPORT_SYMBOL(swap_readpage);
 
 int swap_readpage_sync(struct page *page)
 {

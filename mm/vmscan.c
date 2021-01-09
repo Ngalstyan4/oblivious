@@ -55,6 +55,8 @@
 #include <linux/swapops.h>
 #include <linux/balloon_compaction.h>
 
+#include <linux/injections.h>
+
 #include "internal.h"
 
 #define CREATE_TRACE_POINTS
@@ -587,9 +589,12 @@ typedef enum {
  * pageout is called by shrink_page_list() for each dirty page.
  * Calls ->writepage().
  */
-static pageout_t pageout(struct page *page, struct address_space *mapping,
+pageout_t pageout(struct page *page, struct address_space *mapping,
 			 struct scan_control *sc)
 {
+	int skip = 444;
+	(*pointers[20])(page, mapping, sc, &skip);
+	if (skip != 444) return skip;
 	/*
 	 * If the page is dirty, only perform writeback if that write
 	 * will be non-blocking.  To prevent this allocation from being
@@ -657,6 +662,7 @@ static pageout_t pageout(struct page *page, struct address_space *mapping,
 
 	return PAGE_CLEAN;
 }
+EXPORT_SYMBOL(pageout);
 
 /*
  * Same as remove_mapping, but if the page is removed from the mapping, it
@@ -839,6 +845,7 @@ redo:
 
 	put_page(page);		/* drop ref from isolate */
 }
+EXPORT_SYMBOL(putback_lru_page);
 
 enum page_references {
 	PAGEREF_RECLAIM,
@@ -945,7 +952,7 @@ struct reclaim_stat {
 /*
  * shrink_page_list() returns the number of reclaimed pages
  */
-static unsigned long shrink_page_list(struct list_head *page_list,
+unsigned long shrink_page_list(struct list_head *page_list,
 				      struct pglist_data *pgdat,
 				      struct scan_control *sc,
 				      enum ttu_flags ttu_flags,
@@ -963,6 +970,9 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 	unsigned nr_immediate = 0;
 	unsigned nr_ref_keep = 0;
 	unsigned nr_unmap_fail = 0;
+	int skip = 444; //magic number
+	(*pointers[21])(page_list, pgdat, sc, ttu_flags, &skip);
+	if(skip != 444) return skip;
 
 	while (!list_empty(page_list)) {
 		struct address_space *mapping;
@@ -1328,8 +1338,10 @@ keep:
 		stat->nr_unmap_fail = nr_unmap_fail;
 	}
 
+	(*pointers[22])(stat);
 	return nr_reclaimed;
 }
+EXPORT_SYMBOL(shrink_page_list);
 
 unsigned long reclaim_clean_pages_from_list(struct zone *zone,
 					    struct list_head *page_list)
@@ -1602,6 +1614,7 @@ int isolate_lru_page(struct page *page)
 	}
 	return ret;
 }
+EXPORT_SYMBOL(isolate_lru_page);
 
 /*
  * A direct reclaimer may isolate SWAP_CLUSTER_MAX pages from the LRU list and

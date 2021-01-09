@@ -21,6 +21,8 @@
 #include <linux/swap_slots.h>
 #include <linux/frontswap.h>
 
+#include <linux/injections.h>
+
 #include <asm/pgtable.h>
 
 /*
@@ -219,6 +221,7 @@ int add_to_swap(struct page *page, struct list_head *list)
 		return 0;
 	}
 }
+EXPORT_SYMBOL(add_to_swap);
 
 /*
  * This must be called only on pages that have
@@ -407,6 +410,7 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		put_page(new_page);
 	return found_page;
 }
+EXPORT_SYMBOL(__read_swap_cache_async);
 
 /*
  * Locate a page of swap in physical memory, reserving swap cache space
