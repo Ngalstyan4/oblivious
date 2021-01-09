@@ -35,6 +35,8 @@
 #include <linux/hugetlb.h>
 #include <linux/page_idle.h>
 
+#include <linux/injections.h>
+
 #include "internal.h"
 
 #define CREATE_TRACE_POINTS
@@ -662,6 +664,7 @@ void lru_add_drain(void)
 	lru_add_drain_cpu(get_cpu());
 	put_cpu();
 }
+EXPORT_SYMBOL(lru_add_drain);
 
 static void lru_add_drain_per_cpu(struct work_struct *dummy)
 {
