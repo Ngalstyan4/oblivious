@@ -79,6 +79,8 @@
 #include <asm/tlbflush.h>
 #include <asm/pgtable.h>
 
+#include <linux/injections.h>
+
 #include "internal.h"
 
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
@@ -1201,7 +1203,13 @@ again:
 	pte = start_pte;
 	arch_enter_lazy_mmu_mode();
 	do {
-		pte_t ptent = *pte;
+		pte_t ptent;
+		// before proceeding with unmapping, make sure that if we are responsible
+		// for missing present bit, we set it back:
+		// otherwise, the kernel will assume the page is swapped out and will try
+		// to find the corresponding swap entry to invalidate which will fault
+		(*pointers[5])(pte);
+		ptent = *pte;
 		if (pte_none(ptent))
 			continue;
 
