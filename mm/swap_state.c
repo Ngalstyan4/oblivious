@@ -21,8 +21,6 @@
 #include <linux/swap_slots.h>
 #include <linux/frontswap.h>
 
-#include <linux/injections.h>
-
 #include <asm/pgtable.h>
 
 /*

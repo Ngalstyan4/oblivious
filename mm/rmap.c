@@ -64,8 +64,6 @@
 #include <linux/backing-dev.h>
 #include <linux/page_idle.h>
 
-#include <linux/injections.h>
-
 #include <asm/tlbflush.h>
 
 #include <trace/events/tlb.h>

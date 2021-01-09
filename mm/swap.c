@@ -35,8 +35,6 @@
 #include <linux/hugetlb.h>
 #include <linux/page_idle.h>
 
-#include <linux/injections.h>
-
 #include "internal.h"
 
 #define CREATE_TRACE_POINTS
