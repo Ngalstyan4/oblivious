@@ -84,8 +84,27 @@ bool file_exists(const char *filepath)
 	return trace_exists;
 }
 
+size_t read_trace(const char *filepath, char *buf, long max_len)
+{
+	struct file *f;
+	size_t count = 0;
+	mm_segment_t old_fs = get_fs();
+	set_fs(get_ds()); // KERNEL_DS
+	f = filp_open(filepath, O_RDONLY | O_LARGEFILE, 0);
+	if (f == NULL) {
+		printk(KERN_ERR "unable to read/open file\n");
+		set_fs(old_fs);
+		return 0;
+	}
+
+	count = vfs_read(f, buf, max_len, &f->f_pos);
+	filp_close(f, NULL);
+	set_fs(old_fs);
+	return count;
+}
 void write_trace(const char *filepath, const char *buf, long len)
 {
+	long left_to_write = len;
 	// Write recorded trace to file
 	// docs ` https://www.howtoforge.com/reading-files-from-the-linux-kernel-space-module-driver-fedora-14
 	// https://www.linuxjournal.com/article/8110
@@ -98,34 +117,33 @@ void write_trace(const char *filepath, const char *buf, long len)
 	if (IS_ERR(f)) {
 		printk(KERN_ERR "unable to create/open file ERR: %ld\n",
 		       PTR_ERR(f));
-	} else {
-		long left_to_write = len;
-		printk(KERN_DEBUG "Writing recorded trace (num accesses=%ld)",
-		       len / sizeof(void *));
-		while (left_to_write > 0) {
-			// todo:: cannot write to larger than 2g from kernel
-			// fixed in newer kernels, I guess just upgrade?
-			size_t count =
-				vfs_write(f, buf, left_to_write, &f->f_pos);
-
-			//size_t can not be smaller than zero
-			if (((long)(count)) < 0) {
-				printk(KERN_ERR "Failed writing. "
-						"errno=%ld, left to "
-						"write %ld\n",
-				       count, left_to_write);
-				break;
-			}
-			printk(KERN_DEBUG "wrote %ld bytes out of %ld "
-					  "left to write and %ld total\n",
-			       count, left_to_write, len);
-			left_to_write -= count;
-			buf += count;
-		}
-
-		filp_close(f, NULL);
-		set_fs(old_fs);
+		return;
 	}
+
+	printk(KERN_DEBUG "Writing recorded trace (num accesses=%ld)",
+	       len / sizeof(void *));
+	while (left_to_write > 0) {
+		// todo:: cannot write to larger than 2g from kernel
+		// fixed in newer kernels, I guess just upgrade?
+		size_t count = vfs_write(f, buf, left_to_write, &f->f_pos);
+
+		//size_t can not be smaller than zero
+		if (((long)(count)) < 0) {
+			printk(KERN_ERR "Failed writing. "
+					"errno=%ld, left to "
+					"write %ld\n",
+			       count, left_to_write);
+			break;
+		}
+		printk(KERN_DEBUG "wrote %ld bytes out of %ld "
+				  "left to write and %ld total\n",
+		       count, left_to_write, len);
+		left_to_write -= count;
+		buf += count;
+	}
+
+	filp_close(f, NULL);
+	set_fs(old_fs);
 }
 
 void log_pfault(struct pt_regs *regs, unsigned long error_code,

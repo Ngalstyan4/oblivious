@@ -20,8 +20,6 @@ typedef struct {
 	bool initialized;
 } vm_t;
 
-#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 5ULL
-#define TRACE_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 typedef struct {
 	pid_t process_pid;
 	unsigned long *accesses;
@@ -59,7 +57,7 @@ void record_init(pid_t pid, const char *proc_name)
 	memset(&trace, 0, sizeof(trace));
 	memcpy(trace.filepath, trace_filepath, FILEPATH_LEN);
 	trace.process_pid = pid;
-	//todo:: put everything on tracing
+
 	trace.accesses = vmalloc(TRACE_ARRAY_SIZE);
 	if (trace.accesses == NULL) {
 		printk(KERN_ERR "Unable to allocate memory for tracing\n");

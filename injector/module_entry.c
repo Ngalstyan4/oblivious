@@ -15,6 +15,7 @@
 #include "common.h"
 #include "page_buffer.h"
 #include "record.h"
+#include "fetch.h"
 #include "kevictd.h"
 
 
@@ -28,30 +29,6 @@ MODULE_PARM_DESC(cmd, "A string, for prefetch load/unload command");
 module_param(cmd, charp, 0000);
 MODULE_PARM_DESC(process_name, "A string, for process name");
 module_param(process_name, charp, 0000);
-
-const unsigned long MAX_SEARCH_DIST = 2000;
-
-typedef struct {
-	pid_t process_pid;
-	int counter;
-	int found_counter;
-	int num_fault;
-	struct mm_struct *mm;
-	unsigned long *accesses;
-	unsigned long num_accesses;
-	unsigned long pos;
-	unsigned long next_fetch;
-	// controlls whether swapin_readahead will use tape to prefetch or not
-	bool prefetch_start;
-} prefetching_state;
-
-//todo:: switch back to static
-prefetching_state fetch;
-
-void fetch_init();
-void do_page_fault_fetch_2(struct pt_regs *regs, unsigned long error_code,
-			   unsigned long address, struct task_struct *tsk,
-			   bool *return_early, int magic);
 
 void mem_pattern_trace_start(int flags)
 {
@@ -75,30 +52,21 @@ void mem_pattern_trace_start(int flags)
 
 	} else if (flags & TRACE_PREFETCH) {
 		//init_swap_trend(32);
-		kevictd_init();
+		//kevictd_init();
 		//prefetch_buffer_init(8000);
 		//activate_prefetch_buffer(1);
 		//set_custom_prefetch(2);
-		//fetch_init(pid, current->mm);
+		fetch_init(pid, proc_name, current->mm);
 	}
 }
 
 void mem_pattern_trace_end(int flags)
 {
-	set_pointer(2, kernel_noop); // clean do page fault injection
 	set_pointer(10, kernel_noop); // clean swapin_readahead injection
 
-	// the easy case, if we were prefetching, just free the tape we read into memory
-	if (fetch.accesses != NULL) {
-		kevictd_fini();
-		fetch.mm = NULL;
-		printk(KERN_INFO "found %d/%d page faults: min:%ld, maj: %ld\n",
-		       fetch.found_counter, fetch.counter, current->min_flt,
-		       current->maj_flt);
-		vfree(fetch.accesses);
-		fetch.accesses = NULL; // todo:: should not need once in kernel
-	}
-
+	// all _fini functions check whether they have been initialized
+	// before performing any free-ing so no need to do it here
+	fetch_fini();
 	record_fini();
 }
 
@@ -125,108 +93,15 @@ static void mem_pattern_trace_3(int flags)
 		return;
 	}
 	if (flags & KEVICTD_INIT) {
-		kevictd_init();
+		//kevictd_init();
 		return;
 	}
 	if (flags & KEVICTD_FINI) {
-		kevictd_fini();
+		//kevictd_fini();
 		return;
 	}
 }
 
-/* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE BEGIN ++++++++++++++++++++*/
-void do_page_fault_fetch_2(struct pt_regs *regs, unsigned long error_code,
-			   unsigned long address, struct task_struct *tsk,
-			   bool *return_early, int magic)
-{
-	if (unlikely(fetch.accesses == NULL)) {
-		printk(KERN_ERR "fetch trace not initialized\n");
-		return;
-	}
-
-	if (fetch.process_pid == tsk->pid) {
-
-		int i;
-		int dist = 0;
-		int num_prefetch = 0;
-		fetch.num_fault++;
-		while (dist < MAX_SEARCH_DIST &&
-		       (fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) !=
-			       (address & PAGE_ADDR_MASK))
-			dist++;
-		if ((fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) ==
-		    (address & PAGE_ADDR_MASK)) {
-			fetch.pos += dist;
-			fetch.counter++;
-			// printk("fault num:%d %lx fetch pos:%ld\n",
-			//        fetch.num_fault, address & PAGE_ADDR_MASK,
-			//        fetch.pos);
-		}
-
-		if (fetch.pos >= fetch.next_fetch) {
-			down_read(&fetch.mm->mmap_sem);
-			//debug_print_prefetch();
-			for (i = 0; i < 100 && num_prefetch < 32; i++) {
-				unsigned long paddr =
-					fetch.accesses[fetch.pos + i];
-
-				if (prefetch_addr(paddr, fetch.mm) == true)
-					num_prefetch++;
-			}
-			//printk(KERN_INFO "num prefetch-%d, ii %d", num_prefetch, i);
-			fetch.found_counter++;
-			fetch.next_fetch = fetch.pos + i;
-			if (i >= 5)
-				fetch.next_fetch -= 5;
-			// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
-			lru_add_drain();
-			up_read(&fetch.mm->mmap_sem);
-		}
-	}
-}
-
-//void fetch_init(pid_t pid, struct mm_struct *mm)
-//{
-//	struct file *f;
-//	mm_segment_t old_fs = get_fs();
-//	unsigned long *buf = vmalloc(TRACE_ARRAY_SIZE);
-//	size_t count;
-//	if (buf == NULL) {
-//		printk(KERN_ERR
-//		       "unable to allocate memory for reading the trace\n");
-//		return;
-//	}
-//
-//	memset(&fetch, 0, sizeof(fetch));
-//
-//	set_fs(get_ds()); // KERNEL_DS
-//	f = filp_open(trace_filepath, O_RDONLY | O_LARGEFILE, 0);
-//	if (f == NULL) {
-//		printk(KERN_ERR "unable to read/open file\n");
-//		vfree(buf);
-//		return;
-//	} else {
-//		count = vfs_read(f, (char *)buf, TRACE_ARRAY_SIZE, &f->f_pos);
-//		fetch.num_accesses = count / sizeof(void *);
-//		printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n",
-//		       count, fetch.num_accesses);
-//		filp_close(f, NULL);
-//		set_fs(old_fs);
-//	}
-//
-//	fetch.accesses = buf;
-//	fetch.process_pid = pid;
-//	fetch.mm = mm;
-//	fetch.prefetch_start = true; // can be used to pause and resume
-//	set_pointer(2, do_page_fault_fetch_2);
-//}
-
-//  void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
-//  			 struct vm_area_struct *vma, const unsigned long addr,
-//  			 bool *goto_skip)
-//  {
-//  }
-/* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE END ++++++++++++++++++++++*/
 
 static void usage(void)
 {
@@ -286,14 +161,12 @@ static void __exit leap_functionality_exit(void)
 	int i;
 
 	printk(KERN_INFO "resetting injection points to noop");
-	printk(KERN_INFO "found %d/%d\n", fetch.found_counter, fetch.counter);
 	for (i = 0; i < 100; i++)
 		set_pointer(i, kernel_noop);
 
-	record_force_clean();
 	// free vmallocs, in case the process crashed or used syscalls incorerclty
-	if (fetch.accesses)
-		vfree(fetch.accesses);
+	record_force_clean();
+	fetch_force_clean();
 	printk(KERN_INFO "Cleaning up leap functionality sample module.\n");
 }
 
