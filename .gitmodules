@@ -1,0 +1,4 @@
+[submodule "syncswap"]
+	path = syncswap
+	url = git@github.com:amaro/syncswap.git
+	branch = oblivious
