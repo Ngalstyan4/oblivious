@@ -3710,8 +3710,9 @@ static int handle_pte_fault(struct vm_fault *vmf)
 		 * So now it's safe to run pte_offset_map().
 		 */
 		vmf->pte = pte_offset_map(vmf->pmd, vmf->address);
+		// handle another path which gets confused when we remove PTE present bit
+		(*pointers[6])(vmf->pte);
 		vmf->orig_pte = *vmf->pte;
-
 		/*
 		 * some architectures can have larger ptes than wordsize,
 		 * e.g.ppc44x-defconfig has CONFIG_PTE_64BIT=y and
