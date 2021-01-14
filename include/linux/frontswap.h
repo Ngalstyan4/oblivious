@@ -9,6 +9,7 @@
 struct frontswap_ops {
 	void (*init)(unsigned); /* this swap type was just swapon'ed */
 	int (*store)(unsigned, pgoff_t, struct page *); /* store a page */
+	int (*store_async)(unsigned, pgoff_t, struct page *); /* store a page async*/
 	int (*load)(unsigned, pgoff_t, struct page *); /* load a page */
 	int (*load_async)(unsigned, pgoff_t, struct page *); /* load a page async */
 	int (*poll_load)(int); /* poll cpu for one load */
@@ -27,6 +28,7 @@ extern void frontswap_tmem_exclusive_gets(bool);
 extern bool __frontswap_test(struct swap_info_struct *, pgoff_t);
 extern void __frontswap_init(unsigned type, unsigned long *map);
 extern int __frontswap_store(struct page *page);
+extern int __frontswap_store_async(struct page *page);
 extern int __frontswap_load(struct page *page);
 extern int __frontswap_load_async(struct page *page);
 extern int __frontswap_poll_load(int cpu);
@@ -84,6 +86,14 @@ static inline int frontswap_store(struct page *page)
 {
 	if (frontswap_enabled())
 		return __frontswap_store(page);
+
+	return -1;
+}
+
+static inline int frontswap_store_async(struct page *page)
+{
+	if (frontswap_enabled())
+		return __frontswap_store_async(page);
 
 	return -1;
 }
