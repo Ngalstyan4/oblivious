@@ -24,6 +24,8 @@
 #include <linux/uio.h>
 #include <asm/pgtable.h>
 
+#include <linux/injections.h>
+
 static struct bio *get_swap_bio(gfp_t gfp_flags,
 				struct page *page, bio_end_io_t end_io)
 {
@@ -229,11 +231,37 @@ bad_bmap:
 	goto out;
 }
 
+int swap_writepage_sync(struct page *page, struct writeback_control *wbc);
 /*
  * We may have stale swap cache pages in memory: notice
  * them here and get rid of the unnecessary final write.
  */
 int swap_writepage(struct page *page, struct writeback_control *wbc)
+{
+	int ret = 0;
+	bool skip = false;
+	bool backout = true;
+
+	(*pointers[32])(page, wbc, &skip, &backout);
+	if (backout) return swap_writepage_sync(page, wbc);
+
+	if (try_to_free_swap(page)) {
+		unlock_page(page);
+		goto out;
+	}
+	if (skip) goto out;
+	if (frontswap_store_async(page) == 0) {
+		set_page_writeback(page);
+		unlock_page(page);
+		goto out;
+	}
+
+	ret = __swap_writepage(page, wbc, end_swap_bio_write);
+out:
+	return ret;
+}
+
+int swap_writepage_sync(struct page *page, struct writeback_control *wbc)
 {
 	int ret = 0;
 

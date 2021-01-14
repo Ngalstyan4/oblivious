@@ -55,6 +55,8 @@
 #include <linux/swapops.h>
 #include <linux/balloon_compaction.h>
 
+#include <linux/injections.h>
+
 //#include <linux/injections.h>
 
 #include "internal.h"
@@ -592,9 +594,9 @@ typedef enum {
 pageout_t pageout(struct page *page, struct address_space *mapping,
 			 struct scan_control *sc)
 {
-	//int skip = 444;
-	//(*pointers[20])(page, mapping, sc, &skip);
-	//if (skip != 444) return skip;
+	int skip = 444;
+	(*pointers[33])(page, mapping, sc, &skip);
+	if (skip != 444) return skip;
 	/*
 	 * If the page is dirty, only perform writeback if that write
 	 * will be non-blocking.  To prevent this allocation from being
@@ -970,9 +972,9 @@ unsigned long shrink_page_list(struct list_head *page_list,
 	unsigned nr_immediate = 0;
 	unsigned nr_ref_keep = 0;
 	unsigned nr_unmap_fail = 0;
-	//int skip = 444; //magic number
-	//(*pointers[21])(page_list, pgdat, sc, ttu_flags, &skip);
-	//if(skip != 444) return skip;
+	int skip = 444; //magic number
+	(*pointers[21])(page_list, pgdat, sc, ttu_flags, &skip);
+	if(skip != 444) return skip;
 
 	while (!list_empty(page_list)) {
 		struct address_space *mapping;

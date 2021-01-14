@@ -74,6 +74,8 @@
 
 #include <trace/events/vmscan.h>
 
+#include <linux/injections.h>
+
 struct cgroup_subsys memory_cgrp_subsys __read_mostly;
 EXPORT_SYMBOL(memory_cgrp_subsys);
 
@@ -1832,7 +1834,7 @@ static int memcg_hotplug_cpu_dead(unsigned int cpu)
 	return 0;
 }
 
-static void reclaim_high(struct mem_cgroup *memcg,
+void reclaim_high(struct mem_cgroup *memcg,
 			 unsigned int nr_pages,
 			 gfp_t gfp_mask)
 {
@@ -1843,6 +1845,7 @@ static void reclaim_high(struct mem_cgroup *memcg,
 		try_to_free_mem_cgroup_pages(memcg, nr_pages, gfp_mask, true);
 	} while ((memcg = parent_mem_cgroup(memcg)));
 }
+EXPORT_SYMBOL(reclaim_high);
 
 #define MAX_RECLAIM_OFFLOAD 2048UL
 static void high_work_func(struct work_struct *work)
@@ -1851,6 +1854,11 @@ static void high_work_func(struct work_struct *work)
 	unsigned long high = memcg->high;
 	unsigned long nr_pages = page_counter_read(&memcg->memory);
 	unsigned long reclaim;
+	bool skip = false;
+
+	(*pointers[30])(work, memcg, high, nr_pages, &skip);
+	if (skip)
+		return;
 
 	if (nr_pages > high) {
 		reclaim = min(nr_pages - high, MAX_RECLAIM_OFFLOAD);
