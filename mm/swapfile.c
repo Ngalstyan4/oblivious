@@ -43,6 +43,8 @@
 #include <linux/swapops.h>
 #include <linux/swap_cgroup.h>
 
+#include <linux/injections.h>
+
 static bool swap_count_continued(struct swap_info_struct *, pgoff_t,
 				 unsigned char);
 static void free_swap_count_continuations(struct swap_info_struct *);
@@ -568,6 +570,8 @@ static int scan_swap_map_slots(struct swap_info_struct *si,
 	unsigned long last_in_cluster = 0;
 	int latency_ration = LATENCY_LIMIT;
 	int n_ret = 0;
+	bool skip_ssd = true;
+	(*pointers[35])(&skip_ssd);
 
 	if (nr > SWAP_BATCH)
 		nr = SWAP_BATCH;
@@ -586,6 +590,15 @@ static int scan_swap_map_slots(struct swap_info_struct *si,
 	si->flags += SWP_SCANNING;
 	scan_base = offset = si->cluster_next;
 
+	/*
+	 * Swap space allocation policy tries to optimize page layout
+	 * on an SSD drive for maximal sequential reads.
+	 * Since we use remote memory for swapping, there is no use in
+	 * in doing this and skipping it saves ~30% of cpu cycles under
+	 * memory pressure.
+	 * */
+	if (likely(skip_ssd))
+		goto scan;
 	/* SSD algorithm */
 	if (si->cluster_info) {
 		if (scan_swap_map_try_ssd_cluster(si, &offset, &scan_base))
