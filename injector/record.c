@@ -65,6 +65,7 @@ void record_init(pid_t pid, const char *proc_name)
 	}
 
 	set_pointer(5, do_unmap_5);
+	set_pointer(6, do_unmap_5);//<-- for handle_pte_fault
 	set_pointer(2, do_page_fault_2);
 }
 
@@ -204,6 +205,10 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		trace.entry.address = address;
 		trace.entry.pgd = pgd_offset(mm, address);
 		trace.entry.pud = pud_offset(trace.entry.pgd, address);
+		if (trace.entry.pud == 0) {
+			printk(KERN_WARNING "pud is noooooooone\n");
+			goto error_out;
+		}
 		// todo:: to support thp, do some error checking here and see if a huge page is being allocated
 		trace.entry.pmd = pmd_offset(trace.entry.pud, address);
 		if (pmd_none(*(trace.entry.pmd)) ||
