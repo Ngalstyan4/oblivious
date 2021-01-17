@@ -123,7 +123,7 @@ void write_trace(const char *filepath, const char *buf, long len)
 	printk(KERN_DEBUG "Writing recorded trace (num accesses=%ld)",
 	       len / sizeof(void *));
 	while (left_to_write > 0) {
-		// todo:: cannot write to larger than 2g from kernel
+		// cannot write more than 2g at a time from kernel
 		// fixed in newer kernels, I guess just upgrade?
 		size_t count = vfs_write(f, buf, left_to_write, &f->f_pos);
 

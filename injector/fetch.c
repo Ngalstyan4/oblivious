@@ -144,12 +144,6 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 	}
 }
 
-//  void swapin_readahead_10(swp_entry_t *entry, gfp_t *gfp_mask,
-//  			 struct vm_area_struct *vma, const unsigned long addr,
-//  			 bool *goto_skip)
-//  {
-//  }
-
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
 {
 	struct page *page;
@@ -177,8 +171,6 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
 	// intend to map the page on
 	// I think gfp_mask should always be GFP_HIGHUSER_MOVABLE  in here
 
-	// todo:: maybe use ****** find_vma(mm, addr) *** instead of using the first vma?
-	//
 	// todo:: kernel doc Documentation/vm/unevictable-lru.txt talks about interaction of cgroups with
 	// pages that are mlocked or otherwise marked as unevictable. It also talks about page_evictable()
 	// as well as mechanisms to mark a *whole address space* as unevictable. perhaps we can use this
@@ -186,10 +178,7 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
 	// 1) the kernel does not meddle with prefetching
 	// 2) we do not stall the kernel trying to evict things from our prefetched list that we are sure it is not
 	// going to succeed.
-	//	page = read_swap_cache_async(rmem_entry, GFP_HIGHUSER_MOVABLE, mm->mmap,
-	//				     addr);
 
-	allocated = 44;
 	page = __read_swap_cache_async(rmem_entry, GFP_HIGHUSER_MOVABLE,
 				       find_vma(mm, addr), addr, &allocated);
 	if (!page)
@@ -201,7 +190,6 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
 	}
 	swap_readpage(page);
 	SetPageReadahead(page);
-	//Q:: todo:: do we need this in tape prefetching since we assume swap space is unlimitted?
 	put_page(page); //= page_cache_release
 	//my_add_page_to_buffer(page);
 	return true;
