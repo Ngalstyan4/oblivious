@@ -22,13 +22,12 @@
 MODULE_AUTHOR("");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("");
-static char *cmd;
-//todo: remove
-static char *process_name;
-MODULE_PARM_DESC(cmd, "A string, for prefetch load/unload command");
+static char *cmd, *val;
+
+MODULE_PARM_DESC(cmd, "Command to properly change mem_trace system");
+MODULE_PARM_DESC(val, "Value(usually 0 or 1) required for certain commands");
 module_param(cmd, charp, 0000);
-MODULE_PARM_DESC(process_name, "A string, for process name");
-module_param(process_name, charp, 0000);
+module_param(val, charp, 0000);
 
 void mem_pattern_trace_start(int flags)
 {
@@ -74,7 +73,7 @@ void mem_pattern_trace_end(int flags)
 
 static void mem_pattern_trace_3(int flags)
 {
-	printk(KERN_INFO "mem_pattern_trace called from pid %d with flags: "
+	printk(KERN_INFO "mem_pattern_trace called from pid %d with flags"
 			 "[%s%s%s%s|%s%s%s]\n",
 	       current->pid, flags & TRACE_START ? "TRACE_START" : "",
 	       flags & TRACE_PAUSE ? "TRACE_PAUSE" : "",
@@ -85,6 +84,12 @@ static void mem_pattern_trace_3(int flags)
 	       flags & TRACE_AUTO ? "TRACE_AUTO" : ""
 
 	       );
+
+	if (memtrace_getflag(TAPE_OPS) == 0) {
+		printk(KERN_INFO "mem_pattern_trace: functionality is off\n");
+		return;
+	}
+
 	if (flags & TRACE_START) {
 		mem_pattern_trace_start(flags);
 		return;
@@ -132,25 +137,64 @@ static void no_skip_ssd_35(bool *skip_ssd)
 	*skip_ssd = false;
 }
 
+static void print_memtrace_flags()
+{
+	printk(KERN_INFO "memtrace global flags:\n"
+			 "Tape operations\t\t %s (tape_ops)\n"
+			 "Swap SSD Optim\t\t %s (ssdopt)\n"
+			 "Fastswap writes\t\t %s (async_writes)\n",
+	       memtrace_getflag(TAPE_OPS) ? "ON" : "OFF",
+	       memtrace_getflag(SWAP_SSD_OPTIMIZATION) ? "ON" : "OFF",
+	       memtrace_getflag(FASTSWAP_ASYNCWRITES) ? "ASYNC" : "SYNC");
+}
+
 static int __init leap_functionality_init(void)
 {
+	// set syscall entrypoint for prefetching
+	set_pointer(3, mem_pattern_trace_3);
 
 	if (!cmd) {
 		usage();
 		return 0;
 	}
 
-	if (strcmp(cmd, "vanilla_fastswap") == 0) {
-		printk(KERN_INFO "Vanilla fastswap \n");
-		// backs out from ssd optimization
-		set_pointer(35, no_skip_ssd_35);
-		return 0;
+	if (strcmp(cmd, "tape_ops") == 0) {
+		if (!val || (*val != '0' && *val != '1')) {
+			usage();
+			return 0;
+		}
+
+		*val == '1' ? memtrace_setflag(TAPE_OPS) :
+			      memtrace_clearflag(TAPE_OPS);
 	}
 
+	if (strcmp(cmd, "ssdopt") == 0) {
+		if (!val || (*val != '0' && *val != '1')) {
+			usage();
+			return 0;
+		}
+
+		*val == '1' ? memtrace_setflag(SWAP_SSD_OPTIMIZATION) :
+			      memtrace_clearflag(SWAP_SSD_OPTIMIZATION);
+	}
+
+	if (strcmp(cmd, "async_writes") == 0) {
+		if (!val || (*val != '0' && *val != '1')) {
+			usage();
+			return 0;
+		}
+
+		*val == '1' ? memtrace_setflag(FASTSWAP_ASYNCWRITES) :
+			      memtrace_clearflag(FASTSWAP_ASYNCWRITES);
+	}
+	/*
+	//		memtrace_clearflag(TAPE_OPS| SWAP_SSD_OPTIMIZATION | FASTSWAP_ASYNCWRITES);
+	//		set_pointer(35, no_skip_ssd_35);
 	if (strcmp(cmd, "vanilla_fastswap_ssdopt") == 0) {
+		memtrace_clearflag(TAPE_OPS | FASTSWAP_ASYNCWRITES);
+		memtrace_setflag(SWAP_SSD_OPTIMIZATION);
 		printk(KERN_INFO "Vanilla fastswap + swap write path software "
 				 "optimization\n");
-		return 0;
 	}
 
 	if (strcmp(cmd, "fastswap_ssdopt_asyncwrites") == 0) {
@@ -158,7 +202,6 @@ static int __init leap_functionality_init(void)
 				 "async writes \n");
 		// backs out from sync writes which is the default in this kernel build
 		set_pointer(32, swap_writepage_32);
-		return 0;
 	}
 
 	if (strcmp(cmd, "fastwap_ssdopt_syncwrites_prefetching") == 0) {
@@ -166,8 +209,6 @@ static int __init leap_functionality_init(void)
 				 "writes and prefetching\n");
 		// sets up syscall interface injection which sets up
 		// rest of necessary function links
-		set_pointer(3, mem_pattern_trace_3);
-		return 0;
 	}
 
 	if (strcmp(cmd, "fastwap_ssdopt_async_writes_prefetching") == 0) {
@@ -177,33 +218,9 @@ static int __init leap_functionality_init(void)
 		// rest of necessary function links
 		set_pointer(3, mem_pattern_trace_3);
 		evict_init();
-		return 0;
 	}
-
-	if (strcmp(cmd, "remote_on") == 0) {
-		printk(KERN_INFO "Leap remote memory is on\n");
-		//set_process_id(1);
-		return 0;
-	}
-	if (strcmp(cmd, "remote_off") == 0) {
-		printk(KERN_INFO "Leap remote memory is off\n");
-		//set_process_id(0);
-		return 0;
-	}
-	if (strcmp(cmd, "leap") == 0) {
-		printk(KERN_INFO "prefetching set to LEAP\n");
-		//init_swap_trend(32);
-		//set_custom_prefetch(1);
-		return 0;
-	} else if (strcmp(cmd, "log") == 0) {
-		//swap_info_log();
-		return 0;
-	} else if (strcmp(cmd, "readahead") == 0) {
-		printk(KERN_INFO "prefetching set to LINUX READAHEAD\n");
-		//set_custom_prefetch(0);
-		return 0;
-	} else
-		usage();
+*/
+	print_memtrace_flags();
 	return 0;
 }
 
@@ -211,14 +228,13 @@ static void __exit leap_functionality_exit(void)
 {
 	int i;
 
-	printk(KERN_INFO "resetting injection points to noop");
+	printk(KERN_DEBUG "resetting injection points to noop");
 	for (i = 0; i < 100; i++)
 		set_pointer(i, kernel_noop);
 
 	// free vmallocs, in case the process crashed or used syscalls incorerclty
 	record_force_clean();
 	fetch_force_clean();
-	printk(KERN_INFO "Cleaning up leap functionality sample module.\n");
 }
 
 module_init(leap_functionality_init);
