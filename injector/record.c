@@ -65,7 +65,7 @@ void record_init(pid_t pid, const char *proc_name)
 	}
 
 	set_pointer(5, do_unmap_5);
-	set_pointer(6, do_unmap_5);//<-- for handle_pte_fault
+	set_pointer(6, do_unmap_5); //<-- for handle_pte_fault
 	set_pointer(2, do_page_fault_2);
 }
 
