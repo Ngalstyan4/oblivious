@@ -240,10 +240,10 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 {
 	int ret = 0;
 	bool skip = false;
-	bool backout = true;
 
-	(*pointers[32])(page, wbc, &skip, &backout);
-	if (backout) return swap_writepage_sync(page, wbc);
+	(*pointers[32])(page, wbc, &skip);
+	if (unlikely(memtrace_getflag(FASTSWAP_ASYNCWRITES) == 0))
+		return swap_writepage_sync(page, wbc);
 
 	if (try_to_free_swap(page)) {
 		unlock_page(page);

@@ -570,8 +570,6 @@ static int scan_swap_map_slots(struct swap_info_struct *si,
 	unsigned long last_in_cluster = 0;
 	int latency_ration = LATENCY_LIMIT;
 	int n_ret = 0;
-	bool skip_ssd = true;
-	(*pointers[35])(&skip_ssd);
 
 	if (nr > SWAP_BATCH)
 		nr = SWAP_BATCH;
@@ -597,7 +595,7 @@ static int scan_swap_map_slots(struct swap_info_struct *si,
 	 * in doing this and skipping it saves ~30% of cpu cycles under
 	 * memory pressure.
 	 * */
-	if (likely(skip_ssd))
+	if (likely(memtrace_getflag(SWAP_SSD_OPTIMIZATION)))
 		goto scan;
 	/* SSD algorithm */
 	if (si->cluster_info) {
