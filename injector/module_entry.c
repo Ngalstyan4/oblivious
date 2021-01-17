@@ -16,11 +16,11 @@
 #include "page_buffer.h"
 #include "record.h"
 #include "fetch.h"
+#include "evict.h"
 #include "kevictd.h"
 
-
-MODULE_LICENSE("");
 MODULE_AUTHOR("");
+MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("");
 static char *cmd;
 //todo: remove
@@ -57,6 +57,7 @@ void mem_pattern_trace_start(int flags)
 		//activate_prefetch_buffer(1);
 		//set_custom_prefetch(2);
 		fetch_init(pid, proc_name, current->mm);
+		evict_init();
 	}
 }
 
@@ -66,6 +67,7 @@ void mem_pattern_trace_end(int flags)
 
 	// all _fini functions check whether they have been initialized
 	// before performing any free-ing so no need to do it here
+	evict_fini();
 	fetch_fini();
 	record_fini();
 }
@@ -102,7 +104,6 @@ static void mem_pattern_trace_3(int flags)
 	}
 }
 
-
 static void usage(void)
 {
 	printk(KERN_INFO "To enable remote I/O data path: insmod %ld"
@@ -119,16 +120,66 @@ static void usage(void)
 			 "cmd=\"log\"\n");
 }
 
+static void swap_writepage_32(struct page *page, struct writeback_control *wbc,
+			      bool *skip, bool *backout)
+{
+	*backout = false;
+	return;
+}
+
+static void no_skip_ssd_35(bool *skip_ssd)
+{
+	*skip_ssd = false;
+}
+
 static int __init leap_functionality_init(void)
 {
-	// 2 is done in the switch below
-	// sets up syscall interface injection which sets up
-	// rest of necessary function links
-	set_pointer(3, mem_pattern_trace_3);
+
 	if (!cmd) {
 		usage();
 		return 0;
 	}
+
+	if (strcmp(cmd, "vanilla_fastswap") == 0) {
+		printk(KERN_INFO "Vanilla fastswap \n");
+		// backs out from ssd optimization
+		set_pointer(35, no_skip_ssd_35);
+		return 0;
+	}
+
+	if (strcmp(cmd, "vanilla_fastswap_ssdopt") == 0) {
+		printk(KERN_INFO "Vanilla fastswap + swap write path software "
+				 "optimization\n");
+		return 0;
+	}
+
+	if (strcmp(cmd, "fastswap_ssdopt_asyncwrites") == 0) {
+		printk(KERN_INFO "Fastswap with optimized swap writing and "
+				 "async writes \n");
+		// backs out from sync writes which is the default in this kernel build
+		set_pointer(32, swap_writepage_32);
+		return 0;
+	}
+
+	if (strcmp(cmd, "fastwap_ssdopt_syncwrites_prefetching") == 0) {
+		printk(KERN_INFO "Fastswap with optimized swap writing, sync "
+				 "writes and prefetching\n");
+		// sets up syscall interface injection which sets up
+		// rest of necessary function links
+		set_pointer(3, mem_pattern_trace_3);
+		return 0;
+	}
+
+	if (strcmp(cmd, "fastwap_ssdopt_async_writes_prefetching") == 0) {
+		printk(KERN_INFO "Fastswap with optimized swap writing, async "
+				 "writes and prefetching\n");
+		// sets up syscall interface injection which sets up
+		// rest of necessary function links
+		set_pointer(3, mem_pattern_trace_3);
+		evict_init();
+		return 0;
+	}
+
 	if (strcmp(cmd, "remote_on") == 0) {
 		printk(KERN_INFO "Leap remote memory is on\n");
 		//set_process_id(1);
