@@ -11,7 +11,11 @@ enum memtrace_state_lags {
 	SWAP_SSD_OPTIMIZATION = 1 << 1,
 	FASTSWAP_ASYNCWRITES = 1 << 2,
 
-	FRONTSWAP_ON = 1 << 3,
+	TAPE_FETCH = 1 << 3,
+	PAGE_BUFFER_ADD = 1 << 4,
+	PAGE_BUFFER_EVICT = 1 << 5,
+
+	//FRONTSWAP_ON = 1 << 3,
 };
 // space for mem_pattern_trace state which needs to live accross injector
 // module reloads.

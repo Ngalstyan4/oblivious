@@ -7,6 +7,8 @@
 #include <linux/injections.h>
 
 #include "common.h"
+#include "kevictd.h"
+#include "page_buffer.h"
 
 const unsigned long MAX_SEARCH_DIST = 20;
 
@@ -125,9 +127,12 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 		}
 
 		if (unlikely(fetch.pos >= fetch.next_fetch)) {
-			down_read(&fetch.mm->mmap_sem);
-			//debug_print_prefetch();
-			for (i = 0; i < 500 && num_prefetch < 500; i++) {
+			//q:: what is down_read? is it not necessary here?
+			//down_read(&fetch.mm->mmap_sem);
+
+			if (memtrace_getflag(PAGE_BUFFER_EVICT))
+				debug_print_prefetch();
+			for (i = 0; i < 32 && num_prefetch < 16; i++) {
 				unsigned long paddr =
 					fetch.accesses[fetch.pos + i];
 
@@ -138,8 +143,8 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 			fetch.found_counter++;
 			fetch.next_fetch = fetch.pos + i;
 			// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
-			//lru_add_drain();
-			up_read(&fetch.mm->mmap_sem);
+			//lru_add_drain();// <Q::todo:: what does this do?
+			//up_read(&fetch.mm->mmap_sem);
 		}
 	}
 }
@@ -191,7 +196,9 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
 	swap_readpage(page);
 	SetPageReadahead(page);
 	put_page(page); //= page_cache_release
-	//my_add_page_to_buffer(page);
+
+	if (memtrace_getflag(PAGE_BUFFER_ADD))
+		my_add_page_to_buffer(page);
 	return true;
 }
 /* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE END ++++++++++++++++++++++*/

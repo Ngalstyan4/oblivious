@@ -2781,7 +2781,7 @@ static void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
  * returns:	0, if no pages reclaimed
  * 		else, the number of pages reclaimed
  */
-static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
+unsigned long do_try_to_free_pages(struct zonelist *zonelist,
 					  struct scan_control *sc)
 {
 	int initial_priority = sc->priority;
@@ -2829,6 +2829,7 @@ retry:
 
 	return 0;
 }
+EXPORT_SYMBOL(do_try_to_free_pages);
 
 static bool pfmemalloc_watermark_ok(pg_data_t *pgdat)
 {
@@ -3075,6 +3076,7 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 
 	return nr_reclaimed;
 }
+EXPORT_SYMBOL(try_to_free_mem_cgroup_pages);
 #endif
 
 static void age_active_anon(struct pglist_data *pgdat,

@@ -1346,11 +1346,13 @@ int mem_cgroup_select_victim_node(struct mem_cgroup *memcg)
 	memcg->last_scanned_node = node;
 	return node;
 }
+EXPORT_SYMBOL(mem_cgroup_select_victim_node);
 #else
 int mem_cgroup_select_victim_node(struct mem_cgroup *memcg)
 {
 	return 0;
 }
+EXPORT_SYMBOL(mem_cgroup_select_victim_node);
 #endif
 
 static int mem_cgroup_soft_reclaim(struct mem_cgroup *root_memcg,

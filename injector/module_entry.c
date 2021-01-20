@@ -97,12 +97,20 @@ static void mem_pattern_trace_3(int flags)
 static void print_memtrace_flags()
 {
 	printk(KERN_INFO "memtrace global flags:\n"
-			 "Tape operations\t\t %s (tape_ops)\n"
-			 "Swap SSD Optim\t\t %s (ssdopt)\n"
-			 "Fastswap writes\t\t %s (async_writes)\n",
-	       memtrace_getflag(TAPE_OPS) ? "ON" : "OFF",
-	       memtrace_getflag(SWAP_SSD_OPTIMIZATION) ? "ON" : "OFF",
-	       memtrace_getflag(FASTSWAP_ASYNCWRITES) ? "ASYNC" : "SYNC");
+			 "%-30s %s (%s)\n"
+			 "%-30s %s (%s)\n"
+			 "%-30s %s (%s)\n"
+			 "%-30s %s (%s)\n"
+			 "%-30s %s (%s)\n",
+	       // clang-format off
+		"Tape operations", memtrace_getflag(TAPE_OPS) ? "ON" : "OFF", "tape_ops",
+		"Swap SSD Optim",  memtrace_getflag(SWAP_SSD_OPTIMIZATION) ? "ON" : "OFF", "ssdopt",
+		"Fastswap writes",  memtrace_getflag(FASTSWAP_ASYNCWRITES) ? "ASYNC" : "SYNC", "async_writes",
+
+		"Prefetch into custom buf",  memtrace_getflag(PAGE_BUFFER_ADD) ? "ON" : "OFF", "pagebuf_add",
+		"Evict with custom buf",  memtrace_getflag(PAGE_BUFFER_EVICT) ? "ON" : "OFF", "pagebuf_evict"
+	       // clang-format on
+	       );
 }
 
 static void usage(void)
@@ -150,6 +158,22 @@ static int __init leap_functionality_init(void)
 
 		*val == '1' ? memtrace_setflag(FASTSWAP_ASYNCWRITES) :
 			      memtrace_clearflag(FASTSWAP_ASYNCWRITES);
+	} else if (strcmp(cmd, "pagebuf_add") == 0) {
+		if (!val || (*val != '0' && *val != '1')) {
+			usage();
+			return 0;
+		}
+
+		*val == '1' ? memtrace_setflag(PAGE_BUFFER_ADD) :
+			      memtrace_clearflag(PAGE_BUFFER_ADD);
+	} else if (strcmp(cmd, "pagebuf_evict") == 0) {
+		if (!val || (*val != '0' && *val != '1')) {
+			usage();
+			return 0;
+		}
+
+		*val == '1' ? memtrace_setflag(PAGE_BUFFER_EVICT) :
+			      memtrace_clearflag(PAGE_BUFFER_EVICT);
 	} else {
 		usage();
 		return 0;
