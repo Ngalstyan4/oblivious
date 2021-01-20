@@ -18,6 +18,7 @@ typedef struct {
 	int found_counter;
 	int num_fault;
 	struct mm_struct *mm;
+	struct work_struct prefetch_work;
 	unsigned long *accesses;
 	unsigned long num_accesses;
 	unsigned long pos;
@@ -35,6 +36,29 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 				  unsigned long address,
 				  struct task_struct *tsk, bool *return_early,
 				  int magic);
+
+static void prefetch_work_func(struct work_struct *work)
+{
+	int i = 0;
+	int num_prefetch = 0;
+	//q:: what is down_read? is it not necessary here?
+	//down_read(&fetch.mm->mmap_sem);
+
+	if (memtrace_getflag(PAGE_BUFFER_EVICT))
+		debug_print_prefetch();
+	for (i = 0; i < 32 && num_prefetch < 16; i++) {
+		unsigned long paddr = fetch.accesses[fetch.pos + i];
+
+		if (prefetch_addr(paddr, fetch.mm) == true)
+			num_prefetch++;
+	}
+	//printk(KERN_INFO "num prefetch-%d, ii %d", num_prefetch, i);
+	fetch.found_counter++;
+	fetch.next_fetch = fetch.pos + i;
+	// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
+	//lru_add_drain();// <Q::todo:: what does this do?
+	//up_read(&fetch.mm->mmap_sem);
+}
 
 void fetch_init(pid_t pid, const char *proc_name, struct mm_struct *mm)
 {
@@ -69,6 +93,8 @@ void fetch_init(pid_t pid, const char *proc_name, struct mm_struct *mm)
 	fetch.accesses = buf;
 	fetch.process_pid = pid;
 	fetch.mm = mm;
+
+	INIT_WORK(&fetch.prefetch_work, prefetch_work_func);
 	fetch.prefetch_start = true; // can be used to pause and resume
 	set_pointer(2, do_page_fault_fetch_2);
 }
@@ -76,6 +102,7 @@ void fetch_init(pid_t pid, const char *proc_name, struct mm_struct *mm)
 void fetch_fini()
 {
 	if (fetch.accesses != NULL) {
+		cancel_work_sync(&fetch.prefetch_work);
 		fetch.mm = NULL;
 		printk(KERN_INFO "found %d/%d page faults: min:%ld, maj: %ld\n",
 		       fetch.found_counter, fetch.counter, current->min_flt,
@@ -109,9 +136,7 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 
 	if (fetch.process_pid == tsk->pid) {
 
-		int i;
 		int dist = 0;
-		int num_prefetch = 0;
 		fetch.num_fault++;
 		while (dist < MAX_SEARCH_DIST &&
 		       (fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) !=
@@ -127,24 +152,8 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 		}
 
 		if (unlikely(fetch.pos >= fetch.next_fetch)) {
-			//q:: what is down_read? is it not necessary here?
-			//down_read(&fetch.mm->mmap_sem);
-
-			if (memtrace_getflag(PAGE_BUFFER_EVICT))
-				debug_print_prefetch();
-			for (i = 0; i < 32 && num_prefetch < 16; i++) {
-				unsigned long paddr =
-					fetch.accesses[fetch.pos + i];
-
-				if (prefetch_addr(paddr, fetch.mm) == true)
-					num_prefetch++;
-			}
-			//printk(KERN_INFO "num prefetch-%d, ii %d", num_prefetch, i);
-			fetch.found_counter++;
-			fetch.next_fetch = fetch.pos + i;
-			// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
-			//lru_add_drain();// <Q::todo:: what does this do?
-			//up_read(&fetch.mm->mmap_sem);
+			prefetch_work_func(NULL);
+			//schedule_work_on(7, &fetch.prefetch_work);
 		}
 	}
 }
