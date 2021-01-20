@@ -27,8 +27,8 @@ extern prefetching_state fetch;
 void try_to_unmap_flush_dirty(void);
 #define PREFETCH_BUFFER_SIZE 128
 extern struct page *prefetch_pages[PREFETCH_BUFFER_SIZE];
-char dmesg_pointer[PREFETCH_BUFFER_SIZE + 1];
 extern int current_ind;
+char dmesg_pointer[PREFETCH_BUFFER_SIZE + 1];
 
 typedef struct {
 	struct task_struct *tsk;
@@ -153,7 +153,7 @@ void debug_print_prefetch()
 	int i;
 	int mcount = 0;
 	unsigned long addr;
-	memset(kevictd.refs, 0, 8001);
+	memset(kevictd.refs, 0, PREFETCH_BUFFER_SIZE * sizeof(char));
 	for (i = 0, mcount = 0; i < PREFETCH_BUFFER_SIZE; i++) {
 		struct page *p = prefetch_pages[i];
 		// try page_mapped, PageReferenced (PageWriteback(p) || PageDirty(p))
@@ -173,7 +173,7 @@ void debug_print_prefetch()
 				kevictd.refs[i] = '.';
 		}
 	}
-	printk(KERN_INFO "kevictd: %d buff %s\n", current_ind, kevictd.refs);
+	//printk(KERN_INFO "kevictd: %d buff %s\n", current_ind, kevictd.refs);
 }
 
 static int kevictd_thread(void *data)
@@ -229,7 +229,7 @@ void kevictd_fini()
 	if (kevictd.tsk) {
 		int err = kthread_stop(kevictd.tsk);
 		printk(KERN_INFO"kevictd: evicted %ld/%ld tried \n", kevictd.evict_cnt, kevictd.evict_try_cnt);
-		if (IS_ERR_VALUE(err)) {
+		if (err < 0) {
 			printk(KERN_ERR "kevictd: unable to stop kevictd "
 					"system daemon, err: %d\n",
 			       err);
