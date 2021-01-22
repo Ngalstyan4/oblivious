@@ -11,6 +11,11 @@
 #include "fetch.h"
 #include "evict.h"
 
+#include <linux/vmalloc.h>
+#include <linux/frontswap.h>
+#include <linux/pagemap.h>
+#include <linux/delay.h>
+
 MODULE_AUTHOR("");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("");
@@ -20,6 +25,31 @@ MODULE_PARM_DESC(cmd, "Command to properly change mem_trace system");
 MODULE_PARM_DESC(val, "Value(usually 0 or 1) required for certain commands");
 module_param(cmd, charp, 0000);
 module_param(val, charp, 0000);
+
+void fastswap_bench()
+{
+	int i = 0;
+	const int NUM_PAGES = 100;
+	char *buf = vmalloc(4096 * NUM_PAGES);
+	char *p = NULL;
+	printk(KERN_INFO "Start fastswap write throughput benchmark\n");
+	if (buf == NULL) {
+		printk(KERN_ERR "unable to allocate buffer\n");
+		return;
+	}
+	p = &buf[i * 4096];
+	pte_t *pte = addr2pte((unsigned long)p, current->mm);
+	for (i = 0; i < NUM_PAGES; i++) {
+		struct page *mid_page = pte_page(*pte);
+		pte++;
+		if (__frontswap_store(mid_page) == 0) {
+			set_page_writeback(mid_page);
+			//unlock_page(mid_page);
+		}
+	}
+	msleep(100);
+	vfree(buf);
+}
 
 void mem_pattern_trace_start(int flags)
 {
@@ -75,6 +105,13 @@ static void mem_pattern_trace_3(int flags)
 
 	       );
 
+
+	// for use in miscellaneous experiments
+	if (flags & TRACE_MISC) {
+		fastswap_bench();
+		return;
+	}
+
 	if (flags & TRACE_START) {
 		mem_pattern_trace_start(flags);
 		return;
@@ -93,6 +130,7 @@ static void mem_pattern_trace_3(int flags)
 		return;
 	}
 }
+
 
 static void print_memtrace_flags()
 {
@@ -174,6 +212,8 @@ static int __init leap_functionality_init(void)
 
 		*val == '1' ? memtrace_setflag(PAGE_BUFFER_EVICT) :
 			      memtrace_clearflag(PAGE_BUFFER_EVICT);
+	} else if (strcmp(cmd, "throughput_bench") == 0) {
+		fastswap_bench();
 	} else {
 		usage();
 		return 0;

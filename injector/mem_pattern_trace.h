@@ -13,6 +13,8 @@ enum trace_flags {
 // todo:: remove these, here for easy cli use only
 	KEVICTD_INIT = 1<<7,
 	KEVICTD_FINI = 1<<8,
+
+	TRACE_MISC = 1<<9,
 };
 
 #define mem_pattern_trace 333
