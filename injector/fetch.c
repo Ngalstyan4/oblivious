@@ -76,24 +76,30 @@ static void prefetch_work_func(struct work_struct *work)
 void fetch_init(pid_t pid, const char *proc_name, struct mm_struct *mm)
 {
 	char trace_filepath[FILEPATH_LEN];
-	unsigned long *buf = vmalloc(TRACE_ARRAY_SIZE);
+	size_t filesize = 0;
+	unsigned long *buf;
 	size_t count;
+
 	snprintf(trace_filepath, FILEPATH_LEN, TRACE_FILE_FMT, proc_name);
 
 	// in case path is too long, truncate;
 	trace_filepath[FILEPATH_LEN - 1] = '\0';
 
+	memset(&fetch, 0, sizeof(fetch));
+
+	// at this point we are sure the file exists, that's handled by syscall entry
+	filesize = file_size(trace_filepath);
+
+	buf = vmalloc(filesize);
 	if (buf == NULL) {
 		printk(KERN_ERR
 		       "unable to allocate memory for reading the trace\n");
 		return;
 	}
 
-	memset(&fetch, 0, sizeof(fetch));
+	count = read_trace(trace_filepath, (char *)buf, filesize);
 
-	count = read_trace(trace_filepath, (char *)buf, TRACE_ARRAY_SIZE);
-
-	if (count == 0) {
+	if (filesize == 0 || count == 0) {
 		printk(KERN_ERR "unable to initialize fetching\n");
 		vfree(buf);
 		return;

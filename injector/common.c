@@ -71,17 +71,29 @@ bool proc_trace_exists(const char *proc_name)
 	return file_exists(trace_filepath);
 }
 
-bool file_exists(const char *filepath)
+static bool file_stat(const char *filepath, struct kstat *stat_struct)
 {
-
-	struct kstat trace_stat;
-	bool trace_exists;
+	bool err;
 
 	mm_segment_t old_fs = get_fs();
-	set_fs(get_ds()); // KERNEL_DS
-	trace_exists = 0 == vfs_stat(filepath, &trace_stat);
+	set_fs(get_ds()); // kernel_ds
+	err = vfs_stat(filepath, stat_struct);
 	set_fs(old_fs);
-	return trace_exists;
+	return err;
+}
+
+bool file_exists(const char *filepath)
+{
+	struct kstat trace_stat;
+	return 0 == file_stat(filepath, &trace_stat);
+}
+
+size_t file_size(const char *filepath)
+{
+	struct kstat trace_stat;
+	if (file_stat(filepath, &trace_stat) != 0)
+		return -1;
+	return trace_stat.size;
 }
 
 size_t read_trace(const char *filepath, char *buf, long max_len)

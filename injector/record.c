@@ -6,6 +6,9 @@
 #include <linux/injections.h>
 
 #include "common.h"
+
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 40ULL
+#define TRACE_MAX_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 // controlls whether data structures are maintained for in alt pattern
 // or it is assumed that this never happens
 #define IN_ALT_PATTERN_CHECKS 1
@@ -82,6 +85,12 @@ void record_fini()
 	// by the process therefore it is still alive
 
 	if (record_initialized()) {
+		if (trace.pos >= TRACE_MAX_LEN) {
+			printk(KERN_ERR "Ran out of buffer space");
+			printk(KERN_ERR "Proc mem pattern not fully recorded\n"
+					"please increase buffer "
+					"size(TRACE_ARRAY_SIZE) and rerun\n");
+		}
 		write_trace(trace.filepath, (const char *)trace.accesses,
 			    trace.pos * sizeof(void *));
 		if (trace.alt_pattern_counter)
@@ -194,7 +203,7 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		return;
 	}
 
-	if (trace.process_pid == tsk->pid && trace.pos < TRACE_LEN) {
+	if (trace.process_pid == tsk->pid && trace.pos < TRACE_MAX_LEN) {
 
 		struct mm_struct *mm = tsk->mm;
 		down_read(&mm->mmap_sem);
