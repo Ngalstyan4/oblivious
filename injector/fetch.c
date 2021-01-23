@@ -10,12 +10,11 @@
 #include "kevictd.h"
 #include "page_buffer.h"
 
-const unsigned long MAX_SEARCH_DIST = 20;
-
 typedef struct {
 	pid_t process_pid;
 	int counter;
 	int found_counter;
+	int already_present;
 	int num_fault;
 	struct mm_struct *mm;
 	struct work_struct prefetch_work;
@@ -39,23 +38,37 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 
 static void prefetch_work_func(struct work_struct *work)
 {
+	static int count = 0;
 	int i = 0;
 	int num_prefetch = 0;
+	pte_t *pte;
 	//q:: what is down_read? is it not necessary here?
 	//down_read(&fetch.mm->mmap_sem);
-
+	unsigned long fetch_start = fetch.next_fetch;
 	if (memtrace_getflag(PAGE_BUFFER_EVICT))
 		debug_print_prefetch();
-	for (i = 0; i < 32 && num_prefetch < 16; i++) {
-		unsigned long paddr = fetch.accesses[fetch.pos + i];
+	for (i = 0; i < 10 && num_prefetch < 5; i++) {
+		unsigned long paddr = fetch.accesses[fetch_start + i];
 
 		if (prefetch_addr(paddr, fetch.mm) == true)
 			num_prefetch++;
 	}
 	//printk(KERN_INFO "num prefetch-%d, ii %d", num_prefetch, i);
 	fetch.found_counter++;
-	fetch.next_fetch = fetch.pos + i;
-	// printk(KERN_INFO "num prefetch %d\n", num_prefetch);
+	fetch.next_fetch = fetch_start + i;
+	while (true) {
+		pte = addr2pte(fetch.accesses[fetch.next_fetch], fetch.mm);
+		if (pte && !pte_none(*pte) && pte_present(*pte)) {
+			// page already mapped in page table
+			fetch.next_fetch++;
+			fetch.already_present++;
+		} else
+			break;
+	}
+	if (count++ < 1000)
+		printk(KERN_INFO "next fetch ind: %ld addr :%lx",
+		       fetch.next_fetch, fetch.accesses[fetch.next_fetch]);
+
 	//lru_add_drain();// <Q::todo:: what does this do?
 	//up_read(&fetch.mm->mmap_sem);
 }
@@ -104,9 +117,11 @@ void fetch_fini()
 	if (fetch.accesses != NULL) {
 		cancel_work_sync(&fetch.prefetch_work);
 		fetch.mm = NULL;
-		printk(KERN_INFO "found %d/%d page faults: min:%ld, maj: %ld\n",
-		       fetch.found_counter, fetch.counter, current->min_flt,
-		       current->maj_flt);
+		printk(KERN_INFO "found %d/%d page faults: min:%ld, maj: %ld "
+				 "already present: %d next_fetch: %ld\n",
+		       fetch.found_counter, fetch.num_fault, current->min_flt,
+		       current->maj_flt, fetch.already_present,
+		       fetch.next_fetch);
 		vfree(fetch.accesses);
 		fetch.accesses = NULL; // todo:: should not need once in kernel
 	}
@@ -135,26 +150,19 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 	}
 
 	if (fetch.process_pid == tsk->pid) {
-
-		int dist = 0;
+		static int print_limit = 0;
 		fetch.num_fault++;
-		while (dist < MAX_SEARCH_DIST &&
-		       (fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) !=
-			       (address & PAGE_ADDR_MASK))
-			dist++;
-		if ((fetch.accesses[fetch.pos + dist] & PAGE_ADDR_MASK) ==
-		    (address & PAGE_ADDR_MASK)) {
-			fetch.pos += dist;
-			fetch.counter++;
-			// printk("fault num:%d %lx fetch pos:%ld\n",
-			//        fetch.num_fault, address & PAGE_ADDR_MASK,
-			//        fetch.pos);
+
+		if (fetch.next_fetch == 0 ||
+		    (fetch.accesses[fetch.next_fetch] & PAGE_ADDR_MASK) ==
+			    (address & PAGE_ADDR_MASK)) {
+			prefetch_work_func(NULL);
 		}
 
-		if (unlikely(fetch.pos >= fetch.next_fetch)) {
-			prefetch_work_func(NULL);
-			//schedule_work_on(7, &fetch.prefetch_work);
-		}
+		if (print_limit++ < 1000)
+			printk(KERN_INFO "%d:fetch.next_fetch:%ld addr: %lx",
+			       print_limit, fetch.next_fetch,
+			       (address & PAGE_ADDR_MASK));
 	}
 }
 
