@@ -1,6 +1,16 @@
 #ifndef COMMON_H
 #define COMMON_H
 
+// enable debugfs monitoring hooks of the module
+// see debugfs docs here `
+// https://www.kernel.org/doc/html/latest//filesystems/debugfs.html
+#define DEBUG_FS 1
+
+#if DEBUG_FS
+#include <linux/debugfs.h>
+extern struct dentry *debugfs_root;
+#endif
+
 #define FILEPATH_LEN 256
 extern const char *TRACE_FILE_FMT;
 

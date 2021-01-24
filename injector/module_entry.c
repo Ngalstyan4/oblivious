@@ -11,6 +11,7 @@
 #include "fetch.h"
 #include "evict.h"
 
+// for fastswap_bench: todo: remove/move elsewhere
 #include <linux/vmalloc.h>
 #include <linux/frontswap.h>
 #include <linux/pagemap.h>
@@ -32,13 +33,14 @@ void fastswap_bench()
 	const int NUM_PAGES = 100;
 	char *buf = vmalloc(4096 * NUM_PAGES);
 	char *p = NULL;
+	pte_t *pte = NULL;
 	printk(KERN_INFO "Start fastswap write throughput benchmark\n");
 	if (buf == NULL) {
 		printk(KERN_ERR "unable to allocate buffer\n");
 		return;
 	}
 	p = &buf[i * 4096];
-	pte_t *pte = addr2pte((unsigned long)p, current->mm);
+	pte = addr2pte((unsigned long)p, current->mm);
 	for (i = 0; i < NUM_PAGES; i++) {
 		struct page *mid_page = pte_page(*pte);
 		pte++;
@@ -164,13 +166,15 @@ static void usage(void)
 
 static int __init leap_functionality_init(void)
 {
-	// set syscall entrypoint for prefetching
 	set_pointer(3, mem_pattern_trace_3);
 
 	if (!cmd) {
 		usage();
 		return -1;
 	}
+#if DEBUG_FS
+	debugfs_root = debugfs_create_dir("memtrace", NULL);
+#endif
 
 	if (strcmp(cmd, "tape_ops") == 0) {
 		if (!val || (*val != '0' && *val != '1')) {
@@ -231,6 +235,9 @@ static void __exit leap_functionality_exit(void)
 	for (i = 0; i < 100; i++)
 		set_pointer(i, kernel_noop);
 
+#if DEBUG_FS
+	 debugfs_remove_recursive(debugfs_root);
+#endif
 	// free vmallocs and other state, in case
 	// the process crashed or used syscalls incorrectly
 	record_force_clean();

@@ -15,6 +15,9 @@ const unsigned long PAGE_ADDR_MASK = ~0xfff;
 const unsigned long PRESENT_BIT_MASK = 1UL;
 const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
 
+#ifdef DEBUG_FS
+struct dentry *debugfs_root;
+#endif
 /*
    * Page fault error code bits:
  *
