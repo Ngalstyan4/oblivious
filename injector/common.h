@@ -11,6 +11,12 @@
 extern struct dentry *debugfs_root;
 #endif
 
+// atomic counter advanced by evict.c ONLY.
+// Used to synchronize lru related print
+// statements from different parts of the module
+// for coherent post processing
+extern atomic_t metronome;
+
 #define FILEPATH_LEN 256
 extern const char *TRACE_FILE_FMT;
 

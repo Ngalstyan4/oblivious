@@ -15,6 +15,7 @@ const unsigned long PAGE_ADDR_MASK = ~0xfff;
 const unsigned long PRESENT_BIT_MASK = 1UL;
 const unsigned long SPECIAL_BIT_MASK = 1UL << 58;
 
+atomic_t metronome = ATOMIC_INIT(0);
 #ifdef DEBUG_FS
 struct dentry *debugfs_root;
 #endif
@@ -54,12 +55,6 @@ pte_t *addr2pte(unsigned long addr, struct mm_struct *mm)
 		return pte;
 	pte = pte_offset_map(pmd, addr);
 
-	// printk(KERN_WARNING "page walk ahead %d %s %lx", i,
-	//        !pte_none(*vm_entry.pte) &&
-	// 		       pte_present(*vm_entry.pte) ?
-	// 	       "PRESENT" :
-	// 	       "GONE",
-	//        addr & PAGE_ADDR_MASK);
 	return pte;
 }
 

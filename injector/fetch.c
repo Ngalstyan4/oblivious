@@ -10,6 +10,11 @@
 #include "kevictd.h"
 #include "page_buffer.h"
 
+#define MAX_PRINT_LEN 768
+//todo::
+// dangerous!! probably need to protect by locks/atomics? but seems to work for now..
+char fetch_print_buf[MAX_PRINT_LEN];
+char *fetch_buf_end = fetch_print_buf;
 typedef struct {
 	pid_t process_pid;
 	int counter;
@@ -55,6 +60,7 @@ static void prefetch_work_func(struct work_struct *work)
 	}
 	//printk(KERN_INFO "num prefetch-%d, ii %d", num_prefetch, i);
 	fetch.found_counter++;
+	//lru_add_drain();// <Q::todo:: what does this do?.. Push any new pages onto the LRU now
 	fetch.next_fetch = fetch_start + i;
 	while (true) {
 		pte = addr2pte(fetch.accesses[fetch.next_fetch], fetch.mm);
@@ -69,7 +75,6 @@ static void prefetch_work_func(struct work_struct *work)
 		printk(KERN_INFO "next fetch ind: %ld addr :%lx",
 		       fetch.next_fetch, fetch.accesses[fetch.next_fetch]);
 
-	//lru_add_drain();// <Q::todo:: what does this do?
 	//up_read(&fetch.mm->mmap_sem);
 }
 
@@ -164,11 +169,6 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 			    (address & PAGE_ADDR_MASK)) {
 			prefetch_work_func(NULL);
 		}
-
-		if (print_limit++ < 1000)
-			printk(KERN_INFO "%d:fetch.next_fetch:%ld addr: %lx",
-			       print_limit, fetch.next_fetch,
-			       (address & PAGE_ADDR_MASK));
 	}
 }
 
@@ -218,6 +218,10 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
 	}
 	swap_readpage(page);
 	SetPageReadahead(page);
+
+	if (fetch_buf_end < fetch_print_buf + sizeof(fetch_print_buf))
+		fetch_buf_end += snprintf(fetch_buf_end, 10, "%lx,",
+					  (unsigned long)page_to_pfn(page));
 	put_page(page); //= page_cache_release
 
 	if (memtrace_getflag(PAGE_BUFFER_ADD))
