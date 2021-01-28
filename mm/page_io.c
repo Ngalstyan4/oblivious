@@ -251,8 +251,34 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 	}
 	if (skip) goto out;
 	if (frontswap_store_async(page) == 0) {
+		//todo:: I do not understand set_page_writeback/end_page_writeback
+		//and the kernel docs warn that getting this wrong can lead to data loss
+
+		// Documentation/filesystems/Locking document talks about the API extensively
+		//It seems this is used to make sure updated made on a page while it is in
+		// bio writeback process, changes on it are not lost. Not sure whether this is
+		// bio specific or a similar thing can happen while the page is in rdma queue?
+		//
+		// The safer thing to do would be move end_page_writeback to done function
+		// of cq callback. But things break often when I do that: in particular,
+		// end_page_writeback checks for a set writeback flag before clearing it and
+		// reports a bug when the flag is not set and this is the code path that is triggered.
+		//
+		// since we do not know what is happening, it would be safer to at least
+		// unlock the page in the cq callback function. but the "Locking" kernel
+		// doc says that unlock must be called between set-end page_writeback as below.
+		//
+		// Brobably should not be a consideration, but leaving unlock_page here
+		// as opposed to in cq callback increases throughput by ~120 MB/s
+		// And in theory the window between end_page_writeback and page actually
+		// being written out exists in the synchronous write case as well since
+		// (see the sync write code below) WRITEBACK flag is not actually set on
+		// the page while the page goes through the NIC. So it seems this has worked
+		// for Fastswap before but if things beak weirdly, this is a good place to
+		// look for a reason.
 		set_page_writeback(page);
 		unlock_page(page);
+		end_page_writeback(page);
 		goto out;
 	}
 
