@@ -114,6 +114,8 @@ void record_force_clean()
 /************************** TRACE RECORDING FOR MEMORY PREFETCHING BEGIN ********************************/
 __always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
 {
+	//todo::  `taskset -c 1 ./mmap_random_rw 4 500000 1000000 w t` breaks the tracer
+	//works fine for slightly smaller memory allocatons
 	unsigned long pte_deref_value = (unsigned long)((*entry->pte).pte);
 	*return_early = false;
 
