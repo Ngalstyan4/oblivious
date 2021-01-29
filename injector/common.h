@@ -27,6 +27,7 @@ extern const unsigned long SPECIAL_BIT_MASK;
 // N.B. does not take mmap_sem and the caller must take the semaphore
 // if need be
 pte_t *addr2pte(unsigned long addr, struct mm_struct *mm);
+pte_t *addr2ptepmd(unsigned long addr, struct mm_struct *mm, pmd_t **pmd_ret);
 bool proc_trace_exists(const char *proc_name);
 bool file_exists(const char *filepath);
 size_t file_size(const char *filepath);

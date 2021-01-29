@@ -58,6 +58,27 @@ pte_t *addr2pte(unsigned long addr, struct mm_struct *mm)
 	return pte;
 }
 
+pte_t *addr2ptepmd(unsigned long addr, struct mm_struct *mm, pmd_t **pmd_ret)
+{
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte = NULL;
+
+	pgd = pgd_offset(mm, addr);
+	if (pgd_none(*pgd) || pgd_bad(*pgd))
+		return pte;
+	pud = pud_offset(pgd, addr);
+	if (pud_none(*pud) || pud_bad(*pud))
+		return pte;
+	pmd = pmd_offset(pud, addr);
+	if (pmd_none(*pmd) || pud_large(*(pud)))
+		return pte;
+	pte = pte_offset_map(pmd, addr);
+	*pmd_ret = pmd;
+	return pte;
+}
+
 bool proc_trace_exists(const char *proc_name)
 {
 	char trace_filepath[FILEPATH_LEN];

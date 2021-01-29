@@ -114,8 +114,8 @@ static void print_memtrace_flags()
 		"Swap SSD Optim",  memtrace_getflag(SWAP_SSD_OPTIMIZATION) ? "ON" : "OFF", "ssdopt",
 		"Fastswap writes",  memtrace_getflag(FASTSWAP_ASYNCWRITES) ? "ASYNC" : "SYNC", "async_writes",
 
-		"Prefetch into custom buf",  memtrace_getflag(PAGE_BUFFER_ADD) ? "ON" : "OFF", "pagebuf_add",
-		"Evict with custom buf",  memtrace_getflag(PAGE_BUFFER_EVICT) ? "ON" : "OFF", "pagebuf_evict"
+		"Tape fetch",  memtrace_getflag(TAPE_FETCH) ? "ON" : "OFF", "tape_fetch",
+		"print LRU dmesg logs",  memtrace_getflag(LRU_LOGS) ? "ON" : "OFF", "lru_logs"
 	       // clang-format on
 	       );
 }
@@ -167,24 +167,22 @@ static int __init leap_functionality_init(void)
 
 		*val == '1' ? memtrace_setflag(FASTSWAP_ASYNCWRITES) :
 			      memtrace_clearflag(FASTSWAP_ASYNCWRITES);
-	} else if (strcmp(cmd, "pagebuf_add") == 0) {
+	} else if (strcmp(cmd, "tape_fetch") == 0) {
 		if (!val || (*val != '0' && *val != '1')) {
 			usage();
 			return 0;
 		}
 
-		*val == '1' ? memtrace_setflag(PAGE_BUFFER_ADD) :
-			      memtrace_clearflag(PAGE_BUFFER_ADD);
-	} else if (strcmp(cmd, "pagebuf_evict") == 0) {
+		*val == '1' ? memtrace_setflag(TAPE_FETCH) :
+			      memtrace_clearflag(TAPE_FETCH);
+	} else if (strcmp(cmd, "lru_logs") == 0) {
 		if (!val || (*val != '0' && *val != '1')) {
 			usage();
 			return 0;
 		}
 
-		*val == '1' ? memtrace_setflag(PAGE_BUFFER_EVICT) :
-			      memtrace_clearflag(PAGE_BUFFER_EVICT);
-	} else if (strcmp(cmd, "throughput_bench") == 0) {
-		fastswap_bench();
+		*val == '1' ? memtrace_setflag(LRU_LOGS) :
+			      memtrace_clearflag(LRU_LOGS);
 	} else {
 		usage();
 		return 0;

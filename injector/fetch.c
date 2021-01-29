@@ -8,9 +8,11 @@
 
 #include "common.h"
 #include "kevictd.h"
-#include "page_buffer.h"
 
 #define MAX_PRINT_LEN 768
+
+// exported from mm/memory.c mm/internal.h function
+int do_swap_page(struct vm_fault *vmf);
 //todo::
 // dangerous!! probably need to protect by locks/atomics? but seems to work for now..
 char fetch_print_buf[MAX_PRINT_LEN];
@@ -34,7 +36,8 @@ typedef struct {
 //todo:: switch back to static
 prefetching_state fetch;
 
-static bool prefetch_addr(unsigned long addr, struct mm_struct *mm);
+static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
+			  struct vm_fault *vmf);
 static void do_page_fault_fetch_2(struct pt_regs *regs,
 				  unsigned long error_code,
 				  unsigned long address,
@@ -43,22 +46,23 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 
 static void prefetch_work_func(struct work_struct *work)
 {
-	static int count = 0;
 	int i = 0;
 	int num_prefetch = 0;
+	struct vm_fault vmf;
 	pte_t *pte;
 	//q:: what is down_read? is it not necessary here?
 	//down_read(&fetch.mm->mmap_sem);
 	unsigned long fetch_start = fetch.next_fetch;
-	if (memtrace_getflag(PAGE_BUFFER_EVICT))
-		debug_print_prefetch();
-	for (i = 0; i < 10 && num_prefetch < 5; i++) {
+	if (unlikely(!memtrace_getflag(TAPE_FETCH)))
+		return;
+	for (i = 0; i < 100 && num_prefetch < 50; i++) {
 		unsigned long paddr = fetch.accesses[fetch_start + i];
 
-		if (prefetch_addr(paddr, fetch.mm) == true)
+		if (prefetch_addr(paddr, fetch.mm, &vmf) == true) {
 			num_prefetch++;
+			//do_swap_page(&vmf);
+		}
 	}
-	//printk(KERN_INFO "num prefetch-%d, ii %d", num_prefetch, i);
 	fetch.found_counter++;
 	//lru_add_drain();// <Q::todo:: what does this do?.. Push any new pages onto the LRU now
 	fetch.next_fetch = fetch_start + i;
@@ -71,9 +75,6 @@ static void prefetch_work_func(struct work_struct *work)
 		} else
 			break;
 	}
-	if (count++ < 1000)
-		printk(KERN_INFO "next fetch ind: %ld addr :%lx",
-		       fetch.next_fetch, fetch.accesses[fetch.next_fetch]);
 
 	//up_read(&fetch.mm->mmap_sem);
 }
@@ -161,7 +162,6 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 	}
 
 	if (fetch.process_pid == tsk->pid) {
-		static int print_limit = 0;
 		fetch.num_fault++;
 
 		if (fetch.next_fetch == 0 ||
@@ -172,14 +172,17 @@ static void do_page_fault_fetch_2(struct pt_regs *regs,
 	}
 }
 
-static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
+static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
+			  struct vm_fault *vmf)
 {
 	struct page *page;
 	bool allocated = false;
+	struct vm_area_struct *vma;
+	pmd_t *pmd;
 	pte_t *pte;
 	pte_t pte_val;
 	swp_entry_t rmem_entry;
-	pte = addr2pte(addr, mm);
+	pte = addr2ptepmd(addr, mm, &pmd);
 	if (!pte)
 		return false;
 	// prefetch the page if needed
@@ -192,6 +195,7 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
 	if (unlikely(non_swap_entry(rmem_entry)))
 		return false;
 
+	vma = find_vma(mm, addr);
 	// here addr only used in interleave_nid() call to choose a
 	// memory node for the page. it seems it is used to offer
 	// some kind of locality/loadBalancing??
@@ -207,8 +211,8 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
 	// 2) we do not stall the kernel trying to evict things from our prefetched list that we are sure it is not
 	// going to succeed.
 
-	page = __read_swap_cache_async(rmem_entry, GFP_HIGHUSER_MOVABLE,
-				       find_vma(mm, addr), addr, &allocated);
+	page = __read_swap_cache_async(rmem_entry, GFP_HIGHUSER_MOVABLE, vma,
+				       addr, &allocated);
 	if (!page)
 		return false;
 
@@ -224,8 +228,14 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
 					  (unsigned long)page_to_pfn(page));
 	put_page(page); //= page_cache_release
 
-	if (memtrace_getflag(PAGE_BUFFER_ADD))
-		my_add_page_to_buffer(page);
+	vmf->address = addr;
+	vmf->vma = vma;
+	vmf->pmd = pmd;
+	vmf->pte = pte;
+	vmf->orig_pte = pte_val;
+	vmf->ptl = pte_lockptr(mm, pmd);
+	vmf->flags = FAULT_FLAG_USER; // <-- todo::verify, improvising here
+
 	return true;
 }
 /* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE END ++++++++++++++++++++++*/

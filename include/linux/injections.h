@@ -12,8 +12,7 @@ enum memtrace_state_lags {
 	FASTSWAP_ASYNCWRITES = 1 << 2,
 
 	TAPE_FETCH = 1 << 3,
-	PAGE_BUFFER_ADD = 1 << 4,
-	PAGE_BUFFER_EVICT = 1 << 5,
+	LRU_LOGS = 1 << 4,
 
 	//FRONTSWAP_ON = 1 << 3,
 };
