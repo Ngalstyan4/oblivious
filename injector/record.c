@@ -7,11 +7,11 @@
 
 #include "common.h"
 
-#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 40ULL
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 20ULL
 #define TRACE_MAX_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 // controlls whether data structures are maintained for in alt pattern
 // or it is assumed that this never happens
-#define IN_ALT_PATTERN_CHECKS 1
+#define IN_ALT_PATTERN_CHECKS 0
 
 typedef struct {
 	pgd_t *pgd;
@@ -33,6 +33,9 @@ typedef struct {
 	vm_t entry;
 	unsigned long alt_pattern_counter;
 
+	unsigned long microset_size;
+	unsigned long microset_pos;
+	vm_t *microset;
 } tracing_state;
 static tracing_state trace;
 
@@ -67,6 +70,17 @@ void record_init(pid_t pid, const char *proc_name)
 		return;
 	}
 
+	trace.microset_size = 3;
+	trace.microset_pos = 0;
+	trace.microset = vmalloc(trace.microset_size * sizeof(vm_t));
+	if (trace.microset == NULL) {
+		printk(KERN_ERR "Unable to allocate memory for tracing\n");
+		vfree(trace.accesses);
+		trace.accesses = NULL;
+		return;
+	}
+	memset(trace.microset, 0x00, trace.microset_size * sizeof(vm_t));
+
 	set_pointer(5, do_unmap_5);
 	set_pointer(6, do_unmap_5); //<-- for handle_pte_fault
 	set_pointer(2, do_page_fault_2);
@@ -98,6 +112,8 @@ void record_fini()
 			       "ALT PATTERN encountered %ld/%ld times\n",
 			       trace.alt_pattern_counter, trace.pos);
 
+		vfree(trace.microset);
+
 		vfree(trace.accesses);
 		// make sure next call to record_initialized() will return false;
 		trace.accesses = NULL;
@@ -108,9 +124,43 @@ void record_fini()
 // upon module cleanup
 void record_force_clean()
 {
-	if (trace.accesses)
+	if (trace.accesses) {
+		vfree(trace.microset);
 		vfree(trace.accesses);
+		trace.accesses = NULL;
+	}
 }
+
+static bool vm_init(vm_t* entry, struct mm_struct* mm, unsigned long address) {
+	// walk the page table ` https://lwn.net/Articles/106177/
+	//todo:: pteditor does it wrong i think,
+	//it does not dereference pte when passing around
+	entry->address = address;
+	entry->pgd = pgd_offset(mm, address);
+	entry->pud = pud_offset(entry->pgd, address);
+	if (entry->pud == 0) {
+		printk(KERN_WARNING "pud is noooooooone\n");
+		return true;
+	}
+	// todo:: to support thp, do some error checking here and see if a huge page is being allocated
+	entry->pmd = pmd_offset(entry->pud, address);
+	if (pmd_none(*(entry->pmd)) ||
+		pud_large(*(entry->pud))) {
+		if (pmd_none(*(entry->pmd)))
+			printk(KERN_WARNING "pmd is noone %lx",
+				   address);
+		else
+			printk(KERN_ERR "pud is a large page");
+		entry->pmd = NULL;
+		entry->pte = NULL;
+		return true;
+	}
+	//todo:: pte_offset_map_lock<-- what is this? when whould I need to take a lock?
+	entry->pte = pte_offset_map(entry->pmd, address);
+	entry->initialized = true;
+	return false;
+}
+
 /************************** TRACE RECORDING FOR MEMORY PREFETCHING BEGIN ********************************/
 __always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
 {
@@ -143,12 +193,21 @@ static void trace_clear_pte(vm_t *entry)
 		return;
 	// normally, there would just be allocation faults. but for tracing we want to see *all* page
 	// accesses so we make sure that form kernel's point of view the page that the application
-	// accesssed just before faulting on this page, is not present in mememory. Additionally,
+	// accesssed just before faulting on this page, is not present in memory. Additionally,
 	// we set the special bit (bit 58, see x86 manual) to later know that we are responsible
 	// for the fault.
 	pte_deref_value &= ~PRESENT_BIT_MASK;
 	pte_deref_value |= SPECIAL_BIT_MASK;
 	set_pte(entry->pte, native_make_pte(pte_deref_value));
+}
+
+static void drain_microset() {
+	unsigned long i;
+	for (i = 0; i != trace.microset_pos; i++) {
+		trace.accesses[trace.pos++] = trace.microset[i].address & PAGE_ADDR_MASK;
+		trace_clear_pte(&trace.microset[i]);
+	}
+	trace.microset_pos = 0;
 }
 
 #ifdef IN_ALT_PATTERN_CHECKS
@@ -206,44 +265,29 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 	}
 
 	if (trace.process_pid == tsk->pid && trace.pos < TRACE_MAX_LEN) {
-
+		vm_t* entry;
 		struct mm_struct *mm = tsk->mm;
 		down_read(&mm->mmap_sem);
 
-		// walk the page table ` https://lwn.net/Articles/106177/
-		//todo:: pteditor does it wrong i think,
-		//it does not dereference pte when passing around
-		trace.entry.address = address;
-		trace.entry.pgd = pgd_offset(mm, address);
-		trace.entry.pud = pud_offset(trace.entry.pgd, address);
-		if (trace.entry.pud == 0) {
-			printk(KERN_WARNING "pud is noooooooone\n");
+		if (trace.microset_pos == trace.microset_size) {
+			/* The microset is full. Start a new microset. */
+			drain_microset();
+		}
+
+		BUG_ON(trace.microset_pos >= trace.microset_size);
+		entry = &trace.microset[trace.microset_pos];
+		if (vm_init(entry, mm, address)) {
 			goto error_out;
 		}
-		// todo:: to support thp, do some error checking here and see if a huge page is being allocated
-		trace.entry.pmd = pmd_offset(trace.entry.pud, address);
-		if (pmd_none(*(trace.entry.pmd)) ||
-		    pud_large(*(trace.entry.pud))) {
-			if (pmd_none(*(trace.entry.pmd)))
-				printk(KERN_WARNING "pmd is noone %lx",
-				       address);
-			else
-				printk(KERN_ERR "pud is a large page");
-			trace.entry.pmd = NULL;
-			trace.entry.pte = NULL;
-			goto error_out;
-		}
-		//todo:: pte_offset_map_lock<-- what is this? when whould I need to take a lock?
-		trace.entry.pte = pte_offset_map(trace.entry.pmd, address);
-		trace.entry.initialized = true;
+		trace.microset_pos++;
 		//todo:: optimze later, to return here and maybe avoid tlb flush?
-		trace_maybe_set_pte(&trace.entry, return_early);
+		trace_maybe_set_pte(entry, return_early);
 #ifdef IN_ALT_PATTERN_CHECKS
 		in_alt_pattern = check_alt_pattern(address, regs->ip);
 		// todo:: investigate:: sometimes running the same tracing
 		// second time gets rid of all alt pattern issues
 		// maybe happening only after a fresh reboot. probably
-		// osmething to do with faulting on INSTR addresses
+		// something to do with faulting on INSTR addresses
 		if (in_alt_pattern)
 			trace.alt_pattern_counter++;
 
@@ -252,11 +296,11 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 			exited_alt_pattern = false;
 		}
 #endif // IN_ALT_PATTERN_CHECKS
-		if (likely(trace.entry.address !=
-				   trace.last_entry.address && //CoW?
-			   !in_alt_pattern)) {
-			trace_clear_pte(&trace.last_entry);
-		}
+		// if (likely(trace.entry.address !=
+		// 		   trace.last_entry.address && //CoW?
+		// 	   !in_alt_pattern)) {
+		// 	trace_clear_pte(&trace.last_entry);
+		// }
 
 	error_out:
 		get_cpu();
@@ -268,8 +312,8 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 
 		up_read(&mm->mmap_sem);
 
-		trace.last_entry = trace.entry;
-		trace.accesses[trace.pos++] = address & PAGE_ADDR_MASK;
+		// trace.last_entry = trace.entry;
+		// trace.accesses[trace.pos++] = address & PAGE_ADDR_MASK;
 #ifdef IN_ALT_PATTERN_CHECKS
 		// Push to the data structures that help us determine
 		// whether we've encountered an alternating pattern
@@ -286,4 +330,3 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 }
 EXPORT_SYMBOL(do_page_fault_2);
 /************************** TRACE RECORDING FOR MEMORY PREFETCHING END ********************************/
-
