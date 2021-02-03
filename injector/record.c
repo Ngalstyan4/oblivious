@@ -7,7 +7,7 @@
 
 #include "common.h"
 
-#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 20ULL
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 16ULL
 #define TRACE_MAX_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 // controlls whether data structures are maintained for in alt pattern
 // or it is assumed that this never happens
@@ -51,7 +51,7 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 			    unsigned long address, struct task_struct *tsk,
 			    bool *return_early, int magic);
 
-void record_init(pid_t pid, const char *proc_name)
+void record_init(pid_t pid, const char *proc_name, unsigned long microset_size)
 {
 	char trace_filepath[FILEPATH_LEN];
 
@@ -70,7 +70,7 @@ void record_init(pid_t pid, const char *proc_name)
 		return;
 	}
 
-	trace.microset_size = 3;
+	trace.microset_size = microset_size;
 	trace.microset_pos = 0;
 	trace.microset = vmalloc(trace.microset_size * sizeof(vm_t));
 	if (trace.microset == NULL) {
@@ -86,6 +86,8 @@ void record_init(pid_t pid, const char *proc_name)
 	set_pointer(2, do_page_fault_2);
 }
 
+static void drain_microset();
+
 bool record_initialized()
 {
 	return trace.accesses != NULL;
@@ -99,6 +101,7 @@ void record_fini()
 	// by the process therefore it is still alive
 
 	if (record_initialized()) {
+		drain_microset();
 		if (trace.pos >= TRACE_MAX_LEN) {
 			printk(KERN_ERR "Ran out of buffer space");
 			printk(KERN_ERR "Proc mem pattern not fully recorded\n"
@@ -203,7 +206,7 @@ static void trace_clear_pte(vm_t *entry)
 
 static void drain_microset() {
 	unsigned long i;
-	for (i = 0; i != trace.microset_pos; i++) {
+	for (i = 0; i != trace.microset_pos && trace.pos < TRACE_MAX_LEN; i++) {
 		trace.accesses[trace.pos++] = trace.microset[i].address & PAGE_ADDR_MASK;
 		trace_clear_pte(&trace.microset[i]);
 	}
