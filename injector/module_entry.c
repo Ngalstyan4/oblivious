@@ -16,11 +16,14 @@ MODULE_AUTHOR("");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("");
 static char *cmd, *val;
+int us_size = 2;
 
 MODULE_PARM_DESC(cmd, "Command to properly change mem_trace system");
 MODULE_PARM_DESC(val, "Value(usually 0 or 1) required for certain commands");
+MODULE_PARM_DESC(us_size, "Microset size in pages (default is 2)");
 module_param(cmd, charp, 0000);
 module_param(val, charp, 0000);
+module_param(us_size, int, 0000);
 
 void mem_pattern_trace_start(int flags)
 {
@@ -40,7 +43,8 @@ void mem_pattern_trace_start(int flags)
 	       flags & TRACE_PREFETCH ? "PREFETCHING" : "", pid);
 
 	if (flags & TRACE_RECORD) {
-		record_init(pid, proc_name);
+		BUG_ON(us_size < 2);
+		record_init(pid, proc_name, us_size);
 
 	} else if (flags & TRACE_PREFETCH) {
 		fetch_init(pid, proc_name, current->mm);
@@ -123,7 +127,7 @@ static void print_memtrace_flags()
 static void usage(void)
 {
 	printk(KERN_ERR "USAGE: insmod mem_pattern_trace.ko cmd=\"$cmd\" "
-			"val=\"$val\"");
+			"val=\"$val\" us_size=\"$us_size\"");
 	printk(KERN_INFO "where $cmd is one of mem_trace cli commands (in "
 			 "parentheses below)");
 	printk(KERN_INFO "and $val is the value for commend (usualy 0 or 1) if "
