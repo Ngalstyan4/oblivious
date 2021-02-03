@@ -9,9 +9,6 @@
 
 #define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 16ULL
 #define TRACE_MAX_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
-// controlls whether data structures are maintained for in alt pattern
-// or it is assumed that this never happens
-#define IN_ALT_PATTERN_CHECKS 0
 
 typedef struct {
 	pgd_t *pgd;
@@ -29,22 +26,11 @@ typedef struct {
 	unsigned long pos;
 	char filepath[FILEPATH_LEN];
 
-	vm_t last_entry;
-	vm_t entry;
-	unsigned long alt_pattern_counter;
-
 	unsigned long microset_size;
 	unsigned long microset_pos;
 	vm_t *microset;
 } tracing_state;
 static tracing_state trace;
-
-// Pattern-detection variables todo:: elliminate these!
-static vm_t recent_accesses[3];
-static unsigned long recent_ips[3];
-static unsigned long patterns_encountered = 0;
-static bool exited_alt_pattern = false;
-static bool in_alt_pattern = false;
 
 static void do_unmap_5(pte_t *pte);
 static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
@@ -110,13 +96,8 @@ void record_fini()
 		}
 		write_trace(trace.filepath, (const char *)trace.accesses,
 			    trace.pos * sizeof(void *));
-		if (trace.alt_pattern_counter)
-			printk(KERN_ERR
-			       "ALT PATTERN encountered %ld/%ld times\n",
-			       trace.alt_pattern_counter, trace.pos);
 
 		vfree(trace.microset);
-
 		vfree(trace.accesses);
 		// make sure next call to record_initialized() will return false;
 		trace.accesses = NULL;
@@ -213,42 +194,6 @@ static void drain_microset() {
 	trace.microset_pos = 0;
 }
 
-#ifdef IN_ALT_PATTERN_CHECKS
-/************************** ALT PATTERN CHECK BEGIN ********************************/
-
-// Returns true if we're stuck in the ABAB pattern that causes programs to hang
-static bool check_alt_pattern(unsigned long faulting_addr,
-			      unsigned long faulting_ip)
-{
-	// Check for the alternating pattern in faulting addresses
-	bool alt_pattern_addr =
-		recent_accesses[0].address == recent_accesses[2].address &&
-		recent_accesses[1].address == faulting_addr;
-
-	// The last 4 instructions were identical
-	bool all_same_inst = recent_ips[0] == recent_ips[1] &&
-			     recent_ips[1] == recent_ips[2] &&
-			     recent_ips[2] == faulting_ip;
-
-	// Both conditions need to be true for us to be in the pattern
-	return alt_pattern_addr && all_same_inst;
-}
-
-static void push_to_fifos(vm_t *entry, unsigned long faulting_ip)
-{
-	recent_accesses[0] = recent_accesses[1];
-	recent_accesses[1] = recent_accesses[2];
-	recent_accesses[2] = *entry;
-	recent_ips[0] = recent_ips[1];
-	recent_ips[1] = recent_ips[2];
-	recent_ips[2] = faulting_ip;
-
-	// printk(KERN_DEBUG "last 4 from last: %lx %lx %lx ", r[2].address,
-	//        r[1].address, r[0].address);
-}
-/************************** ALT PATTERN CHECK END  ********************************/
-#endif // IN_ALT_PATTERN_CHECKS
-
 static void do_unmap_5(pte_t *pte)
 {
 	unsigned long pte_deref_value = native_pte_val(*pte);
@@ -285,25 +230,6 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		trace.microset_pos++;
 		//todo:: optimze later, to return here and maybe avoid tlb flush?
 		trace_maybe_set_pte(entry, return_early);
-#ifdef IN_ALT_PATTERN_CHECKS
-		in_alt_pattern = check_alt_pattern(address, regs->ip);
-		// todo:: investigate:: sometimes running the same tracing
-		// second time gets rid of all alt pattern issues
-		// maybe happening only after a fresh reboot. probably
-		// something to do with faulting on INSTR addresses
-		if (in_alt_pattern)
-			trace.alt_pattern_counter++;
-
-		if (!in_alt_pattern && exited_alt_pattern) {
-			trace_clear_pte(&recent_accesses[1]);
-			exited_alt_pattern = false;
-		}
-#endif // IN_ALT_PATTERN_CHECKS
-		// if (likely(trace.entry.address !=
-		// 		   trace.last_entry.address && //CoW?
-		// 	   !in_alt_pattern)) {
-		// 	trace_clear_pte(&trace.last_entry);
-		// }
 
 	error_out:
 		get_cpu();
@@ -314,21 +240,6 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		put_cpu();
 
 		up_read(&mm->mmap_sem);
-
-		// trace.last_entry = trace.entry;
-		// trace.accesses[trace.pos++] = address & PAGE_ADDR_MASK;
-#ifdef IN_ALT_PATTERN_CHECKS
-		// Push to the data structures that help us determine
-		// whether we've encountered an alternating pattern
-		push_to_fifos(&trace.entry, regs->ip);
-
-		// If we're in an alt pattern we need to know
-		// the next time we're in the signal handler
-		if (in_alt_pattern) {
-			patterns_encountered++;
-			exited_alt_pattern = true;
-		}
-#endif // IN_ALT_PATTERN_CHECKS
 	}
 }
 EXPORT_SYMBOL(do_page_fault_2);
