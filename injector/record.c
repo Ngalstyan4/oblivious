@@ -87,7 +87,9 @@ void record_fini()
 	// by the process therefore it is still alive
 
 	if (record_initialized()) {
+		down_read(&current->mm->mmap_sem);
 		drain_microset();
+		up_read(&current->mm->mmap_sem);
 		if (trace.pos >= TRACE_MAX_LEN) {
 			printk(KERN_ERR "Ran out of buffer space");
 			printk(KERN_ERR "Proc mem pattern not fully recorded\n"
