@@ -214,6 +214,11 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		return;
 	}
 
+	/* Don't track instruction pages. */
+	if (unlikely(error_code & PF_INSTR)) {
+		return;
+	}
+
 	if (trace.process_pid == tsk->pid && trace.pos < TRACE_MAX_LEN) {
 		vm_t* entry;
 		struct mm_struct *mm = tsk->mm;
