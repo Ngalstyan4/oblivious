@@ -117,7 +117,8 @@ void record_force_clean()
 	}
 }
 
-static bool vm_init(vm_t* entry, struct mm_struct* mm, unsigned long address) {
+static bool vm_init(vm_t *entry, struct mm_struct *mm, unsigned long address)
+{
 	// walk the page table ` https://lwn.net/Articles/106177/
 	//todo:: pteditor does it wrong i think,
 	//it does not dereference pte when passing around
@@ -130,11 +131,9 @@ static bool vm_init(vm_t* entry, struct mm_struct* mm, unsigned long address) {
 	}
 	// todo:: to support thp, do some error checking here and see if a huge page is being allocated
 	entry->pmd = pmd_offset(entry->pud, address);
-	if (pmd_none(*(entry->pmd)) ||
-		pud_large(*(entry->pud))) {
+	if (pmd_none(*(entry->pmd)) || pud_large(*(entry->pud))) {
 		if (pmd_none(*(entry->pmd)))
-			printk(KERN_WARNING "pmd is noone %lx",
-				   address);
+			printk(KERN_WARNING "pmd is noone %lx", address);
 		else
 			printk(KERN_ERR "pud is a large page");
 		entry->pmd = NULL;
@@ -187,10 +186,12 @@ static void trace_clear_pte(vm_t *entry)
 	set_pte(entry->pte, native_make_pte(pte_deref_value));
 }
 
-static void drain_microset() {
+static void drain_microset()
+{
 	unsigned long i;
 	for (i = 0; i != trace.microset_pos && trace.pos < TRACE_MAX_LEN; i++) {
-		trace.accesses[trace.pos++] = trace.microset[i].address & PAGE_ADDR_MASK;
+		trace.accesses[trace.pos++] =
+			trace.microset[i].address & PAGE_ADDR_MASK;
 		trace_clear_pte(&trace.microset[i]);
 	}
 	trace.microset_pos = 0;
@@ -220,7 +221,7 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 	}
 
 	if (trace.process_pid == tsk->pid && trace.pos < TRACE_MAX_LEN) {
-		vm_t* entry;
+		vm_t *entry;
 		struct mm_struct *mm = tsk->mm;
 		down_read(&mm->mmap_sem);
 
