@@ -11,24 +11,15 @@
 #define TRACE_MAX_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 
 typedef struct {
-	pgd_t *pgd;
-	// todo, will need p4d for newer kernels
-	pud_t *pud;
-	pmd_t *pmd;
-	pte_t *pte;
-	unsigned long address;
-	bool initialized;
-} vm_t;
-
-typedef struct {
 	pid_t process_pid;
+	struct mm_struct *mm;
 	unsigned long *accesses;
 	unsigned long pos;
 	char filepath[FILEPATH_LEN];
 
 	unsigned long microset_size;
 	unsigned long microset_pos;
-	vm_t *microset;
+	unsigned long *microset;
 } tracing_state;
 static tracing_state trace;
 
@@ -37,7 +28,8 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 			    unsigned long address, struct task_struct *tsk,
 			    bool *return_early, int magic);
 
-void record_init(pid_t pid, const char *proc_name, unsigned long microset_size)
+void record_init(pid_t pid, const char *proc_name, struct mm_struct *mm,
+		 unsigned int microset_size)
 {
 	char trace_filepath[FILEPATH_LEN];
 
@@ -49,6 +41,7 @@ void record_init(pid_t pid, const char *proc_name, unsigned long microset_size)
 	memset(&trace, 0, sizeof(trace));
 	memcpy(trace.filepath, trace_filepath, FILEPATH_LEN);
 	trace.process_pid = pid;
+	trace.mm = mm;
 
 	trace.accesses = vmalloc(TRACE_ARRAY_SIZE);
 	if (trace.accesses == NULL) {
@@ -58,14 +51,15 @@ void record_init(pid_t pid, const char *proc_name, unsigned long microset_size)
 
 	trace.microset_size = microset_size;
 	trace.microset_pos = 0;
-	trace.microset = vmalloc(trace.microset_size * sizeof(vm_t));
+	trace.microset = vmalloc(trace.microset_size * sizeof(unsigned long));
 	if (trace.microset == NULL) {
 		printk(KERN_ERR "Unable to allocate memory for tracing\n");
 		vfree(trace.accesses);
 		trace.accesses = NULL;
 		return;
 	}
-	memset(trace.microset, 0x00, trace.microset_size * sizeof(vm_t));
+	memset(trace.microset, 0x00,
+	       trace.microset_size * sizeof(unsigned long));
 
 	set_pointer(5, do_unmap_5);
 	set_pointer(6, do_unmap_5); //<-- for handle_pte_fault
@@ -87,9 +81,9 @@ void record_fini()
 	// by the process therefore it is still alive
 
 	if (record_initialized()) {
-		down_read(&current->mm->mmap_sem);
+		down_read(&trace.mm->mmap_sem);
 		drain_microset();
-		up_read(&current->mm->mmap_sem);
+		up_read(&trace.mm->mmap_sem);
 		if (trace.pos >= TRACE_MAX_LEN) {
 			printk(KERN_ERR "Ran out of buffer space");
 			printk(KERN_ERR "Proc mem pattern not fully recorded\n"
@@ -117,65 +111,31 @@ void record_force_clean()
 	}
 }
 
-static bool vm_init(vm_t *entry, struct mm_struct *mm, unsigned long address)
-{
-	// walk the page table ` https://lwn.net/Articles/106177/
-	//todo:: pteditor does it wrong i think,
-	//it does not dereference pte when passing around
-	entry->address = address;
-	entry->pgd = pgd_offset(mm, address);
-	entry->pud = pud_offset(entry->pgd, address);
-	if (entry->pud == 0) {
-		printk(KERN_WARNING "pud is noooooooone\n");
-		return true;
-	}
-	// todo:: to support thp, do some error checking here and see if a huge page is being allocated
-	entry->pmd = pmd_offset(entry->pud, address);
-	if (pmd_none(*(entry->pmd)) || pud_large(*(entry->pud))) {
-		if (pmd_none(*(entry->pmd)))
-			printk(KERN_WARNING "pmd is noone %lx", address);
-		else
-			printk(KERN_ERR "pud is a large page");
-		entry->pmd = NULL;
-		entry->pte = NULL;
-		return true;
-	}
-	//todo:: pte_offset_map_lock<-- what is this? when whould I need to take a lock?
-	entry->pte = pte_offset_map(entry->pmd, address);
-	entry->initialized = true;
-	return false;
-}
-
 /************************** TRACE RECORDING FOR MEMORY PREFETCHING BEGIN ********************************/
-__always_inline void trace_maybe_set_pte(vm_t *entry, bool *return_early)
+__always_inline void trace_maybe_set_pte(pte_t *pte, bool *return_early)
 {
-	//todo::  `taskset -c 1 ./mmap_random_rw 4 500000 1000000 w t` breaks the tracer
-	//works fine for slightly smaller memory allocatons
-	unsigned long pte_deref_value = (unsigned long)((*entry->pte).pte);
+	unsigned long pte_deref_value;
 	*return_early = false;
 
-	if (unlikely(entry->initialized == false))
+	if (unlikely(pte == NULL))
 		return;
-
+	pte_deref_value = native_pte_val(*pte);
 	if (pte_deref_value & SPECIAL_BIT_MASK) {
 		pte_deref_value |= PRESENT_BIT_MASK;
 		pte_deref_value &= ~SPECIAL_BIT_MASK;
-		set_pte(entry->pte, native_make_pte(pte_deref_value));
+		set_pte(pte, native_make_pte(pte_deref_value));
 		*return_early = true;
 	}
 }
 
 // used to unmap the last entry
-static void trace_clear_pte(vm_t *entry)
+static void trace_clear_pte(pte_t *pte)
 {
 	unsigned long pte_deref_value;
 	// if previous fault was a pmd allocation fault, we will not have pte
-	if (!entry->pte)
+	if (unlikely(pte == NULL))
 		return;
-	pte_deref_value = (unsigned long)((*entry->pte).pte);
-
-	if (unlikely(entry->initialized == false))
-		return;
+	pte_deref_value = native_pte_val(*pte);
 	// normally, there would just be allocation faults. but for tracing we want to see *all* page
 	// accesses so we make sure that form kernel's point of view the page that the application
 	// accesssed just before faulting on this page, is not present in memory. Additionally,
@@ -183,16 +143,17 @@ static void trace_clear_pte(vm_t *entry)
 	// for the fault.
 	pte_deref_value &= ~PRESENT_BIT_MASK;
 	pte_deref_value |= SPECIAL_BIT_MASK;
-	set_pte(entry->pte, native_make_pte(pte_deref_value));
+	set_pte(pte, native_make_pte(pte_deref_value));
 }
 
 static void drain_microset()
 {
 	unsigned long i;
 	for (i = 0; i != trace.microset_pos && trace.pos < TRACE_MAX_LEN; i++) {
-		trace.accesses[trace.pos++] =
-			trace.microset[i].address & PAGE_ADDR_MASK;
-		trace_clear_pte(&trace.microset[i]);
+		// microset already records pages with 12 bit in-page offset cleared
+		trace.accesses[trace.pos++] = trace.microset[i];
+
+		trace_clear_pte(addr2pte(trace.microset[i], trace.mm));
 	}
 	trace.microset_pos = 0;
 }
@@ -221,9 +182,7 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 	}
 
 	if (trace.process_pid == tsk->pid && trace.pos < TRACE_MAX_LEN) {
-		vm_t *entry;
-		struct mm_struct *mm = tsk->mm;
-		down_read(&mm->mmap_sem);
+		down_read(&trace.mm->mmap_sem);
 
 		if (trace.microset_pos == trace.microset_size) {
 			/* The microset is full. Start a new microset. */
@@ -231,15 +190,12 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		}
 
 		BUG_ON(trace.microset_pos >= trace.microset_size);
-		entry = &trace.microset[trace.microset_pos];
-		if (vm_init(entry, mm, address)) {
-			goto error_out;
-		}
+		trace.microset[trace.microset_pos] = address & PAGE_ADDR_MASK;
 		trace.microset_pos++;
-		//todo:: optimze later, to return here and maybe avoid tlb flush?
-		trace_maybe_set_pte(entry, return_early);
 
-	error_out:
+		//todo:: optimze later, to return here and maybe avoid tlb flush?
+		trace_maybe_set_pte(addr2pte(address, trace.mm), return_early);
+
 		get_cpu();
 		count_vm_tlb_event(NR_TLB_LOCAL_FLUSH_ALL);
 		local_flush_tlb();
@@ -247,7 +203,7 @@ static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 		// trace_tlb_flush(TLB_LOCAL_SHOOTDOWN, TLB_FLUSH_ALL);
 		put_cpu();
 
-		up_read(&mm->mmap_sem);
+		up_read(&trace.mm->mmap_sem);
 	}
 }
 EXPORT_SYMBOL(do_page_fault_2);

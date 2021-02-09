@@ -27,15 +27,32 @@ pte_t *addr2pte(unsigned long addr, struct mm_struct *mm)
 	pmd_t *pmd;
 	pte_t *pte = NULL;
 
+	// walk the page table ` https://lwn.net/Articles/106177/
+	//todo:: pteditor does it wrong i think,
+	//it does not dereference pte when passing around
 	pgd = pgd_offset(mm, addr);
-	if (pgd_none(*pgd) || pgd_bad(*pgd))
+	if (unlikely(pgd_none(*pgd) || pgd_bad(*pgd)))
 		return pte;
 	pud = pud_offset(pgd, addr);
-	if (pud_none(*pud) || pud_bad(*pud))
+	if (unlikely(pud_none(*pud) || pud_bad(*pud)))
 		return pte;
 	pmd = pmd_offset(pud, addr);
-	if (pmd_none(*(pmd)) || pud_large(*(pud)))
+
+	// todo::investigate
+	// currently, in trace recording pmd is none when
+	// the page table is in process of being grown
+	// this is because we intercept kernel page fault *before*
+	// it grows page tables and is ready to assign ptes.
+	// this, I think, means that we miss memory accesses which are
+	// alligned to page table boundaries and since we do not
+	// add special bit to these addresses in the very beginning,
+	// we never add them to the trace record
+
+	// todo:: to support thp, do some error checking here and see if a huge page is being allocated
+	if (unlikely(pmd_none(*pmd) || pud_large(*pud)))
 		return pte;
+
+	//todo:: pte_offset_map_lock<-- what is this? when whould I need to take a lock?
 	pte = pte_offset_map(pmd, addr);
 
 	return pte;
