@@ -16,7 +16,7 @@ MODULE_AUTHOR("");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("");
 static char *cmd, *val;
-int us_size = 2;
+static int us_size = 2;
 
 MODULE_PARM_DESC(cmd, "Command to properly change mem_trace system");
 MODULE_PARM_DESC(val, "Value(usually 0 or 1) required for certain commands");
@@ -44,7 +44,7 @@ void mem_pattern_trace_start(int flags)
 
 	if (flags & TRACE_RECORD) {
 		BUG_ON(us_size < 2);
-		record_init(pid, proc_name, us_size);
+		record_init(pid, proc_name, current->mm, us_size);
 
 	} else if (flags & TRACE_PREFETCH) {
 		fetch_init(pid, proc_name, current->mm);
@@ -87,6 +87,8 @@ static void mem_pattern_trace_3(int flags)
 	}
 
 	if (flags & TRACE_START) {
+		record_force_clean();
+		fetch_force_clean();
 		mem_pattern_trace_start(flags);
 		return;
 	}
