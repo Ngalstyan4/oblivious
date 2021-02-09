@@ -110,12 +110,14 @@ static void mem_pattern_trace_3(int flags)
 static void print_memtrace_flags()
 {
 	printk(KERN_INFO "memtrace global flags:\n"
+			 "%-30s %d (%s)\n"
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n",
 	       // clang-format off
+		"Microset size", us_size, "us_size",
 		"Tape operations", memtrace_getflag(TAPE_OPS) ? "ON" : "OFF", "tape_ops",
 		"Swap SSD Optim",  memtrace_getflag(SWAP_SSD_OPTIMIZATION) ? "ON" : "OFF", "ssdopt",
 		"Fastswap writes",  memtrace_getflag(FASTSWAP_ASYNCWRITES) ? "ASYNC" : "SYNC", "async_writes",
