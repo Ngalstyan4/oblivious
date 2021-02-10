@@ -505,6 +505,44 @@ static unsigned long swapin_nr_pages(unsigned long offset)
  *
  * Caller must hold down_read on the vma->vm_mm if vma is not NULL.
  */
+static struct page *swapin_readahead_old(swp_entry_t entry, gfp_t gfp_mask,
+			struct vm_area_struct *vma, unsigned long addr)
+{
+	struct page *page;
+	unsigned long entry_offset = swp_offset(entry);
+	unsigned long offset = entry_offset;
+	unsigned long start_offset, end_offset;
+	unsigned long mask;
+	struct blk_plug plug;
+
+	mask = swapin_nr_pages(offset) - 1;
+	if (!mask)
+		goto skip;
+
+	/* Read a page_cluster sized and aligned cluster around offset. */
+	start_offset = offset & ~mask;
+	end_offset = offset | mask;
+	if (!start_offset)	/* First page is swap header. */
+		start_offset++;
+
+	blk_start_plug(&plug);
+	for (offset = start_offset; offset <= end_offset ; offset++) {
+		/* Ok, do the async read-ahead now */
+		page = read_swap_cache_async(swp_entry(swp_type(entry), offset),
+						gfp_mask, vma, addr);
+		if (!page)
+			continue;
+		if (offset != entry_offset)
+			SetPageReadahead(page);
+		put_page(page);
+	}
+	blk_finish_plug(&plug);
+
+	lru_add_drain();	/* Push any new pages onto the LRU now */
+skip:
+	return read_swap_cache_async(entry, gfp_mask, vma, addr);
+}
+
 struct page *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask,
 			struct vm_area_struct *vma, unsigned long addr)
 {
@@ -514,6 +552,9 @@ struct page *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	unsigned long start_offset, end_offset;
 	unsigned long mask;
 	int cpu;
+
+	if (!frontswap_enabled())
+		return swapin_readahead_old(entry, gfp_mask, vma, addr);
 
 	preempt_disable();
 	cpu = smp_processor_id();
