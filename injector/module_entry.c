@@ -111,17 +111,22 @@ static void print_memtrace_flags()
 {
 	printk(KERN_INFO "memtrace global flags:\n"
 			 "%-30s %d (%s)\n"
+
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n"
+			 "%-30s %s (%s)\n"
+
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n",
 	       // clang-format off
 		"Microset size", us_size, "us_size",
+
+		"Fastswap", static_branch_unlikely(&frontswap_enabled_key) ? "ON" : "OFF", "fastswap",
 		"Tape operations", memtrace_getflag(TAPE_OPS) ? "ON" : "OFF", "tape_ops",
 		"Swap SSD Optim",  memtrace_getflag(SWAP_SSD_OPTIMIZATION) ? "ON" : "OFF", "ssdopt",
-		"Fastswap writes",  memtrace_getflag(FASTSWAP_ASYNCWRITES) ? "ASYNC" : "SYNC", "async_writes",
 
+		"Fastswap writes",  memtrace_getflag(FASTSWAP_ASYNCWRITES) ? "ASYNC" : "SYNC", "async_writes",
 		"Tape fetch",  memtrace_getflag(TAPE_FETCH) ? "ON" : "OFF", "tape_fetch",
 		"print LRU dmesg logs",  memtrace_getflag(LRU_LOGS) ? "ON" : "OFF", "lru_logs"
 	       // clang-format on
@@ -139,7 +144,7 @@ static void usage(void)
 	print_memtrace_flags();
 }
 
-static int __init leap_functionality_init(void)
+static int __init mem_pattern_trace_init(void)
 {
 	set_pointer(3, mem_pattern_trace_3);
 
@@ -151,7 +156,15 @@ static int __init leap_functionality_init(void)
 	debugfs_root = debugfs_create_dir("memtrace", NULL);
 #endif
 
-	if (strcmp(cmd, "tape_ops") == 0) {
+	if (strcmp(cmd, "fastswap") == 0) {
+		if (!val || (*val != '0' && *val != '1')) {
+			usage();
+			return 0;
+		}
+
+		*val == '1' ? static_branch_enable(&frontswap_enabled_key) :
+			      static_branch_disable(&frontswap_enabled_key);
+	} else if (strcmp(cmd, "tape_ops") == 0) {
 		if (!val || (*val != '0' && *val != '1')) {
 			usage();
 			return 0;
@@ -195,12 +208,11 @@ static int __init leap_functionality_init(void)
 		usage();
 		return 0;
 	}
-
 	print_memtrace_flags();
 	return 0;
 }
 
-static void __exit leap_functionality_exit(void)
+static void __exit mem_pattern_trace_exit(void)
 {
 	int i;
 
@@ -217,5 +229,5 @@ static void __exit leap_functionality_exit(void)
 	fetch_force_clean();
 }
 
-module_init(leap_functionality_init);
-module_exit(leap_functionality_exit);
+module_init(mem_pattern_trace_init);
+module_exit(mem_pattern_trace_exit);
