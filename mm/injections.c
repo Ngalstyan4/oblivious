@@ -14,7 +14,10 @@ void set_pointer(int i, injected_func_type f)
 EXPORT_SYMBOL(set_pointer);
 EXPORT_SYMBOL(kernel_noop);
 
+mem_pattern_trace_state memtrace_state = {
+	.flags = (TAPE_OPS | SWAP_SSD_OPTIMIZATION | FASTSWAP_ASYNCWRITES |
+		  TAPE_FETCH)
+};
 
-mem_pattern_trace_state memtrace_state;
 EXPORT_SYMBOL(memtrace_state);
 

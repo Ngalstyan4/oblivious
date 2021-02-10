@@ -23,7 +23,7 @@
 #include <linux/injections.h>
 
 DEFINE_STATIC_KEY_FALSE(frontswap_enabled_key);
-
+EXPORT_SYMBOL(frontswap_enabled_key);
 /*
  * frontswap_ops are added by frontswap_register_ops, and provide the
  * frontswap "backend" implementation functions.  Multiple implementations

@@ -898,7 +898,7 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	struct page *page;
 
 	/* pte contains position in swap or file, so copy. */
-	if (unlikely(!pte_present(pte))) {
+	if (unlikely(!pte_present_actually(pte))) {
 		swp_entry_t entry = pte_to_swp_entry(pte);
 
 		if (likely(!non_swap_entry(entry))) {

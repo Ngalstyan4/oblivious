@@ -604,6 +604,14 @@ static inline int pte_present(pte_t a)
 	return pte_flags(a) & (_PAGE_PRESENT | _PAGE_PROTNONE);
 }
 
+static inline int pte_present_actually(pte_t a)
+{
+	// did not have '!= 0' and would return the result directly
+	// took many many hours to figure out this is what was wrong..
+	// (hint: check types and MASK lengths!!)
+	return (pte_flags(a) & (_PAGE_PRESENT | _PAGE_PROTNONE | _PAGE_DEVMAP)) != 0;
+}
+
 #ifdef __HAVE_ARCH_PTE_DEVMAP
 static inline int pte_devmap(pte_t a)
 {
