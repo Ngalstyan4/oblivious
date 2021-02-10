@@ -144,6 +144,7 @@ void fetch_force_clean()
 
 	if (fetch.accesses) {
 		vfree(fetch.accesses);
+		fetch.accesses = NULL;
 		printk(KERN_INFO "found %d/%d page faults\n",
 		       fetch.found_counter, fetch.counter);
 	}
