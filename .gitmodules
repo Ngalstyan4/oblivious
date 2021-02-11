@@ -2,3 +2,6 @@
 	path = syncswap
 	url = git@github.com:amaro/syncswap.git
 	branch = oblivious
+[submodule "experiments/cpp/eigen"]
+	path = experiments/cpp/eigen
+	url = https://gitlab.com/libeigen/eigen.git
