@@ -108,12 +108,23 @@ function cgroup_end {
     echo
 }
 
+function set_tape {
+	tape=$1
+	prog_name=$2
+}
 # there is a weird vim-bash script highlighting issue. the subshell syntax confuses all of
 # highlighting after this function
 function run_experiment {
     ratio=$1
 
     echoG "Begin experiment with ration ratio: $ratio\tneeded total pages: $PROGRAM_REQUESTED_NUM_PAGES"
+   rm -rf "/data/traces/python.tape"
+   if (( $ratio > 25 )); then
+           echoR "large RSS"
+           ln -s "/data/traces/python.30000.tape" "/data/traces/python.tape"
+   else
+           ln -s "/data/traces/python.1000.tape" "/data/traces/python.tape"
+   fi
     cgroup_init
     # need to run cgroup_add in a subshell to make sure all processes of cgroup exit before next iteration
     # of the loop when cgroup_init tries to reset the cgroup
@@ -200,7 +211,7 @@ fi
 EXPERIMENT_TYPE="no_prefetching"
 # make sure tape prefetcher is not loaded
 pushd ~/oblivious/injector
-./cli.sh tape_ops 0
+./cli.sh tape_fetch 0
 ./cli.sh ssdopt 0
 ./cli.sh async_writes 0
 popd
@@ -229,7 +240,7 @@ reset_results
 EXPERIMENT_TYPE="linux_prefetching_ssdopt"
 echoG ">>> Experiments with swap write path SSD optimization"
 pushd ~/oblivious/injector
-./cli.sh tape_ops 0
+./cli.sh tape_fetch 0
 ./cli.sh ssdopt 1
 ./cli.sh async_writes 0
 popd
@@ -246,7 +257,7 @@ reset_results
 EXPERIMENT_TYPE="linux_prefetching_ssdopt_asyncwrites"
 echoG ">>> Experiments with swap write path SSD optimization + async writes"
 pushd ~/oblivious/injector
-./cli.sh tape_ops 0
+./cli.sh tape_fetch 0
 ./cli.sh ssdopt 1
 ./cli.sh async_writes 1
 popd
@@ -264,7 +275,7 @@ echo 0 > /proc/sys/vm/page-cluster
 EXPERIMENT_TYPE="tape_prefetching_syncwrites"
 echoG ">>> Experiments with tape prefetching"
 pushd ~/oblivious/injector
-./cli.sh tape_ops 1
+./cli.sh tape_fetch 1
 ./cli.sh ssdopt 1
 ./cli.sh async_writes 0
 popd
@@ -280,7 +291,7 @@ reset_results
 EXPERIMENT_TYPE="tape_prefetching_asyncwrites"
 echoG ">>> Experiments with tape prefetching"
 pushd ~/oblivious/injector
-./cli.sh tape_ops 1
+./cli.sh tape_fetch 1
 ./cli.sh ssdopt 1
 ./cli.sh async_writes 1
 popd
