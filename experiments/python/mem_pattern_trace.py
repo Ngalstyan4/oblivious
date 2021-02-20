@@ -1,3 +1,4 @@
+## IMPORTANT!!! THIS FILE MUST BE KEPT IN SYNC WITH mem_pattern_trace.h !!!
 import ctypes
 libc = ctypes.CDLL(None)
 syscall = libc.syscall
@@ -13,9 +14,3 @@ KEVICTD_INIT = 1<<7
 KEVICTD_FINI = 1<<8
 
 mem_pattern_trace = 333
-
-
-
-
-
-
