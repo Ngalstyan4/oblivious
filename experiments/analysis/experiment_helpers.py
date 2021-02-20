@@ -7,7 +7,7 @@ def get_experiment_table(named_tables, name):
         if table_name == name:
             return table
 
-def get_components_of_runtime(table, name="(unnamed)"):
+def get_components_of_runtime(table, name="unnamed"):
     fig = px.area(table[["Eviction Time(us)(cgroup func)",
                                          "Minor PF Time(us)",
                                          "Major PF Time(us)",
@@ -80,12 +80,12 @@ def augment_tables(tables, filter_raw=True):
         tbl[["additional usertime per eviction(us)"]] = ((tbl["USER"] - tbl[tbl.index == 100]["USER"].values[0])*1e6)/tbl["Evictions"]
 
 
-        tbl[["System Overhead"]]         = tbl["Minor PF Time(us)"] + tbl["Eviction Time(us)"] + tbl["Major PF Time(us)"]
+        tbl[["System Overhead"]]         = tbl["Minor PF Time(us)"] + tbl["Eviction Time(us)(cgroup func)"] + tbl["Major PF Time(us)"]
         tbl[["Total System Time"]]       = tbl["System Overhead"] + WORKLOAD_CONSTANTS["Baseline System Time"]
 
         # Estimated and actual runtime`
         tbl[["Runtime"]]                 = tbl["Total User Time"] + tbl["Total System Time"]
-        tbl[["Runtime w/o Evictions"]]   = tbl["Runtime"] - tbl["Eviction Time(us)"]
+        tbl[["Runtime w/o Evictions"]]   = tbl["Runtime"] - tbl["Eviction Time(us)(cgroup func)"]
         if "WALLCLOCK" in tbl.columns:
                 t = tbl["WALLCLOCK"]
                 def lam(a):
@@ -101,6 +101,7 @@ def augment_tables(tables, filter_raw=True):
         degr = lambda c: tbl[c] / tbl[tbl.index == 100][c].values[0]
 
         tbl[["Degradation"]]             = degr("Runtime")
+        tbl[["Degradation(wallclock)"]]             = degr("Measured(wallclock) runtime")
         tbl[["Degradation w/o Evictions"]]= degr("Runtime w/o Evictions")
 
     return tables
