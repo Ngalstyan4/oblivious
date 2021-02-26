@@ -5,9 +5,7 @@ EXPERIMENT_NAME=${1}
 EXPERIMENT_TYPE="" #"no_prefetching"|"linux_prefetching"|"tape_prefetching"
 PROGRAM_REQUESTED_NUM_PAGES=${2} # 134244
 PROGRAM_INVOCATION=${@:3} #"./mmult_eigen 44 4096 tt"
-# change these for each workload
-#PROGRAM_REQUESTED_NUM_PAGES=1050000
-#PROGRAM_INVOCATION="./dist/cppnn mnist 44 tmp.bin"
+
 # variables holding the extracted csv tables
 FTRACE_RESULTS_HEADER=""
 FTRACE_RESULTS_ARR=()
