@@ -7,6 +7,7 @@
 #include <linux/injections.h>
 
 #include "common.h"
+#include "fetch.h"
 #include "kevictd.h"
 
 #define MAX_PRINT_LEN 768
@@ -49,6 +50,7 @@ static void prefetch_work_func(struct work_struct *work)
 	int i = 0;
 	int num_prefetch = 0;
 	struct vm_fault vmf;
+	unsigned long paddr;
 	pte_t *pte;
 	//q:: what is down_read? is it not necessary here?
 	//down_read(&fetch.mm->mmap_sem);
@@ -56,7 +58,11 @@ static void prefetch_work_func(struct work_struct *work)
 	if (unlikely(!memtrace_getflag(TAPE_FETCH)))
 		return;
 	for (i = 0; i < 100 && num_prefetch < 50; i++) {
-		unsigned long paddr = fetch.accesses[fetch_start + i];
+		if (unlikely(fetch_start + i >= fetch.num_accesses)) {
+			i--;
+			break;
+		}
+		paddr = fetch.accesses[fetch_start + i];
 
 		if (prefetch_addr(paddr, fetch.mm, &vmf) == true) {
 			num_prefetch++;
@@ -67,6 +73,10 @@ static void prefetch_work_func(struct work_struct *work)
 	//lru_add_drain();// <Q::todo:: what does this do?.. Push any new pages onto the LRU now
 	fetch.next_fetch = fetch_start + i;
 	while (true) {
+		if (unlikely(fetch.next_fetch >= fetch.num_accesses)) {
+			fetch.next_fetch = fetch.num_accesses - 1;
+			break;
+		}
 		pte = addr2pte(fetch.accesses[fetch.next_fetch], fetch.mm);
 		if (pte && !pte_none(*pte) && pte_present(*pte)) {
 			// page already mapped in page table
@@ -86,14 +96,23 @@ void fetch_init(pid_t pid, const char *proc_name, struct mm_struct *mm)
 	unsigned long *buf;
 	size_t count;
 
-	snprintf(trace_filepath, FILEPATH_LEN, TRACE_FILE_FMT, proc_name);
+	snprintf(trace_filepath, FILEPATH_LEN, FETCH_FILE_FMT, proc_name);
 
 	// in case path is too long, truncate;
 	trace_filepath[FILEPATH_LEN - 1] = '\0';
 
+	// if previous program running fetching was killed
+	// before completion, fini() would heve never run
+	// there must be a better way to handle this (listen to do_exit calls?)
+	// but for now this works
+	fetch_fini();
 	memset(&fetch, 0, sizeof(fetch));
 
-	// at this point we are sure the file exists, that's handled by syscall entry
+	if (!file_exists(trace_filepath)) {
+		printk(KERN_ERR "unable to read fetch trace\n");
+		return;
+	}
+
 	filesize = file_size(trace_filepath);
 
 	buf = vmalloc(filesize);
@@ -137,6 +156,7 @@ void fetch_fini()
 		vfree(fetch.accesses);
 		fetch.accesses = NULL; // todo:: should not need once in kernel
 	}
+	set_pointer(2, kernel_noop);
 }
 
 void fetch_force_clean()

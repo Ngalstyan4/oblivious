@@ -9,7 +9,8 @@
 
 #include "common.h"
 
-const char *TRACE_FILE_FMT = "/data/traces/%s.bin";
+const char *RECORD_FILE_FMT = "/data/traces/%s.bin";
+const char *FETCH_FILE_FMT = "/data/traces/%s.tape";
 
 const unsigned long PAGE_ADDR_MASK = ~0xfff;
 const unsigned long PRESENT_BIT_MASK = 1UL;
@@ -79,11 +80,11 @@ pte_t *addr2ptepmd(unsigned long addr, struct mm_struct *mm, pmd_t **pmd_ret)
 	return pte;
 }
 
-bool proc_trace_exists(const char *proc_name)
+bool proc_file_exists(const char *proc_name, const char *path_fmt)
 {
 	char trace_filepath[FILEPATH_LEN];
 
-	snprintf(trace_filepath, FILEPATH_LEN, TRACE_FILE_FMT, proc_name);
+	snprintf(trace_filepath, FILEPATH_LEN, path_fmt, proc_name);
 
 	// in case path is too long, truncate;
 	trace_filepath[FILEPATH_LEN - 1] = '\0';

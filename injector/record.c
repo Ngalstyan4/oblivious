@@ -6,6 +6,7 @@
 #include <linux/injections.h>
 
 #include "common.h"
+#include "record.h"
 
 #define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 16ULL
 #define TRACE_MAX_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
@@ -33,10 +34,13 @@ void record_init(pid_t pid, const char *proc_name, struct mm_struct *mm,
 {
 	char trace_filepath[FILEPATH_LEN];
 
-	snprintf(trace_filepath, FILEPATH_LEN, TRACE_FILE_FMT, proc_name);
+	snprintf(trace_filepath, FILEPATH_LEN, RECORD_FILE_FMT, proc_name);
 
 	// in case path is too long, truncate;
 	trace_filepath[FILEPATH_LEN - 1] = '\0';
+
+	// in case a prvious recording was sigkilled before FINI call
+	record_fini();
 
 	memset(&trace, 0, sizeof(trace));
 	memcpy(trace.filepath, trace_filepath, FILEPATH_LEN);
