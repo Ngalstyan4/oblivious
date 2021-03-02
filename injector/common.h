@@ -29,17 +29,19 @@ extern atomic_t metronome;
  *   bit 5 ==				1: protection keys block access
  */
 enum x86_pf_error_code {
-
+	// clang-format off
 	PF_PROT		=		1 << 0,
 	PF_WRITE	=		1 << 1,
 	PF_USER		=		1 << 2,
 	PF_RSVD		=		1 << 3,
 	PF_INSTR	=		1 << 4,
 	PF_PK		=		1 << 5,
+	// clang-format on
 };
 
 #define FILEPATH_LEN 256
-extern const char *TRACE_FILE_FMT;
+extern const char *RECORD_FILE_FMT;
+extern const char *FETCH_FILE_FMT;
 
 extern const unsigned long PAGE_ADDR_MASK;
 extern const unsigned long PRESENT_BIT_MASK;
@@ -49,7 +51,7 @@ extern const unsigned long SPECIAL_BIT_MASK;
 // if need be
 pte_t *addr2pte(unsigned long addr, struct mm_struct *mm);
 pte_t *addr2ptepmd(unsigned long addr, struct mm_struct *mm, pmd_t **pmd_ret);
-bool proc_trace_exists(const char *proc_name);
+bool proc_file_exists(const char *proc_name, const char *path_fmt);
 bool file_exists(const char *filepath);
 size_t file_size(const char *filepath);
 

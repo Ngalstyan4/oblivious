@@ -31,10 +31,19 @@ void mem_pattern_trace_start(int flags)
 	const char *proc_name = current->comm;
 
 	if (flags & TRACE_AUTO) {
-		if (proc_trace_exists(proc_name))
+		if (proc_file_exists(proc_name, FETCH_FILE_FMT))
 			flags |= TRACE_PREFETCH;
-		else
+		else if (!proc_file_exists(proc_name, RECORD_FILE_FMT)) {
 			flags |= TRACE_RECORD;
+		} else {
+			printk(KERN_ERR
+			       "trace recoding for process with pid %d and "
+			       "name %s exists\n"
+			       "but a post processed tape does not exist\n"
+			       "Unable to AUTO_(RECORD|PREFETCH)\n",
+			       pid, proc_name);
+			return;
+		}
 	}
 
 	printk(KERN_INFO "%s%s%s for PROCESS with pid %d\n",
