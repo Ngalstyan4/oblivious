@@ -57,8 +57,11 @@ function ftrace_begin {
 function ftrace_end {
     pushd /sys/kernel/debug/tracing
     echo 0 > function_profile_enabled
-    echoG "#### PROCESSOR 0 TRACE"
-    cat trace_stat/function0
+
+    PAGE_FAULT_HIT=$(cat trace_stat/function0 | grep __do_page_fault |awk -F' ' '{print $2}')
+    PAGE_FAULT_TIME=$(cat trace_stat/function0 | grep __do_page_fault |awk -F' ' '{print $3}')
+    PAGE_FAULT_S2=$(cat trace_stat/function0 | grep __do_page_fault |awk -F' ' '{print $7}')
+
     SWAPIN_HIT=$(cat trace_stat/function0 | grep swapin_readahead | awk -F' ' '{print $2}')
     SWAPIN_TIME=$(cat trace_stat/function0 | grep swapin_readahead | awk -F' ' '{print $3}')
     SWAPIN_S2=$(cat trace_stat/function0 | grep swapin_readahead | awk -F' ' '{print $7}')
@@ -66,11 +69,15 @@ function ftrace_end {
     EVICT_HIT=$(cat trace_stat/function0 | grep try_to_free_mem_cgroup_pages | awk -F' ' '{print $2}')
     EVICT_TIME=$(cat trace_stat/function0 | grep try_to_free_mem_cgroup_pages | awk -F' ' '{print $3}')
     EVICT_S2=$(cat trace_stat/function0 | grep try_to_free_mem_cgroup_pages | awk -F' ' '{print $7}')
-    FTRACE_RESULTS_HEADER="RATIO,SWAPIN_HIT,SWAPIN_TIME,SWAPIN_S2,EVICT_HIT,EVICT_TIME,EVICT_S2"
-    FTRACE_RESULTS_ARR+=("$1,$SWAPIN_HIT,$SWAPIN_TIME,$SWAPIN_S2,$EVICT_HIT,$EVICT_TIME,$EVICT_S2")
 
-    echoG "#### PROCESSOR 1 TRACE"
-    cat trace_stat/function1
+    FTRACE_RESULTS_HEADER="RATIO,PAGE_FAULT_HIT,PAGE_FAULT_TIME,PAGE_FAULT_S2,SWAPIN_HIT,SWAPIN_TIME,SWAPIN_S2,EVICT_HIT,EVICT_TIME,EVICT_S2"
+    FTRACE_RESULTS_ARR+=("$1,$PAGE_FAULT_HIT,$PAGE_FAULT_TIME,$PAGE_FAULT_S2,$SWAPIN_HIT,$SWAPIN_TIME,$SWAPIN_S2,$EVICT_HIT,$EVICT_TIME,$EVICT_S2")
+
+    for p in 0 1 2 3 4 5 6 7
+    do
+	    echoG "#### PROCESSOR $p TRACE"
+	    cat trace_stat/function$p
+    done
     popd
 }
 
@@ -137,7 +144,7 @@ function run_experiment {
     # the pipe manipulation at the end of the line below swaps stdout and stderr so RUN_TIME variable
     # will capture %U %S %E" but the program output wil be printed in terminal (as stderr though!!)
     # ASSUMES THE PROGRAM RUN DOES NOT PRODUCE ANY STDERR
-    RUN_TIME=$((/usr/bin/time -f "%U,%S,%E" taskset -c 0 $PROGRAM_INVOCATION) 3>&2 2>&1 1>&3)
+    RUN_TIME=$((/usr/bin/time -f "%U,%S,%E" $PROGRAM_INVOCATION) 3>&2 2>&1 1>&3)
     echo "$RUN_TIME" # becomes out of the subshell and is communicated back to the parent
     #subshell END
     )
@@ -148,6 +155,7 @@ function run_experiment {
     TIME_AND_SWAP_RESULTS_ARR+=("$ratio,$RUN_TIME,$PAGES_SWAPPED_OUT,$PAGES_SWAPPED_IN")
     ftrace_end $ratio
     cgroup_end $ratio
+    echoG "Runtime: $RUN_TIME"
 
 }
 
@@ -202,6 +210,7 @@ echo "Experiment $EXPERIMENT_NAME with command \"$PROGRAM_INVOCATION\" (RSS=$PRO
 read -p "^^ Is this correct? [y/n] " yn
 
 if [[ $yn != "y" ]]; then
+	echo "Aborted"
 	exit
 fi
 
