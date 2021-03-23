@@ -15,6 +15,9 @@ mmult_eigen: mmult_eigen.cpp
 	$(CXX) $(CPPFLAGS) -static $^ -o $@
 	$(CXX) $(CPPFLAGS) $^ -o $@_dyn
 
+mmult_eigen_par: mmult_eigen.cpp
+	$(CXX) $(CPPFLAGS) $^  -fopenmp  -o $@
+
 sort: sort.cpp
 	$(CXX) $(CPPFLAGS) $^ -o $@
 	$(CXX) $(CPPFLAGS) -DMADVISE $^ -o $@_madvise

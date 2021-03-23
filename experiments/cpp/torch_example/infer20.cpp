@@ -2,6 +2,7 @@
 #include "modelsimpl.h"
 #include <torch/torch.h>
 
+#include "../mem_pattern_trace.h"
 namespace vision
 {
 namespace models
@@ -70,7 +71,9 @@ struct Model : torch::nn::Module {
 using namespace vision::models;
 int main()
 {
+	srand(42);
 
+	syscall(mem_pattern_trace, TRACE_START | TRACE_AUTO);
 	Model model;
 
 	auto in = torch::rand({ 4, 3, 1024, 768 });
@@ -87,5 +90,6 @@ int main()
 			     begin).count() /
 			     1000000
 		  << "ms" << std::endl;
+	syscall(mem_pattern_trace, TRACE_END);
 }
 
