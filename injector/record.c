@@ -219,6 +219,10 @@ static void do_unmap_5(pte_t *pte)
 	if (pte_deref_value & SPECIAL_BIT_MASK) {
 		pte_deref_value |= PRESENT_BIT_MASK;
 		pte_deref_value &= ~SPECIAL_BIT_MASK;
+		// todo:: this treats the symptom of a present-marked NULL pointer
+		// find the cause later
+		if ((pte_deref_value & ~PRESENT_BIT_MASK) == 0)
+			pte_deref_value = 0;
 		set_pte(pte, native_make_pte(pte_deref_value));
 	}
 }
