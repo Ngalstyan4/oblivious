@@ -30,6 +30,8 @@ void mem_pattern_trace_start(int flags)
 	pid_t pid = current->pid;
 	const char *proc_name = current->comm;
 
+	// add the special tag to tell this process apart
+	flags |= OBLIVIOUS_TAG;
 	if (flags & TRACE_AUTO) {
 		if (proc_file_exists(proc_name, FETCH_FILE_FMT))
 			flags |= TRACE_PREFETCH;
@@ -53,7 +55,7 @@ void mem_pattern_trace_start(int flags)
 
 	if (flags & TRACE_RECORD) {
 		BUG_ON(us_size < 2);
-		record_init(pid, proc_name, current->mm, us_size);
+		record_init(current, flags, us_size);
 
 	} else if (flags & TRACE_PREFETCH) {
 		fetch_init(pid, proc_name, current->mm);
@@ -61,13 +63,42 @@ void mem_pattern_trace_start(int flags)
 	}
 }
 
-void mem_pattern_trace_end(int flags)
+static void mem_pattern_trace_end(int flags)
 {
 	// all _fini functions check whether they have been initialized
 	// before performing any free-ing so no need to do it here
-	evict_fini();
+	//evict_fini();
 	fetch_fini();
-	record_fini();
+	record_fini(current);
+}
+
+static void copy_process_40(struct task_struct *p, unsigned long clone_flags,
+			    unsigned long stack_start, unsigned long stack_size,
+			    int __user *child_tidptr, struct pid *pid,
+			    int trace, unsigned long tls, int node)
+
+{
+	/* p is being copy-ed from current. need to reset obl state and create
+	 * its own
+	 * p->group_leader is the process that first called mem_pattern_trace
+	 * syscall in myltithreaded envs
+	 * */
+	if (!(p->group_leader->obl.flags & OBLIVIOUS_TAG))
+		return;
+
+	memset(&p->obl, 0, sizeof(struct task_struct_oblivious));
+	fetch_clone(p, clone_flags);
+	record_clone(p, clone_flags);
+}
+
+static void do_exit_41()
+{
+	if (!(current->obl.flags & OBLIVIOUS_TAG))
+		return;
+
+	printk(KERN_INFO "do_exit: proc %d exited with leader %d\n",
+	       current->pid, current->group_leader->pid);
+	mem_pattern_trace_end(0);
 }
 
 static void mem_pattern_trace_3(int flags)
@@ -156,6 +187,8 @@ static void usage(void)
 static int __init mem_pattern_trace_init(void)
 {
 	set_pointer(3, mem_pattern_trace_3);
+	set_pointer(40, copy_process_40);
+	set_pointer(41, do_exit_41);
 
 	if (!cmd) {
 		usage();

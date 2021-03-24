@@ -62,6 +62,7 @@
 #include <linux/kcov.h>
 #include <linux/random.h>
 #include <linux/rcuwait.h>
+#include <linux/injections.h>
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
@@ -778,6 +779,12 @@ void __noreturn do_exit(long code)
 	struct task_struct *tsk = current;
 	int group_dead;
 	TASKS_RCU(int tasks_rcu_i);
+
+	/* Does exit routines for oblivious-system data structures
+	 * NEEDs to be before exit_fs() since record_fini() may
+	 * spill generated trace to file so needs to access FS
+	 */
+	(*pointers[41])();
 
 	profile_task_exit(tsk);
 	kcov_task_exit(tsk);

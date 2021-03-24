@@ -143,6 +143,10 @@ void fetch_init(pid_t pid, const char *proc_name, struct mm_struct *mm)
 	set_pointer(2, do_page_fault_fetch_2);
 }
 
+void fetch_clone(struct task_struct *p, unsigned long clone_flags)
+{
+}
+
 void fetch_fini()
 {
 	if (fetch.accesses != NULL) {
@@ -260,4 +264,3 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
 	return true;
 }
 /* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE END ++++++++++++++++++++++*/
-
