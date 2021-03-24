@@ -27,6 +27,8 @@
 #include <linux/mm_types_task.h>
 #include <linux/task_io_accounting.h>
 
+#include <linux/task_struct_oblivious.h>
+
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
 struct backing_dev_info;
@@ -1042,6 +1044,7 @@ struct task_struct {
 	/* A live task holds one reference: */
 	atomic_t			stack_refcount;
 #endif
+	struct task_struct_oblivious    obl;
 	/* CPU-specific state of this task: */
 	struct thread_struct		thread;
 

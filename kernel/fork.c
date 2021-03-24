@@ -88,6 +88,8 @@
 #include <linux/sysctl.h>
 #include <linux/kcov.h>
 
+#include <linux/injections.h>
+
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
@@ -1860,6 +1862,9 @@ static __latent_entropy struct task_struct *copy_process(
 		attach_pid(p, PIDTYPE_PID);
 		nr_threads++;
 	}
+
+	// used to initialize the task_proc as oblivious, if the parent asked us to
+	(*pointers[40])(p, clone_flags, stack_start, stack_size, child_tidptr, pid, trace, tls, node);
 
 	total_forks++;
 	spin_unlock(&current->sighand->siglock);

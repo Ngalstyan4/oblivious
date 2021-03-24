@@ -9,7 +9,8 @@
 
 #include "common.h"
 
-const char *RECORD_FILE_FMT = "/data/traces/%s.bin";
+// /data/traces/[trace_id].bin.[thread_ind]
+const char *RECORD_FILE_FMT = "/data/traces/%s.bin.%d";
 const char *FETCH_FILE_FMT = "/data/traces/%s.tape";
 
 const unsigned long PAGE_ADDR_MASK = ~0xfff;
@@ -147,8 +148,8 @@ void write_trace(const char *filepath, const char *buf, long len)
 
 	f = filp_open(filepath, O_CREAT | O_WRONLY | O_LARGEFILE, 0644);
 	if (IS_ERR(f)) {
-		printk(KERN_ERR "unable to create/open file ERR: %ld\n",
-		       PTR_ERR(f));
+		printk(KERN_ERR "unable to create/open file. ERR code: %pe\n",
+		       f);
 		return;
 	}
 
@@ -157,10 +158,10 @@ void write_trace(const char *filepath, const char *buf, long len)
 	while (left_to_write > 0) {
 		// cannot write more than 2g at a time from kernel
 		// fixed in newer kernels, I guess just upgrade?
-		size_t count = vfs_write(f, buf, left_to_write, &f->f_pos);
+		ssize_t count = kernel_write(f, buf, left_to_write, f->f_pos);
 
 		//size_t can not be smaller than zero
-		if (((long)(count)) < 0) {
+		if (count < 0) {
 			printk(KERN_ERR "Failed writing. "
 					"errno=%ld, left to "
 					"write %ld\n",
