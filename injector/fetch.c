@@ -18,98 +18,83 @@ int do_swap_page(struct vm_fault *vmf);
 // dangerous!! probably need to protect by locks/atomics? but seems to work for now..
 char fetch_print_buf[MAX_PRINT_LEN];
 char *fetch_buf_end = fetch_print_buf;
-typedef struct {
-	pid_t process_pid;
-	int counter;
-	int found_counter;
-	int already_present;
-	int num_fault;
-	struct mm_struct *mm;
-	struct work_struct prefetch_work;
-	unsigned long *accesses;
-	unsigned long num_accesses;
-	unsigned long pos;
-	unsigned long next_fetch;
-	// controlls whether swapin_readahead will use tape to prefetch or not
-	bool prefetch_start;
-} prefetching_state;
 
 //todo:: switch back to static
-prefetching_state fetch;
+struct prefetching_state fetch;
 
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
 			  struct vm_fault *vmf);
-static void do_page_fault_fetch_2(struct pt_regs *regs,
-				  unsigned long error_code,
-				  unsigned long address,
-				  struct task_struct *tsk, bool *return_early,
-				  int magic);
 
-static void prefetch_work_func(struct work_struct *work)
+static void prefetch_work_func(struct work_struct *work,
+			       struct task_struct *tsk)
 {
+	struct prefetching_state *fetch = &tsk->obl.fetch;
 	int i = 0;
 	int num_prefetch = 0;
+	struct mm_struct *mm = tsk->mm;
 	struct vm_fault vmf;
 	unsigned long paddr;
 	pte_t *pte;
 	//q:: what is down_read? is it not necessary here?
-	//down_read(&fetch.mm->mmap_sem);
-	unsigned long fetch_start = fetch.next_fetch;
+	//down_read(&mm->mmap_sem);
+	unsigned long fetch_start = fetch->next_fetch;
 	if (unlikely(!memtrace_getflag(TAPE_FETCH)))
 		return;
 	for (i = 0; i < 100 && num_prefetch < 50; i++) {
-		if (unlikely(fetch_start + i >= fetch.num_accesses)) {
+		if (unlikely(fetch_start + i >= fetch->num_accesses)) {
 			i--;
 			break;
 		}
-		paddr = fetch.accesses[fetch_start + i];
+		paddr = fetch->accesses[fetch_start + i];
 
-		if (prefetch_addr(paddr, fetch.mm, &vmf) == true) {
+		if (prefetch_addr(paddr, mm, &vmf) == true) {
 			num_prefetch++;
 			//do_swap_page(&vmf);
 		}
 	}
-	fetch.found_counter++;
+	fetch->found_counter++;
 	//lru_add_drain();// <Q::todo:: what does this do?.. Push any new pages onto the LRU now
-	fetch.next_fetch = fetch_start + i;
+	fetch->next_fetch = fetch_start + i;
 	while (true) {
-		if (unlikely(fetch.next_fetch >= fetch.num_accesses)) {
-			fetch.next_fetch = fetch.num_accesses - 1;
+		if (unlikely(fetch->next_fetch >= fetch->num_accesses)) {
+			fetch->next_fetch = fetch->num_accesses - 1;
 			break;
 		}
-		pte = addr2pte(fetch.accesses[fetch.next_fetch], fetch.mm);
+		pte = addr2pte(fetch->accesses[fetch->next_fetch], mm);
 		if (pte && !pte_none(*pte) && pte_present(*pte)) {
 			// page already mapped in page table
-			fetch.next_fetch++;
-			fetch.already_present++;
+			fetch->next_fetch++;
+			fetch->already_present++;
 		} else
 			break;
 	}
 
-	//up_read(&fetch.mm->mmap_sem);
+	//up_read(&mm->mmap_sem);
 }
 
-void fetch_init(pid_t pid, const char *proc_name, struct mm_struct *mm)
+void fetch_init(struct task_struct *tsk, int flags)
 {
+	struct prefetching_state *fetch = &tsk->obl.fetch;
+
 	char trace_filepath[FILEPATH_LEN];
+	int thread_ind = tsk->pid - tsk->group_leader->pid;
 	size_t filesize = 0;
 	unsigned long *buf;
 	size_t count;
 
-	snprintf(trace_filepath, FILEPATH_LEN, FETCH_FILE_FMT, proc_name);
+	fetch_fini(tsk);
+	memset(fetch, 0, sizeof(struct prefetching_state));
+	tsk->obl.flags = flags;
+
+	snprintf(trace_filepath, FILEPATH_LEN, FETCH_FILE_FMT, tsk->comm,
+		 thread_ind);
 
 	// in case path is too long, truncate;
 	trace_filepath[FILEPATH_LEN - 1] = '\0';
 
-	// if previous program running fetching was killed
-	// before completion, fini() would heve never run
-	// there must be a better way to handle this (listen to do_exit calls?)
-	// but for now this works
-	fetch_fini();
-	memset(&fetch, 0, sizeof(fetch));
-
 	if (!file_exists(trace_filepath)) {
-		printk(KERN_ERR "unable to read fetch trace\n");
+		printk(KERN_ERR "unable to read fetch tape %s\n",
+		       trace_filepath);
 		return;
 	}
 
@@ -130,70 +115,54 @@ void fetch_init(pid_t pid, const char *proc_name, struct mm_struct *mm)
 		return;
 	}
 
-	fetch.num_accesses = count / sizeof(void *);
+	fetch->num_accesses = count / sizeof(void *);
 	printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n", count,
-	       fetch.num_accesses);
+	       fetch->num_accesses);
 
-	fetch.accesses = buf;
-	fetch.process_pid = pid;
-	fetch.mm = mm;
+	fetch->accesses = buf;
 
-	INIT_WORK(&fetch.prefetch_work, prefetch_work_func);
-	fetch.prefetch_start = true; // can be used to pause and resume
-	set_pointer(2, do_page_fault_fetch_2);
+	//INIT_WORK(&fetch->prefetch_work, prefetch_work_func);
+	fetch->prefetch_start = true; // can be used to pause and resume
 }
 
 void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 {
+	fetch_init(p, current->obl.flags);
 }
 
-void fetch_fini()
+void fetch_fini(struct task_struct *tsk)
 {
-	if (fetch.accesses != NULL) {
-		cancel_work_sync(&fetch.prefetch_work);
-		fetch.mm = NULL;
+	struct prefetching_state *fetch = &tsk->obl.fetch;
+	if (fetch->accesses != NULL) {
+		cancel_work_sync(&fetch->prefetch_work);
 		printk(KERN_INFO "found %d/%d page faults: min:%ld, maj: %ld "
 				 "already present: %d next_fetch: %ld\n",
-		       fetch.found_counter, fetch.num_fault, current->min_flt,
-		       current->maj_flt, fetch.already_present,
-		       fetch.next_fetch);
-		vfree(fetch.accesses);
-		fetch.accesses = NULL; // todo:: should not need once in kernel
-	}
-	set_pointer(2, kernel_noop);
-}
-
-void fetch_force_clean()
-{
-
-	if (fetch.accesses) {
-		vfree(fetch.accesses);
-		fetch.accesses = NULL;
-		printk(KERN_INFO "found %d/%d page faults\n",
-		       fetch.found_counter, fetch.counter);
+		       fetch->found_counter, fetch->num_fault, current->min_flt,
+		       current->maj_flt, fetch->already_present,
+		       fetch->next_fetch);
+		vfree(fetch->accesses);
+		fetch->accesses = NULL; // todo:: should not need once in kernel
 	}
 }
 
 /* ++++++++++++++++++++++++++ PREFETCHING REMOTE MEMORY W/ TAPE BEGIN ++++++++++++++++++++*/
-static void do_page_fault_fetch_2(struct pt_regs *regs,
-				  unsigned long error_code,
-				  unsigned long address,
-				  struct task_struct *tsk, bool *return_early,
-				  int magic)
+void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
+			      unsigned long address, struct task_struct *tsk,
+			      bool *return_early, int magic)
 {
-	if (unlikely(fetch.accesses == NULL)) {
+	struct prefetching_state *fetch = &tsk->obl.fetch;
+
+	if (unlikely(fetch->accesses == NULL)) {
 		printk(KERN_ERR "fetch trace not initialized\n");
 		return;
 	}
 
-	if (fetch.process_pid == tsk->pid) {
-		fetch.num_fault++;
+	fetch->num_fault++;
 
-		if (fetch.next_fetch == 0 ||
-		    (fetch.accesses[fetch.next_fetch] & PAGE_ADDR_MASK) ==
-			    (address & PAGE_ADDR_MASK)) {
-			prefetch_work_func(NULL);
-		}
+	if (fetch->next_fetch == 0 ||
+	    (fetch->accesses[fetch->next_fetch] & PAGE_ADDR_MASK) ==
+		    (address & PAGE_ADDR_MASK)) {
+		prefetch_work_func(NULL, tsk);
 	}
 }
 

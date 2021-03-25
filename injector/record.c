@@ -159,7 +159,7 @@ void record_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 		return;
 	}
 
-	if (current->obl.flags & TRACE_RECORD && record->pos < TRACE_MAX_LEN) {
+	if (record->pos < TRACE_MAX_LEN) {
 
 		struct vm_area_struct *maybe_stack =
 			find_vma(current->mm, address);

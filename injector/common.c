@@ -11,7 +11,7 @@
 
 // /data/traces/[trace_id].bin.[thread_ind]
 const char *RECORD_FILE_FMT = "/data/traces/%s.bin.%d";
-const char *FETCH_FILE_FMT = "/data/traces/%s.tape";
+const char *FETCH_FILE_FMT = "/data/traces/%s.tape.%d";
 
 const unsigned long PAGE_ADDR_MASK = ~0xfff;
 const unsigned long PRESENT_BIT_MASK = 1UL;
