@@ -61,7 +61,7 @@ void mem_pattern_trace_start(int flags)
 		record_init(current, flags, us_size);
 
 	} else if (flags & TRACE_PREFETCH) {
-		fetch_init(pid, proc_name, current->mm);
+		fetch_init(current, flags);
 		evict_init();
 	}
 }
@@ -72,7 +72,7 @@ static void mem_pattern_trace_end(int flags)
 	// all _fini functions check whether they have been initialized
 	// before performing any free-ing so no need to do it here
 	//evict_fini();
-	fetch_fini();
+	fetch_fini(current);
 	record_fini(current);
 }
 
@@ -91,18 +91,27 @@ static void copy_process_40(struct task_struct *p, unsigned long clone_flags,
 		return;
 
 	memset(&p->obl, 0, sizeof(struct task_struct_oblivious));
-	fetch_clone(p, clone_flags);
-	record_clone(p, clone_flags);
+	if (current->obl.flags & TRACE_PREFETCH)
+		fetch_clone(p, clone_flags);
+	else if (current->obl.flags & TRACE_RECORD)
+		record_clone(p, clone_flags);
 }
 
 static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
 			    unsigned long address, struct task_struct *tsk,
 			    bool *return_early, int magic)
 {
-	record_page_fault_handler(regs, error_code, address, tsk, return_early,
-				  magic);
-	fetch_page_fault_handler(regs, error_code, address, tsk, return_early,
-				 magic);
+	/* For performance reasons handler functions do not check whether the process
+	 * is in relevant (RECORD|FETCH) mode so this check is important
+	 * We really care about perormance in FETCH branch, hence the `likely`
+	 * tracing is quite slow so branch misprediction here will not hurt much?
+	 * */
+	if (likely(current->obl.flags & TRACE_PREFETCH))
+		fetch_page_fault_handler(regs, error_code, address, tsk,
+					 return_early, magic);
+	else if (current->obl.flags & TRACE_RECORD)
+		record_page_fault_handler(regs, error_code, address, tsk,
+					  return_early, magic);
 }
 
 static void do_exit_41()
@@ -161,7 +170,6 @@ static void mem_pattern_trace_3(int flags)
 	}
 
 	if (flags & TRACE_START) {
-		fetch_force_clean();
 		mem_pattern_trace_start(flags);
 		return;
 	}
@@ -304,9 +312,6 @@ static void __exit mem_pattern_trace_exit(void)
 #if DEBUG_FS
 	debugfs_remove_recursive(debugfs_root);
 #endif
-	// free vmallocs and other state, in case
-	// the process crashed or used syscalls incorrectly
-	fetch_force_clean();
 }
 
 module_init(mem_pattern_trace_init);
