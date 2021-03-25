@@ -81,11 +81,11 @@ pte_t *addr2ptepmd(unsigned long addr, struct mm_struct *mm, pmd_t **pmd_ret)
 	return pte;
 }
 
-bool proc_file_exists(const char *proc_name, const char *path_fmt)
+bool proc_file_exists(const char *proc_name, const char *path_fmt, int tid)
 {
 	char trace_filepath[FILEPATH_LEN];
 
-	snprintf(trace_filepath, FILEPATH_LEN, path_fmt, proc_name);
+	snprintf(trace_filepath, FILEPATH_LEN, path_fmt, proc_name, tid);
 
 	// in case path is too long, truncate;
 	trace_filepath[FILEPATH_LEN - 1] = '\0';
