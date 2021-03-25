@@ -54,7 +54,10 @@ void mem_pattern_trace_start(int flags)
 	       flags & TRACE_PREFETCH ? "PREFETCHING" : "", pid);
 
 	if (flags & TRACE_RECORD) {
-		BUG_ON(us_size < 2);
+		if (us_size < 2) {
+			printk(KERN_WARNING "TRACE_RECORD: ALT_PATTERN problem"
+					    "may arrise when us_size < 2\n");
+		}
 		record_init(current, flags, us_size);
 
 	} else if (flags & TRACE_PREFETCH) {
@@ -78,17 +81,27 @@ static void copy_process_40(struct task_struct *p, unsigned long clone_flags,
 			    int trace, unsigned long tls, int node)
 
 {
-	/* p is being copy-ed from current. need to reset obl state and create
-	 * its own
-	 * p->group_leader is the process that first called mem_pattern_trace
-	 * syscall in myltithreaded envs
-	 * */
+	/* p is being copy-ed from current. Need to
+	 * reset obl state and create its own
+	 * p->group_leader is the thread that first
+	 * called mem_pattern_trace syscall in a multithreaded process
+	 */
 	if (!(p->group_leader->obl.flags & OBLIVIOUS_TAG))
 		return;
 
 	memset(&p->obl, 0, sizeof(struct task_struct_oblivious));
 	fetch_clone(p, clone_flags);
 	record_clone(p, clone_flags);
+}
+
+static void do_page_fault_2(struct pt_regs *regs, unsigned long error_code,
+			    unsigned long address, struct task_struct *tsk,
+			    bool *return_early, int magic)
+{
+	record_page_fault_handler(regs, error_code, address, tsk, return_early,
+				  magic);
+	fetch_page_fault_handler(regs, error_code, address, tsk, return_early,
+				 magic);
 }
 
 static void do_exit_41()
@@ -99,6 +112,26 @@ static void do_exit_41()
 	printk(KERN_INFO "do_exit: proc %d exited with leader %d\n",
 	       current->pid, current->group_leader->pid);
 	mem_pattern_trace_end(0);
+}
+
+// if PTE is not present (in swap space/disc) and the application free()s
+// it, the page fault handler is not invoked to avoid unnecesary swap
+// space disk. that is why cleaning magic bits in page fault handler only
+// is not enough and we need to make sure that we clear the magic bit in
+// unmap calls *before* the kernel assumes there is corresponding swap entry
+// and goes looking for it (in order to free it)
+static void do_unmap_5(pte_t *pte)
+{
+	unsigned long pte_deref_value = native_pte_val(*pte);
+	if (pte_deref_value & SPECIAL_BIT_MASK) {
+		pte_deref_value |= PRESENT_BIT_MASK;
+		pte_deref_value &= ~SPECIAL_BIT_MASK;
+		// todo:: this treats the symptom of a present-marked NULL pointer
+		// find the cause later
+		if ((pte_deref_value & ~PRESENT_BIT_MASK) == 0)
+			pte_deref_value = 0;
+		set_pte(pte, native_make_pte(pte_deref_value));
+	}
 }
 
 static void mem_pattern_trace_3(int flags)
@@ -127,7 +160,6 @@ static void mem_pattern_trace_3(int flags)
 	}
 
 	if (flags & TRACE_START) {
-		record_force_clean();
 		fetch_force_clean();
 		mem_pattern_trace_start(flags);
 		return;
@@ -187,6 +219,11 @@ static void usage(void)
 static int __init mem_pattern_trace_init(void)
 {
 	set_pointer(3, mem_pattern_trace_3);
+
+	set_pointer(5, do_unmap_5);
+	set_pointer(6, do_unmap_5); //<-- for handle_pte_fault
+	set_pointer(2, do_page_fault_2);
+
 	set_pointer(40, copy_process_40);
 	set_pointer(41, do_exit_41);
 
@@ -194,6 +231,7 @@ static int __init mem_pattern_trace_init(void)
 		usage();
 		return -1;
 	}
+
 #if DEBUG_FS
 	debugfs_root = debugfs_create_dir("memtrace", NULL);
 #endif
@@ -267,7 +305,6 @@ static void __exit mem_pattern_trace_exit(void)
 #endif
 	// free vmallocs and other state, in case
 	// the process crashed or used syscalls incorrectly
-	record_force_clean();
 	fetch_force_clean();
 }
 
