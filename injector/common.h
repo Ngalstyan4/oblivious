@@ -51,7 +51,7 @@ extern const unsigned long SPECIAL_BIT_MASK;
 // if need be
 pte_t *addr2pte(unsigned long addr, struct mm_struct *mm);
 pte_t *addr2ptepmd(unsigned long addr, struct mm_struct *mm, pmd_t **pmd_ret);
-bool proc_file_exists(const char *proc_name, const char *path_fmt);
+bool proc_file_exists(const char *proc_name, const char *path_fmt, int tid);
 bool file_exists(const char *filepath);
 size_t file_size(const char *filepath);
 

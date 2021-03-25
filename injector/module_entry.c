@@ -33,9 +33,9 @@ void mem_pattern_trace_start(int flags)
 	// add the special tag to tell this process apart
 	flags |= OBLIVIOUS_TAG;
 	if (flags & TRACE_AUTO) {
-		if (proc_file_exists(proc_name, FETCH_FILE_FMT))
+		if (proc_file_exists(proc_name, FETCH_FILE_FMT, 0))
 			flags |= TRACE_PREFETCH;
-		else if (!proc_file_exists(proc_name, RECORD_FILE_FMT)) {
+		else if (!proc_file_exists(proc_name, RECORD_FILE_FMT, 0)) {
 			flags |= TRACE_RECORD;
 		} else {
 			printk(KERN_ERR
@@ -68,6 +68,7 @@ void mem_pattern_trace_start(int flags)
 
 static void mem_pattern_trace_end(int flags)
 {
+	current->obl.flags = 0;
 	// all _fini functions check whether they have been initialized
 	// before performing any free-ing so no need to do it here
 	//evict_fini();
