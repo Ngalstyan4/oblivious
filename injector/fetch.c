@@ -11,6 +11,7 @@
 #include "kevictd.h"
 
 #define MAX_PRINT_LEN 768
+const int MAX_SEARCH_DIST = 2000;
 
 // exported from mm/memory.c mm/internal.h function
 int do_swap_page(struct vm_fault *vmf);
@@ -52,9 +53,9 @@ static void prefetch_work_func(struct work_struct *work,
 			//do_swap_page(&vmf);
 		}
 	}
-	fetch->found_counter++;
+	fetch->found_counter += num_prefetch;
 	//lru_add_drain();// <Q::todo:: what does this do?.. Push any new pages onto the LRU now
-	fetch->next_fetch = fetch_start + i;
+	fetch->next_fetch += i;
 	while (true) {
 		if (unlikely(fetch->next_fetch >= fetch->num_accesses)) {
 			fetch->next_fetch = fetch->num_accesses - 1;
@@ -152,11 +153,17 @@ void fetch_fini(struct task_struct *tsk)
 	struct prefetching_state *fetch = &tsk->obl.fetch;
 	if (fetch->accesses != NULL) {
 		cancel_work_sync(&fetch->prefetch_work);
-		printk(KERN_INFO "found %d/%d page faults: min:%ld, maj: %ld "
-				 "already present: %d next_fetch: %ld\n",
+		printk(KERN_INFO "fetch id %d: found %d/%d "
+				 "min:%ld, maj: %ld "
+				 "alrdy prsnt: %d %s\n",
+		       current->pid - current->group_leader->pid,
 		       fetch->found_counter, fetch->num_fault, current->min_flt,
 		       current->maj_flt, fetch->already_present,
-		       fetch->next_fetch);
+		       fetch->num_accesses - fetch->next_fetch < 10 ?
+			       "SYNC" :
+			       "!!!LOST!!!");
+		printk(KERN_INFO "pos %ld next %ld num %ld\n", fetch->pos,
+		       fetch->next_fetch, fetch->num_accesses);
 		vfree(fetch->accesses);
 		fetch->accesses = NULL; // todo:: should not need once in kernel
 	}
@@ -168,6 +175,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 			      bool *return_early, int magic)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
+	int dist = 0;
 
 	if (unlikely(fetch->accesses == NULL)) {
 		printk(KERN_ERR "fetch trace not initialized\n");
@@ -176,7 +184,30 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 
 	fetch->num_fault++;
 
-	if (fetch->next_fetch == 0 ||
+	// aggressively stay in sync with tape
+	while (dist < MAX_SEARCH_DIST &&
+	       fetch->pos + dist + 1 < fetch->num_accesses &&
+	       (fetch->accesses[fetch->pos + dist] & PAGE_ADDR_MASK) !=
+		       (address & PAGE_ADDR_MASK))
+		dist++;
+	if ((fetch->accesses[fetch->pos + dist] & PAGE_ADDR_MASK) ==
+	    (address & PAGE_ADDR_MASK)) {
+		fetch->pos += dist;
+		fetch->counter++;
+	}
+
+	/* first condition is relevant in the very beginning
+	 * second condition uses the above syncing to follow the tape
+	 * third condition uses address comparison to stay in sync
+	 *
+	 * in single core prefetching the second condition is not needed
+	 * and direct addr comparision is enough to stay in sync
+	 * However, in multicore prefetching it is common for an address to
+	 * be in tape of one thread but be fetched by another, therefore relying
+	 * on direct addr comparision clues is not reliable and the third condition
+	 * is usually never satisfied
+	*/
+	if (fetch->next_fetch == 0 || fetch->pos >= fetch->next_fetch ||
 	    (fetch->accesses[fetch->next_fetch] & PAGE_ADDR_MASK) ==
 		    (address & PAGE_ADDR_MASK)) {
 		prefetch_work_func(NULL, tsk);
