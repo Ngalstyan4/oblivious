@@ -72,62 +72,79 @@ static void prefetch_work_func(struct work_struct *work,
 	//up_read(&mm->mmap_sem);
 }
 
-void fetch_init(struct task_struct *tsk, int flags)
+// todo:: move to task_struct_oblivious on next kernel recompile
+static unsigned long *bufs[10];
+static size_t counts[10];
+static atomic_t thread_pos = ATOMIC_INIT(0);
+
+void fetch_init_atomic(struct task_struct *tsk, unsigned long flags)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
 
-	char trace_filepath[FILEPATH_LEN];
-	int thread_ind = tsk->pid - tsk->group_leader->pid;
-	size_t filesize = 0;
-	unsigned long *buf;
-	size_t count;
+	int id = atomic_inc_return(&thread_pos) - 1;
 
 	fetch_fini(tsk);
 	memset(fetch, 0, sizeof(struct prefetching_state));
 	tsk->obl.flags = flags;
+	fetch->num_accesses = counts[id] / sizeof(void *);
+	printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n",
+	       counts[id], fetch->num_accesses);
 
-	snprintf(trace_filepath, FILEPATH_LEN, FETCH_FILE_FMT, tsk->comm,
-		 thread_ind);
-
-	// in case path is too long, truncate;
-	trace_filepath[FILEPATH_LEN - 1] = '\0';
-
-	if (!file_exists(trace_filepath)) {
-		printk(KERN_ERR "unable to read fetch tape %s\n",
-		       trace_filepath);
-		return;
-	}
-
-	filesize = file_size(trace_filepath);
-
-	buf = vmalloc(filesize);
-	if (buf == NULL) {
-		printk(KERN_ERR
-		       "unable to allocate memory for reading the trace\n");
-		return;
-	}
-
-	count = read_trace(trace_filepath, (char *)buf, filesize);
-
-	if (filesize == 0 || count == 0) {
-		printk(KERN_ERR "unable to initialize fetching\n");
-		vfree(buf);
-		return;
-	}
-
-	fetch->num_accesses = count / sizeof(void *);
-	printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n", count,
-	       fetch->num_accesses);
-
-	fetch->accesses = buf;
+	fetch->accesses = bufs[id];
 
 	//INIT_WORK(&fetch->prefetch_work, prefetch_work_func);
 	fetch->prefetch_start = true; // can be used to pause and resume
 }
 
+void fetch_init(struct task_struct *tsk, int flags)
+{
+	int thread_ind = 0;
+	atomic_set(&thread_pos, 0);
+	for (;; thread_ind++) {
+		char trace_filepath[FILEPATH_LEN];
+		size_t filesize = 0;
+		unsigned long *buf;
+		size_t count;
+
+		snprintf(trace_filepath, FILEPATH_LEN, FETCH_FILE_FMT,
+			 tsk->comm, thread_ind);
+
+		// in case path is too long, truncate;
+		trace_filepath[FILEPATH_LEN - 1] = '\0';
+
+		if (!file_exists(trace_filepath)) {
+			printk(KERN_INFO "fetch: successfully read %d tapes\n",
+			       thread_ind);
+			break;
+		}
+
+		filesize = file_size(trace_filepath);
+
+		buf = vmalloc(filesize);
+		if (buf == NULL) {
+			printk(KERN_ERR "unable to allocate memory for reading "
+					"the trace\n");
+			return;
+		}
+
+		count = read_trace(trace_filepath, (char *)buf, filesize);
+
+		if (filesize == 0 || count == 0) {
+			printk(KERN_ERR "unable to initialize fetching\n");
+			vfree(buf);
+			return;
+		}
+
+		bufs[thread_ind] = buf;
+		counts[thread_ind] = count;
+	}
+
+	fetch_init_atomic(tsk, flags);
+}
+
 void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 {
-	fetch_init(p, current->obl.flags);
+	fetch_init_atomic(p, current->obl.flags);
 }
 
 void fetch_fini(struct task_struct *tsk)

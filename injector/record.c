@@ -71,8 +71,6 @@ void record_fini(struct task_struct *tsk)
 		snprintf(trace_filepath, FILEPATH_LEN, RECORD_FILE_FMT,
 			 tsk->comm, thread_ind);
 
-		printk(KERN_ERR "for pid %d writing at %s\n", tsk->pid,
-		       trace_filepath);
 		// in case path is too long, truncate;
 		trace_filepath[FILEPATH_LEN - 1] = '\0';
 		down_read(&tsk->mm->mmap_sem);
@@ -201,8 +199,8 @@ void record_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 		// trace_tlb_flush(TLB_LOCAL_SHOOTDOWN, TLB_FLUSH_ALL);
 		//count_vm_tlb_event(NR_TLB_LOCAL_FLUSH_ALL);
 		get_cpu();
-		flush_tlb_all_p();
-		//local_flush_tlb();
+		//flush_tlb_all_p();
+		local_flush_tlb();
 		put_cpu();
 
 		up_read(&current->mm->mmap_sem);
