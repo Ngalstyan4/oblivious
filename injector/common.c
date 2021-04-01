@@ -168,11 +168,14 @@ void write_trace(const char *filepath, const char *buf, long len)
 			       count, left_to_write);
 			break;
 		}
-		printk(KERN_DEBUG "wrote %ld bytes out of %ld "
-				  "left to write and %ld total\n",
-		       count, left_to_write, len);
 		left_to_write -= count;
 		buf += count;
+	}
+
+	if (left_to_write > 0) {
+		printk(KERN_ERR "unable to write %ld "
+				"out of %ld total\n",
+		       left_to_write, len);
 	}
 
 	filp_close(f, NULL);
