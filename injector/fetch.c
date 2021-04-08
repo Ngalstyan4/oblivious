@@ -10,11 +10,22 @@
 #include "fetch.h"
 #include "kevictd.h"
 
+#include <linux/kallsyms.h>
+
 #define MAX_PRINT_LEN 768
 const int MAX_SEARCH_DIST = 2000;
 
+// todo:: this should be same as the eviction CPU once eviction work chunks
+// are properly broken down to avoid head of line blocking for prefetching
+// it seems even now using eviction CPU for fetching would be acceptable
+// but it has ~10% performance overhead and I think fixing some eviction
+// things will get rid of this down the line and as a temporary measure think
+// it is better to use a separate CPU for fetching
+const int FETCH_OFFLOAD_CPU = 6;
+
 // exported from mm/memory.c mm/internal.h function
 int do_swap_page(struct vm_fault *vmf);
+static int (*do_swap_page_p)(struct vm_fault *vmf);
 //todo::
 // dangerous!! probably need to protect by locks/atomics? but seems to work for now..
 char fetch_print_buf[MAX_PRINT_LEN];
@@ -26,10 +37,14 @@ struct prefetching_state fetch;
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
 			  struct vm_fault *vmf);
 
-static void prefetch_work_func(struct work_struct *work,
-			       struct task_struct *tsk)
+static void prefetch_work_func(struct work_struct *work)
 {
-	struct prefetching_state *fetch = &tsk->obl.fetch;
+	struct prefetching_state *fetch =
+		container_of(work, struct prefetching_state, prefetch_work);
+	struct task_struct_oblivious *obl =
+		container_of(fetch, struct task_struct_oblivious, fetch);
+	struct task_struct *tsk = container_of(obl, struct task_struct, obl);
+	//struct prefetching_state *fetch = &tsk->obl.fetch;
 	int i = 0;
 	int num_prefetch = 0;
 	struct mm_struct *mm = tsk->mm;
@@ -50,7 +65,7 @@ static void prefetch_work_func(struct work_struct *work,
 
 		if (prefetch_addr(paddr, mm, &vmf) == true) {
 			num_prefetch++;
-			//do_swap_page(&vmf);
+			//do_swap_page_p(&vmf);
 		}
 	}
 	fetch->found_counter += num_prefetch;
@@ -93,13 +108,14 @@ void fetch_init_atomic(struct task_struct *tsk, unsigned long flags)
 
 	fetch->accesses = bufs[id];
 
-	//INIT_WORK(&fetch->prefetch_work, prefetch_work_func);
+	INIT_WORK(&fetch->prefetch_work, prefetch_work_func);
 	fetch->prefetch_start = true; // can be used to pause and resume
 }
 
 void fetch_init(struct task_struct *tsk, int flags)
 {
 	int thread_ind = 0;
+	do_swap_page_p = (void *)kallsyms_lookup_name("do_swap_page");
 	atomic_set(&thread_pos, 0);
 	for (;; thread_ind++) {
 		char trace_filepath[FILEPATH_LEN];
@@ -210,7 +226,11 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	if (fetch->next_fetch == 0 || fetch->pos >= fetch->next_fetch ||
 	    (fetch->accesses[fetch->next_fetch] & PAGE_ADDR_MASK) ==
 		    (address & PAGE_ADDR_MASK)) {
-		prefetch_work_func(NULL, tsk);
+		if (memtrace_getflag(OFFLOAD_FETCH))
+			queue_work_on(FETCH_OFFLOAD_CPU, system_highpri_wq,
+				      &fetch->prefetch_work);
+		else
+			prefetch_work_func(&tsk->obl.fetch.prefetch_work);
 	}
 }
 
@@ -264,8 +284,12 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
 	}
 	swap_readpage(page);
 	SetPageReadahead(page);
+	if (memtrace_getflag(MARK_UNEVICTABLE))
+		SetPageUnevictable(page);
 
-	if (fetch_buf_end < fetch_print_buf + sizeof(fetch_print_buf))
+	// todo:: old artifact from explicit eviction and pfn lifetime tracking experiments..
+	// remove after sorting out evictions!!
+	if (false && fetch_buf_end < fetch_print_buf + sizeof(fetch_print_buf))
 		fetch_buf_end += snprintf(fetch_buf_end, 10, "%lx,",
 					  (unsigned long)page_to_pfn(page));
 	put_page(page); //= page_cache_release

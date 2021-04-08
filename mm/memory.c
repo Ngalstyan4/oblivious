@@ -2711,6 +2711,7 @@ int do_swap_page(struct vm_fault *vmf)
 
 	delayacct_set_flag(DELAYACCT_PF_SWAPIN);
 	page = lookup_swap_cache(entry);
+	(*pointers[50])(page, vmf, entry, memcg);
 	if (!page) {
 		page = swapin_readahead(entry, GFP_HIGHUSER_MOVABLE, vma,
 					vmf->address);
@@ -2813,10 +2814,17 @@ int do_swap_page(struct vm_fault *vmf)
 	if (page == swapcache) {
 		do_page_add_anon_rmap(page, vma, vmf->address, exclusive);
 		mem_cgroup_commit_charge(page, memcg, true, false);
+		// used to mark a page evictable again after it is successfully mapped
+		//todo:: soooo much can wrong here... e.g. page was copied and we remove unevictable only from copy
+		(*pointers[52])(page, vmf, entry, memcg, vma);
+
 		activate_page(page);
 	} else { /* ksm created a completely new copy */
 		page_add_new_anon_rmap(page, vma, vmf->address, false);
 		mem_cgroup_commit_charge(page, memcg, false, false);
+		// used to mark a page evictable again after it is successfully mapped
+		//todo:: soooo much can wrong here... e.g. page was copied and we remove unevictable only from copy
+		(*pointers[52])(page, vmf, entry, memcg, vma);
 		lru_cache_add_active_or_unevictable(page, vma);
 	}
 
