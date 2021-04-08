@@ -1,5 +1,6 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/mm_types.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 
@@ -118,12 +119,22 @@ static void do_exit_41()
 {
 	if (!(current->obl.flags & OBLIVIOUS_TAG))
 		return;
-
-	printk(KERN_INFO "do_exit: proc %d exited with leader %d\n",
-	       current->pid, current->group_leader->pid);
 	mem_pattern_trace_end(0);
 }
 
+// used in the mechanism to keep prefetched pages in cache before first use
+static void do_swap_page_50(struct page *page, struct vm_fault *vmf,
+			    swp_entry_t entry, struct mem_cgroup *memcg)
+{
+	if (page && test_bit(PG_unevictable, &page->flags))
+		clear_bit(PG_unevictable, &page->flags);
+}
+
+static void do_swap_page_end_52(struct page *page, struct vm_fault *vmf,
+				swp_entry_t entry, struct mem_cgroup *memcg,
+				struct vm_area_struct *vma)
+{
+}
 // if PTE is not present (in swap space/disc) and the application free()s
 // it, the page fault handler is not invoked to avoid unnecesary swap
 // space disk. that is why cleaning magic bits in page fault handler only
@@ -196,9 +207,12 @@ static void print_memtrace_flags()
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n"
-
+			 "\n"
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n"
+			 "%-30s %s (%s)\n"
+			 "%-30s %s (%s)\n"
+			 "\n"
 			 "%-30s %s (%s)\n",
 	       // clang-format off
 		"Microset size", us_size, "us_size",
@@ -208,7 +222,10 @@ static void print_memtrace_flags()
 		"Swap SSD Optim",  memtrace_getflag(SWAP_SSD_OPTIMIZATION) ? "ON" : "OFF", "ssdopt",
 
 		"Fastswap writes",  memtrace_getflag(FASTSWAP_ASYNCWRITES) ? "ASYNC" : "SYNC", "async_writes",
-		"Tape fetch",  memtrace_getflag(TAPE_FETCH) ? "ON" : "OFF", "tape_fetch",
+		"Enable tape fetch",  memtrace_getflag(TAPE_FETCH) ? "ON" : "OFF", "tape_fetch",
+		"Offload prefetching",  memtrace_getflag(OFFLOAD_FETCH) ? "ON" : "OFF", "offload_fetch",
+		"Mark unevictable",  memtrace_getflag(MARK_UNEVICTABLE) ? "ON" : "OFF", "unevictable",
+
 		"print LRU dmesg logs",  memtrace_getflag(LRU_LOGS) ? "ON" : "OFF", "lru_logs"
 	       // clang-format on
 	       );
@@ -236,6 +253,9 @@ static int __init mem_pattern_trace_init(void)
 	set_pointer(40, copy_process_40);
 	set_pointer(41, do_exit_41);
 
+	// assuming the application has no unevictable pages so if we an
+	// unevictable-barked page, we remove the marking
+	set_pointer(50, do_swap_page_50);
 	if (!cmd) {
 		usage();
 		return -1;
@@ -285,6 +305,22 @@ static int __init mem_pattern_trace_init(void)
 
 		*val == '1' ? memtrace_setflag(TAPE_FETCH) :
 			      memtrace_clearflag(TAPE_FETCH);
+	} else if (strcmp(cmd, "offload_fetch") == 0) {
+		if (!val || (*val != '0' && *val != '1')) {
+			usage();
+			return 0;
+		}
+
+		*val == '1' ? memtrace_setflag(OFFLOAD_FETCH) :
+			      memtrace_clearflag(OFFLOAD_FETCH);
+	} else if (strcmp(cmd, "unevictable") == 0) {
+		if (!val || (*val != '0' && *val != '1')) {
+			usage();
+			return 0;
+		}
+
+		*val == '1' ? memtrace_setflag(MARK_UNEVICTABLE) :
+			      memtrace_clearflag(MARK_UNEVICTABLE);
 	} else if (strcmp(cmd, "lru_logs") == 0) {
 		if (!val || (*val != '0' && *val != '1')) {
 			usage();
@@ -298,6 +334,19 @@ static int __init mem_pattern_trace_init(void)
 		return 0;
 	}
 	print_memtrace_flags();
+
+	// sanity checks
+	if (!memtrace_getflag(TAPE_OPS) && memtrace_getflag(TAPE_FETCH)) {
+		printk(KERN_WARNING "Cannot fetch as memtrace syscall ops are "
+				    "off(tape_ops)\n");
+	}
+
+	if (memtrace_getflag(OFFLOAD_FETCH) &&
+	    !memtrace_getflag(MARK_UNEVICTABLE)) {
+		printk(KERN_WARNING "Offloading evictions without marking "
+				    "prefetched pages unevictable"
+				    "will result in VERY poor performance\n");
+	}
 	return 0;
 }
 

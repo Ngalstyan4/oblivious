@@ -2033,10 +2033,13 @@ done_restock:
 	 * reclaim, the cost of mismatch is negligible.
 	 */
 	do {
+		bool skip = false;
 		high_limit = memcg->high;
 		curr_pages = page_counter_read(&memcg->memory);
 
-		if (curr_pages > high_limit) {
+		(*pointers[51])(memcg, &skip);
+
+		if (!skip && curr_pages > high_limit) {
 			excess = curr_pages - high_limit;
 			/* regardless of whether we use app cpu or worker, we evict
 			 * at most MAX_RECLAIM_OFFLOAD pages at a time */
