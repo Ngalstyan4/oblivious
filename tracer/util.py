@@ -76,7 +76,7 @@ def trace_to_mod_list(filename, cache_size, batch_size, beladys=False, pkl=True)
     fetches = list()
     batch_start = 0
 
-    pkl_path = '%s_%s_%s_%s.pkl' % (filename, 'beladys' if beladys else 'lru', cache_size, batch_size)
+    pkl_path = 'pkls/%s_%s_%s_%s.pkl' % (filename, 'beladys' if beladys else 'lru', cache_size, batch_size)
     if pkl and os.path.isfile(pkl_path):
         f = open(pkl_path, 'rb')
         modifications = pickle.load(f)
@@ -141,6 +141,7 @@ def trace_to_mod_list(filename, cache_size, batch_size, beladys=False, pkl=True)
     if fetches:
         modifications[batch_start] = Cache_Change(access_num, list(fetches))
     if pkl:
+        os.makedirs(os.path.dirname(pkl_path), exist_ok=True)
         pkl_file = open(pkl_path, 'wb')
         pickle.dump(modifications, pkl_file)
         pkl_file.close()

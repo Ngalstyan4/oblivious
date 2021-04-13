@@ -10,8 +10,8 @@
 #include "common.h"
 
 // /data/traces/[trace_id].bin.[thread_ind]
-const char *RECORD_FILE_FMT = "/data/traces/%s.bin.%d";
-const char *FETCH_FILE_FMT = "/data/traces/%s.tape.%d";
+const char *RECORD_FILE_FMT = "/data/traces/%s/main.bin.%d";
+const char *FETCH_FILE_FMT = "/data/traces/%s/main.tape.%d";
 
 const unsigned long PAGE_ADDR_MASK = ~0xfff;
 const unsigned long PRESENT_BIT_MASK = 1UL;
@@ -146,6 +146,7 @@ void write_trace(const char *filepath, const char *buf, long len)
 	mm_segment_t old_fs = get_fs();
 	set_fs(get_ds()); // KERNEL_DS
 
+	// todo::mkdir before open
 	f = filp_open(filepath, O_CREAT | O_WRONLY | O_LARGEFILE, 0644);
 	if (IS_ERR(f)) {
 		printk(KERN_ERR "unable to create/open file. ERR code: %pe\n",
