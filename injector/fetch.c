@@ -13,7 +13,7 @@
 #include <linux/kallsyms.h>
 
 #define MAX_PRINT_LEN 768
-const int MAX_SEARCH_DIST = 2000;
+const int MAX_SEARCH_DIST = 20;
 
 // todo:: this should be same as the eviction CPU once eviction work chunks
 // are properly broken down to avoid head of line blocking for prefetching
@@ -31,9 +31,6 @@ static int (*do_swap_page_p)(struct vm_fault *vmf);
 char fetch_print_buf[MAX_PRINT_LEN];
 char *fetch_buf_end = fetch_print_buf;
 
-//todo:: switch back to static
-struct prefetching_state fetch;
-
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
 			  struct vm_fault *vmf);
 
@@ -44,7 +41,7 @@ static void prefetch_work_func(struct work_struct *work)
 	struct task_struct_oblivious *obl =
 		container_of(fetch, struct task_struct_oblivious, fetch);
 	struct task_struct *tsk = container_of(obl, struct task_struct, obl);
-	//struct prefetching_state *fetch = &tsk->obl.fetch;
+
 	int i = 0;
 	int num_prefetch = 0;
 	struct mm_struct *mm = tsk->mm;
@@ -68,23 +65,20 @@ static void prefetch_work_func(struct work_struct *work)
 			//do_swap_page_p(&vmf);
 		}
 	}
+
 	fetch->found_counter += num_prefetch;
 	//lru_add_drain();// <Q::todo:: what does this do?.. Push any new pages onto the LRU now
 	fetch->next_fetch += i;
-	while (true) {
-		if (unlikely(fetch->next_fetch >= fetch->num_accesses)) {
-			fetch->next_fetch = fetch->num_accesses - 1;
-			break;
-		}
+
+	while (likely(fetch->next_fetch < fetch->num_accesses)) {
 		pte = addr2pte(fetch->accesses[fetch->next_fetch], mm);
-		if (pte && !pte_none(*pte) && pte_present(*pte)) {
+		if (unlikely(pte && !pte_none(*pte) && pte_present(*pte))) {
 			// page already mapped in page table
 			fetch->next_fetch++;
 			fetch->already_present++;
 		} else
 			break;
 	}
-
 	//up_read(&mm->mmap_sem);
 }
 
@@ -198,7 +192,12 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 		return;
 	}
 
+	if (unlikely(error_code & PF_INSTR)) {
+		//printk(KERN_ERR "instr fault %lx", address);
+		return;
+	}
 	fetch->num_fault++;
+	/*
 
 	// aggressively stay in sync with tape
 	while (dist < MAX_SEARCH_DIST &&
@@ -211,6 +210,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 		fetch->pos += dist;
 		fetch->counter++;
 	}
+*/
 
 	/* first condition is relevant in the very beginning
 	 * second condition uses the above syncing to follow the tape
