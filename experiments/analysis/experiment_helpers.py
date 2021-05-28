@@ -3,22 +3,25 @@ import numpy as np
 import plotly.express as px
 from datetime import datetime
 
+
 def get_components_of_runtime(table, name="unnamed"):
-    fig = px.area(table[["Eviction Time(us)(cgroup func)",
-                                         "Minor PF Time(us)",
-                         "Extra Minor PF Time(us)",
-                                         "Major PF Time(us)",
-                                         "Baseline App Time(us)"
+    fig = px.area(table[["Eviction Time",
+                         "Baseline minor PF Time",
+                         "Extra Minor PF Time",
+                         "Major PF Time",
+                         "Baseline User Time",
+                         "Extra User Time",
                                          ]]/1e6,
                   title='Components of runtime(%s)'%name,
-                  color_discrete_sequence=['#636efa', '#EF553B',  '#FFA15A','#00cc96', '#ab63fa', '#FFA15A'])
+                  color_discrete_sequence=['#636efa', '#ef553b',  '#9e1700','#00cc96', '#ab63fa', '#3c0c73'])
     fig.update_layout(
         xaxis_title="Ratio",
         yaxis_title="Time(seconds)",
     )
     fig.add_trace(px.line(table["Measured(wallclock) runtime"]).data[0])
+    fig.add_trace(px.line(table["sys+usr"] / 1e6).data[0])
 
-    def anno(text, posx = 1.2, posy=0.52):
+    def anno(text, posx = 1.2, posy=0.32):
         dy = -0.04
         if anno.counter > 0:
             posx += 0.15
@@ -31,7 +34,7 @@ def get_components_of_runtime(table, name="unnamed"):
     anno("Workload constants:")
     anno("Baseline System Time(s): %.2f" % (table["Baseline System Time"].values[0]/1e6))
     anno("Baseline App Time(s): %.2f" % (table["Baseline App Time(us)"].values[0] / 1e6))
-    anno("Baseline Minor PF Time(us): %.2f" % table["Baseline Minor PF Time(us)"].values[0])
+    anno("Baseline Minor PF Time(us): %.2f" % table["Baseline Single Minor PF Time(us)"].values[0])
 
     return fig
 
@@ -43,6 +46,11 @@ def get_experiment_data(EXPERIMENT_TYPES, experiment_name, experiment_dir):
     for exp_type in EXPERIMENT_TYPES:
         cgroup = get_table(exp_type, "cgroup").set_index("RATIO")
         ftrace = get_table(exp_type, "ftrace").set_index("RATIO")
+
+        # in multithreaded apps info is collected per cpu, so let's average it
+        # N.B. todo:: does not work well for everything. would be good to add up number of
+        # faults,
+        ftrace = ftrace.groupby(["RATIO"]).sum()
         time_and_swap = get_table(exp_type, "time_and_swap").set_index("RATIO")
         experiment_final = ftrace.join(cgroup).join(time_and_swap)
         tmp_tables.append(experiment_final)
@@ -59,19 +67,8 @@ def get_experiment_data(EXPERIMENT_TYPES, experiment_name, experiment_dir):
 
 
 def augment_tables(tables, filter_raw=True):
-    # sourced from Chris' measurements here `
+    # Old analysis approach and constants here `
     # https://docs.google.com/spreadsheets/d/1BFv4SqslgQpumk15-HiY504Ef5F1qNx8gFhKVX7-UEk/edit#gid=83666396
-    # all times in micro-seconds(us)
-    SYSTEM_CONSTANTS = {
-        # depricate this and use page fault time at 100%
-        # "MINOR_PF_TIME": 1.081240453,
-
-        # use direct measurements instead
-        #"BATCH_SIZE": 64,
-        #"MAJOR_PF_TIME": 6.9536973,
-        #"SYSTEM_TIME_PER_EVICTION": 12.67520977,
-        #"User Time Per Evicted Batch (us)": 2 #27.15875611,
-    }
 
     for tbl in tables:
 
@@ -79,7 +76,7 @@ def augment_tables(tables, filter_raw=True):
         WORKLOAD_CONSTANTS = {
             "Baseline System Time": tbl[tbl.index == 100]["SYSTEM"].values[0] * 1e6,
             "Baseline User Time": tbl[tbl.index == 100]["USER"].values[0] * 1e6,
-            "Baseline Minor PF Time(us)": tbl[tbl.index == 100]["PAGE_FAULT_TIME"].values[0] /
+            "Baseline Single Minor PF Time(us)": tbl[tbl.index == 100]["PAGE_FAULT_TIME"].values[0] /
                                           tbl[tbl.index == 100]["PAGE_FAULT_HIT"].values[0],
         }
 
@@ -93,33 +90,41 @@ def augment_tables(tables, filter_raw=True):
 
 
         # deprecate this..does not consider fastswap offload..
-        #tbl[["Eviction Time(us)"]]       = tbl[["Evictions"]] * SYSTEM_CONSTANTS["SYSTEM_TIME_PER_EVICTION"]
-        tbl[["Eviction Time(us)(cgroup func)"]]       = tbl[['EVICT_TIME']].fillna(0)
+        #tbl[["Eviction Time(us)"]]      = tbl[["Evictions"]] * SYSTEM_CONSTANTS["SYSTEM_TIME_PER_EVICTION"]
+        tbl[["Eviction Time"]]           = tbl[['EVICT_TIME']].fillna(0)
 
-        tbl[["Major PF Time(us)"]]       = tbl["SWAPIN_TIME"].fillna(0)
-        tbl[["Minor PF Time(us)"]]       = tbl[["Minor Page Faults"]] * WORKLOAD_CONSTANTS["Baseline Minor PF Time(us)"]
-        tbl[["Extra Minor PF Time(us)"]] = (tbl["PF Time(us)"] - tbl["Major PF Time(us)"] - tbl["Minor PF Time(us)"]).clip(0)
+        tbl[["Major PF Time"]]       = tbl["SWAPIN_TIME"].fillna(0)
+       # todo:: sth wrong with Sync time since:
+       #    it is called by do_page_fault and its time should be included in minor fault time
+       #    it is not present in linux_prefetching baseline
+       #    ----- so, extra minor PF time should be AT LEAST sync time
+       # conclusion does not hold since at times SYNC time is 0.6 sec and extra minor fault time is 0.5
+       # tbl[["Tape Sync Time(us)"]]      = tbl[["SYNC_TIME"]].fillna(0)
+        tbl[["Baseline minor PF Time"]]  = tbl[["Minor Page Faults"]] * WORKLOAD_CONSTANTS["Baseline Single Minor PF Time(us)"]
 
-        tbl[["Total User Time"]]         = tbl[["USER"]] * 1e6
-        tbl[["additional usertime per eviction(us)"]] = ((tbl["USER"] - tbl[tbl.index == 100]["USER"].values[0])*1e6)/tbl["Evictions"]
+#        tbl[["Minor PF Time(us)"]]  Tape Sync Time(us)
 
-        tbl[["System Overhead"]]         = tbl["Minor PF Time(us)"] + \
-                                           tbl["Eviction Time(us)(cgroup func)"] + \
-                                           tbl["Major PF Time(us)"] + \
-                                           tbl["Extra Minor PF Time(us)"]
+        tbl[["Extra Minor PF Time"]] = (tbl["PF Time(us)"] - tbl["Major PF Time"] -  tbl["Baseline minor PF Time"]).clip(0)
+
+        tbl[["Extra User Time"]]         = tbl["USER"] * 1e6 - WORKLOAD_CONSTANTS["Baseline User Time"]
+
+        tbl[["System Overhead"]]         = tbl["Baseline minor PF Time"] + \
+                                           tbl["Extra Minor PF Time"] + \
+                                           tbl["Eviction Time"] + \
+                                           tbl["Major PF Time"]
 
         tbl[["Total System Time"]]       = tbl["System Overhead"] + \
                                            WORKLOAD_CONSTANTS["Baseline System Time"]
 
-        if "WALLCLOCK" in tbl.columns:
-                def to_seconds(a):
-                    pt = datetime.strptime(a,'%M:%S.%f')
-                    total_seconds = pt.microsecond * 1e-6 + pt.second + pt.minute*60 + pt.hour*3600
-                    return total_seconds
-                tbl[["Measured(wallclock) runtime"]] = tbl["WALLCLOCK"].map(to_seconds)
+        def to_seconds(a):
+            pt = datetime.strptime(a,'%M:%S.%f')
+            total_seconds = pt.microsecond * 1e-6 + pt.second + pt.minute*60 + pt.hour*3600
+            return total_seconds
+        tbl[["Measured(wallclock) runtime"]] = tbl["WALLCLOCK"].map(to_seconds)
 
         tbl[["Runtime"]]                 = tbl[["Measured(wallclock) runtime"]]
-        tbl[["Runtime w/o Evictions"]]   = tbl["Runtime"] - tbl["Eviction Time(us)(cgroup func)"]/1e6
+        tbl[["sys+usr"]]                 = tbl["USER"] * 1e6 + tbl["SYSTEM"] * 1e6
+        tbl[["Runtime w/o Evictions"]]   = tbl["Runtime"] - tbl["Eviction Time"]/1e6
 
         if filter_raw:
             raw_cols = [c for c in tbl.columns.values if c.upper() == c]
@@ -134,9 +139,7 @@ def augment_tables(tables, filter_raw=True):
         for (key,value) in WORKLOAD_CONSTANTS.items():
             tbl[[key]] = value
 
-
-        tbl["Baseline App Time(us)"] =  tbl[tbl.index == 100]["Measured(wallclock) runtime"].values[0] * 1e6 - \
-                                        tbl[tbl.index == 100]["System Overhead"].values[0]
+        tbl["Baseline App Time(us)"] =  tbl[tbl.index == 100]["Measured(wallclock) runtime"].values[0] * 1e6
 
     return tables
 

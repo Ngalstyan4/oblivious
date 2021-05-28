@@ -6,12 +6,16 @@ CPPFLAGS=-O2 -Wall -Wextra -g -march=native -fno-omit-frame-pointer -std=c++17 -
 # used for mmap_random+_rw because optimizations optimize out most memory reads..somehow
 CPPFLAGS_O0 =-O0 -Wall -Wextra -g -march=native -std=c++17 -static  -I $(EIGEN_DIR)
 
-all: mmult_eigen mmap_random_rw sort
+all: mmult_eigen sparse_eigen mmap_random_rw sort
 
 mmap_random_rw: mmap_random_rw.cpp
 	$(CXX) $(CPPFLAGS_O0) $^ -o $@
 
 mmult_eigen: mmult_eigen.cpp
+	$(CXX) $(CPPFLAGS) -static $^ -o $@
+	$(CXX) $(CPPFLAGS) $^ -o $@_dyn
+
+sparse_eigen: sparse_eigen.cpp
 	$(CXX) $(CPPFLAGS) -static $^ -o $@
 	$(CXX) $(CPPFLAGS) $^ -o $@_dyn
 

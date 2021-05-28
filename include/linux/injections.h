@@ -14,8 +14,10 @@ enum memtrace_state_lags {
 	TAPE_FETCH = 1 << 3,
 	LRU_LOGS = 1 << 4,
 
-	//FRONTSWAP_ON = 1 << 3,
+	OFFLOAD_FETCH = 1 << 5,
+	MARK_UNEVICTABLE = 1 << 6,
 };
+
 // space for mem_pattern_trace state which needs to live accross injector
 // module reloads.
 typedef struct {
