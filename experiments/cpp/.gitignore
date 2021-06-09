@@ -1,6 +1,0 @@
-*
-!*.*
-!torch_example
-*.sw?
-!Makefile
-!eigen
