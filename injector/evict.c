@@ -8,6 +8,9 @@
 
 #include "common.h"
 #include <linux/injections.h>
+
+#include <linux/frontswap.h>
+#include <linux/pagemap.h>
 #define MAX_PRINT_LEN 768
 extern char fetch_print_buf[MAX_PRINT_LEN];
 extern char *fetch_buf_end;
@@ -126,8 +129,16 @@ static void high_work_func_30(struct work_struct *work,
 		schedule_work_on(7, &memcg->high_work);
 }
 
-/*static void swap_writepage_32(struct page *page, struct writeback_control *wbc,
-			      bool *skip) {} */
+static void swap_writepage_32(struct page *page, struct writeback_control *wbc,
+			      bool *skip) {
+	*skip = true;
+	if(frontswap_store_async(page) == 0) {
+		set_page_writeback(page);
+		unlock_page(page);
+		//end_page_writeback(page);
+	}
+
+}
 
 void evict_init()
 {
@@ -137,7 +148,7 @@ void evict_init()
 
 	atomic_set(&metronome, 0);
 	debugfs_create_atomic_t("metronome", 0400, debugfs_root, &metronome);
-	//set_pointer(32, swap_writepage_32);
+	set_pointer(32, swap_writepage_32);
 }
 
 void evict_fini()
