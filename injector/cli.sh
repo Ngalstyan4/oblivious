@@ -10,5 +10,5 @@ sudo rmmod $MOD.ko ;sudo insmod $MOD.ko cmd="$cmd" val="$val" $SET_US_SIZE
 
 # perf uses these in "extra" dir to extract symbols in `perf report -g`
 # source` https://stackoverflow.com/questions/44326565/perf-kernel-module-symbols-not-showing-up-in-profiling
-sudo ln -sf `pwd`/$MOD.ko  /lib/modules/`uname -r`/extra/$MOD.ko
+# sudo ln -sf `pwd`/$MOD.ko  /lib/modules/`uname -r`/extra/$MOD.ko
 

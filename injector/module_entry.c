@@ -63,7 +63,6 @@ void mem_pattern_trace_start(int flags)
 
 	} else if (flags & TRACE_PREFETCH) {
 		fetch_init(current, flags);
-		evict_init();
 	}
 }
 
@@ -253,6 +252,7 @@ static int __init mem_pattern_trace_init(void)
 	set_pointer(40, copy_process_40);
 	set_pointer(41, do_exit_41);
 
+	evict_init();
 	// assuming the application has no unevictable pages so if we an
 	// unevictable-barked page, we remove the marking
 	set_pointer(50, do_swap_page_50);
