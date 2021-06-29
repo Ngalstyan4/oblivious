@@ -23,8 +23,8 @@ void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
 	struct trace_recording_state *record = &tsk->obl.record;
 
 	flush_tlb_all_p = (void *)kallsyms_lookup_name("flush_tlb_all");
-	// in case a prvious recording was sigkilled before FINI call
-	record_fini(tsk);
+
+	BUG_ON(record_initialized(tsk));
 
 	memset(record, 0, sizeof(struct trace_recording_state));
 	tsk->obl.flags = flags;
