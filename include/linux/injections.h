@@ -16,6 +16,8 @@ enum memtrace_state_lags {
 
 	OFFLOAD_FETCH = 1 << 5,
 	MARK_UNEVICTABLE = 1 << 6,
+
+	ONE_TAPE = 1 << 7,
 };
 
 // space for mem_pattern_trace state which needs to live accross injector

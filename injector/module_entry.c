@@ -202,6 +202,8 @@ static void print_memtrace_flags()
 {
 	printk(KERN_INFO "memtrace global flags:\n"
 			 "%-30s %d (%s)\n"
+			 "%-30s %s (%s)\n"
+			 "\n"
 
 			 "%-30s %s (%s)\n"
 			 "%-30s %s (%s)\n"
@@ -215,6 +217,7 @@ static void print_memtrace_flags()
 			 "%-30s %s (%s)\n",
 	       // clang-format off
 		"Microset size", us_size, "us_size",
+		"Single tape in multicore", memtrace_getflag(ONE_TAPE) ? "ON" : "OFF", "one_tape",
 
 		"Fastswap", static_branch_unlikely(&frontswap_enabled_key) ? "ON" : "OFF", "fastswap",
 		"Tape operations", memtrace_getflag(TAPE_OPS) ? "ON" : "OFF", "tape_ops",
@@ -273,6 +276,14 @@ static int __init mem_pattern_trace_init(void)
 
 		*val == '1' ? static_branch_enable(&frontswap_enabled_key) :
 			      static_branch_disable(&frontswap_enabled_key);
+	} else if (strcmp(cmd, "one_tape") == 0) {
+		if (!val || (*val != '0' && *val != '1')) {
+			usage();
+			return 0;
+		}
+
+		*val == '1' ? memtrace_setflag(ONE_TAPE) :
+			      memtrace_clearflag(ONE_TAPE);
 	} else if (strcmp(cmd, "tape_ops") == 0) {
 		if (!val || (*val != '0' && *val != '1')) {
 			usage();

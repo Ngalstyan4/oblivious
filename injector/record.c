@@ -15,6 +15,13 @@
 // todo:: get rid of this after kernel recompile
 static void (*flush_tlb_all_p)(void);
 
+// variables for multicore single tape support
+static atomic_t microset_pos;
+static atomic_t num_active_threads = ATOMIC_INIT(0);
+//todo:: move to obl struct
+//N.B. not atomic, use proper critical section primitives.
+static unsigned long global_pos;
+
 #define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 1ULL
 #define TRACE_MAX_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 
@@ -37,6 +44,7 @@ void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
 
 	record->microset_size = microset_size;
 	record->microset_pos = 0;
+	atomic_set(&microset_pos, 0);
 	record->microset =
 		vmalloc(record->microset_size * sizeof(unsigned long));
 	if (record->microset == NULL) {
@@ -47,6 +55,8 @@ void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
 	}
 	memset(record->microset, 0x00,
 	       record->microset_size * sizeof(unsigned long));
+
+	atomic_inc(&num_active_threads);
 }
 
 static void drain_microset();
@@ -58,7 +68,12 @@ bool record_initialized(struct task_struct *tsk)
 
 void record_clone(struct task_struct *p, unsigned long clone_flags)
 {
-	record_init(p, current->obl.flags, current->obl.record.microset_size);
+	if (memtrace_getflag(ONE_TAPE)) {
+		atomic_inc(&num_active_threads);
+		p->obl = current->obl;
+	} else
+		record_init(p, current->obl.flags,
+			    current->obl.record.microset_size);
 }
 
 void record_fini(struct task_struct *tsk)
@@ -68,6 +83,14 @@ void record_fini(struct task_struct *tsk)
 	if (record_initialized(tsk)) {
 		char trace_filepath[FILEPATH_LEN];
 		int thread_ind = tsk->pid - tsk->group_leader->pid;
+		int num_threads_left = atomic_dec_return(&num_active_threads);
+		printk(KERN_INFO "finishing %d", thread_ind);
+		if (memtrace_getflag(ONE_TAPE)) {
+			if (num_threads_left != 0)
+				return;
+			record->pos = global_pos;
+		}
+
 		snprintf(trace_filepath, FILEPATH_LEN, RECORD_FILE_FMT,
 			 tsk->comm, thread_ind);
 
@@ -132,6 +155,10 @@ static void drain_microset()
 {
 	struct trace_recording_state *record = &current->obl.record;
 	unsigned long i;
+	get_cpu();
+	if (memtrace_getflag(ONE_TAPE))
+		record->pos = global_pos;
+
 	for (i = 0; i != record->microset_pos && record->pos < TRACE_MAX_LEN;
 	     i++) {
 		// microset already records pages with 12 bit in-page offset cleared
@@ -140,6 +167,12 @@ static void drain_microset()
 		trace_clear_pte(addr2pte(record->microset[i], current->mm));
 	}
 	record->microset_pos = 0;
+
+	if (memtrace_getflag(ONE_TAPE)) {
+		atomic_set(&microset_pos, 0);
+		global_pos = record->pos;
+	}
+	put_cpu();
 }
 
 void record_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
@@ -181,6 +214,9 @@ void record_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 
 		down_read(&current->mm->mmap_sem);
 
+		if (memtrace_getflag(ONE_TAPE))
+			record->microset_pos = atomic_read(&microset_pos);
+
 		if (record->microset_pos == record->microset_size) {
 			/* The microset is full. Start a new microset. */
 			drain_microset();
@@ -189,7 +225,10 @@ void record_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 		BUG_ON(record->microset_pos >= record->microset_size);
 		record->microset[record->microset_pos] =
 			address & PAGE_ADDR_MASK;
-		record->microset_pos++;
+		if (memtrace_getflag(ONE_TAPE))
+			atomic_inc(&microset_pos);
+		else
+			record->microset_pos++;
 
 		//todo:: optimze later, to return here and maybe avoid tlb flush?
 		trace_maybe_set_pte(addr2pte(address, current->mm),
