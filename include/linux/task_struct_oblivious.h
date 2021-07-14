@@ -38,6 +38,8 @@ struct prefetching_state {
 };
 
 struct task_struct_oblivious {
+	// thread index
+	int tind;
 	int flags;
 	struct trace_recording_state record;
 	struct prefetching_state fetch;
