@@ -95,6 +95,7 @@ void fetch_init_atomic(struct task_struct *tsk, unsigned long flags)
 
 	fetch_fini(tsk);
 	memset(fetch, 0, sizeof(struct prefetching_state));
+	tsk->obl.tind = id;
 	tsk->obl.flags = flags;
 	fetch->num_accesses = counts[id] / sizeof(void *);
 	printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n",
@@ -155,13 +156,23 @@ void fetch_init(struct task_struct *tsk, int flags)
 
 void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 {
-	fetch_init_atomic(p, current->obl.flags);
+
+	if (memtrace_getflag(ONE_TAPE)) {
+		//todo:: do something with this var
+		p->obl = current->obl;
+		p->obl.tind = atomic_inc_return(&thread_pos) - 1;
+	} else {
+		// p->obl.tind is set by the function below
+		fetch_init_atomic(p, current->obl.flags);
+	}
 }
 
 void fetch_fini(struct task_struct *tsk)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
 	if (fetch->accesses != NULL) {
+		int num_threads_left = atomic_dec_return(&thread_pos);
+
 		cancel_work_sync(&fetch->prefetch_work);
 		printk(KERN_INFO "fetch id %d: found %d/%d "
 				 "min:%ld, maj: %ld "
@@ -174,6 +185,11 @@ void fetch_fini(struct task_struct *tsk)
 			       "!!!LOST!!!");
 		printk(KERN_INFO "pos %ld next %ld num %ld\n", fetch->pos,
 		       fetch->next_fetch, fetch->num_accesses);
+
+		if (memtrace_getflag(ONE_TAPE)) {
+			if (num_threads_left != 0)
+				return;
+		}
 		vfree(fetch->accesses);
 		fetch->accesses = NULL; // todo:: should not need once in kernel
 	}
@@ -197,8 +213,10 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 		return;
 	}
 	fetch->num_fault++;
-	/*
-
+/*
+ * this does not work (and it seems it has nevery **really** worked.
+ * found out with num_lost counters
+	fetch->pos = atomic_read(&global_pos);
 	// aggressively stay in sync with tape
 	while (dist < MAX_SEARCH_DIST &&
 	       fetch->pos + dist + 1 < fetch->num_accesses &&
@@ -209,7 +227,11 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	    (address & PAGE_ADDR_MASK)) {
 		fetch->pos += dist;
 		fetch->counter++;
+	} else //printk(KERN_INFO "lost %d %ld  %ld", current->pid, fetch->pos, fetch->next_fetch);
+	{
+		current->pid == current->group_leader->pid ? num_lost[0]++ : num_lost[1]++;
 	}
+	atomic_set(&global_pos, fetch->pos);
 */
 
 	/* first condition is relevant in the very beginning

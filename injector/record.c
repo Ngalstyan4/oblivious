@@ -89,6 +89,10 @@ void record_fini(struct task_struct *tsk)
 			if (num_threads_left != 0)
 				return;
 			record->pos = global_pos;
+
+			// in case of a single tape, allways name the file
+			// as if it is from thread 0
+			thread_ind = 0;
 		}
 
 		snprintf(trace_filepath, FILEPATH_LEN, RECORD_FILE_FMT,
