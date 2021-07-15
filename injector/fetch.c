@@ -1,4 +1,3 @@
-
 #include <linux/kernel.h>
 #include <linux/vmalloc.h>
 #include <linux/swap.h> //todo:: q:: reqired for swapops import because of SWP_MIGRATION_READ. is it ok?
@@ -13,7 +12,7 @@
 #include <linux/kallsyms.h>
 
 #define MAX_PRINT_LEN 768
-const int MAX_SEARCH_DIST = 20;
+static const int SYNC_THRESHHOLD = 10;
 
 // todo:: this should be same as the eviction CPU once eviction work chunks
 // are properly broken down to avoid head of line blocking for prefetching
@@ -21,7 +20,14 @@ const int MAX_SEARCH_DIST = 20;
 // but it has ~10% performance overhead and I think fixing some eviction
 // things will get rid of this down the line and as a temporary measure think
 // it is better to use a separate CPU for fetching
-const int FETCH_OFFLOAD_CPU = 6;
+static const int FETCH_OFFLOAD_CPU = 6;
+
+#define MAX_NUM_THREADS 20
+static const int FOOTSTEPPING_JUMP = 10;
+
+// TODO:: move to obl struct
+static DEFINE_SPINLOCK(next_fetches_lock);
+unsigned long long int next_fetches[MAX_NUM_THREADS];
 
 // exported from mm/memory.c mm/internal.h function
 int do_swap_page(struct vm_fault *vmf);
@@ -33,6 +39,25 @@ char *fetch_buf_end = fetch_print_buf;
 
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
 			  struct vm_fault *vmf);
+
+static unsigned long bump_next_fetch(unsigned long next_fetch,
+				     unsigned long *buf, unsigned long len,
+				     struct mm_struct *mm)
+{
+
+	while (likely(next_fetch < len)) {
+		pte_t *pte = addr2pte(buf[next_fetch], mm);
+		if (unlikely(pte && !pte_none(*pte) && pte_present(*pte))) {
+			// page already mapped in page table
+			next_fetch++;
+			//fetch->already_present++;
+		} else {
+			break;
+		}
+	}
+
+	return next_fetch < len ? next_fetch : len - 1;
+}
 
 static void prefetch_work_func(struct work_struct *work)
 {
@@ -47,10 +72,15 @@ static void prefetch_work_func(struct work_struct *work)
 	struct mm_struct *mm = tsk->mm;
 	struct vm_fault vmf;
 	unsigned long paddr;
-	pte_t *pte;
 	//q:: what is down_read? is it not necessary here?
 	//down_read(&mm->mmap_sem);
+
 	unsigned long fetch_start = fetch->next_fetch;
+	if (fetch_start != next_fetches[obl->tind]) {
+		printk(KERN_INFO "RECOVERED FROM FOOTSTEPPING");
+		fetch_start = fetch->next_fetch = next_fetches[obl->tind];
+	}
+
 	if (unlikely(!memtrace_getflag(TAPE_FETCH)))
 		return;
 	for (i = 0; i < 100 && num_prefetch < 50; i++) {
@@ -63,6 +93,8 @@ static void prefetch_work_func(struct work_struct *work)
 		if (prefetch_addr(paddr, mm, &vmf) == true) {
 			num_prefetch++;
 			//do_swap_page_p(&vmf);
+		} else {
+			fetch->already_present++;
 		}
 	}
 
@@ -70,15 +102,9 @@ static void prefetch_work_func(struct work_struct *work)
 	//lru_add_drain();// <Q::todo:: what does this do?.. Push any new pages onto the LRU now
 	fetch->next_fetch += i;
 
-	while (likely(fetch->next_fetch < fetch->num_accesses)) {
-		pte = addr2pte(fetch->accesses[fetch->next_fetch], mm);
-		if (unlikely(pte && !pte_none(*pte) && pte_present(*pte))) {
-			// page already mapped in page table
-			fetch->next_fetch++;
-			fetch->already_present++;
-		} else
-			break;
-	}
+	fetch->next_fetch = bump_next_fetch(fetch->next_fetch, fetch->accesses,
+					    fetch->num_accesses, mm);
+	next_fetches[tsk->obl.tind] = fetch->next_fetch;
 	//up_read(&mm->mmap_sem);
 }
 
@@ -112,6 +138,7 @@ void fetch_init(struct task_struct *tsk, int flags)
 	int thread_ind = 0;
 	do_swap_page_p = (void *)kallsyms_lookup_name("do_swap_page");
 	atomic_set(&thread_pos, 0);
+	memset(next_fetches, 0, sizeof(next_fetches));
 	for (;; thread_ind++) {
 		char trace_filepath[FILEPATH_LEN];
 		size_t filesize = 0;
@@ -172,19 +199,26 @@ void fetch_fini(struct task_struct *tsk)
 	struct prefetching_state *fetch = &tsk->obl.fetch;
 	if (fetch->accesses != NULL) {
 		int num_threads_left = atomic_dec_return(&thread_pos);
+		struct vm_area_struct *last_vma =
+			find_vma(tsk->mm, fetch->accesses[fetch->next_fetch]);
 
 		cancel_work_sync(&fetch->prefetch_work);
-		printk(KERN_INFO "fetch id %d: found %d/%d "
-				 "min:%ld, maj: %ld "
-				 "alrdy prsnt: %d %s\n",
-		       current->pid - current->group_leader->pid,
-		       fetch->found_counter, fetch->num_fault, current->min_flt,
-		       current->maj_flt, fetch->already_present,
-		       fetch->num_accesses - fetch->next_fetch < 10 ?
+		printk(KERN_INFO
+		       "tind %d: found %d/%d "
+		       "min:%ld, maj: %ld "
+		       "alrdy prsnt: %d %s\n"
+		       "\t(nextind %ld next 0x%lx vm_start 0x%lx vm_end) "
+		       "0x%lx num_accesses %ld\n",
+		       tsk->obl.tind, fetch->found_counter, fetch->num_fault,
+		       current->min_flt, current->maj_flt,
+		       fetch->already_present,
+		       fetch->num_accesses - fetch->next_fetch <
+				       SYNC_THRESHHOLD ?
 			       "SYNC" :
-			       "!!!LOST!!!");
-		printk(KERN_INFO "pos %ld next %ld num %ld\n", fetch->pos,
-		       fetch->next_fetch, fetch->num_accesses);
+			       "!!LOST!!",
+		       fetch->next_fetch, fetch->accesses[fetch->next_fetch],
+		       last_vma->vm_start, last_vma->vm_end,
+		       fetch->num_accesses);
 
 		if (memtrace_getflag(ONE_TAPE)) {
 			if (num_threads_left != 0)
@@ -201,7 +235,8 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 			      bool *return_early, int magic)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
-	int dist = 0;
+	unsigned long flags;
+	int i;
 
 	if (unlikely(fetch->accesses == NULL)) {
 		printk(KERN_ERR "fetch trace not initialized\n");
@@ -213,29 +248,26 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 		return;
 	}
 	fetch->num_fault++;
-/*
- * this does not work (and it seems it has nevery **really** worked.
- * found out with num_lost counters
-	fetch->pos = atomic_read(&global_pos);
-	// aggressively stay in sync with tape
-	while (dist < MAX_SEARCH_DIST &&
-	       fetch->pos + dist + 1 < fetch->num_accesses &&
-	       (fetch->accesses[fetch->pos + dist] & PAGE_ADDR_MASK) !=
-		       (address & PAGE_ADDR_MASK))
-		dist++;
-	if ((fetch->accesses[fetch->pos + dist] & PAGE_ADDR_MASK) ==
-	    (address & PAGE_ADDR_MASK)) {
-		fetch->pos += dist;
-		fetch->counter++;
-	} else //printk(KERN_INFO "lost %d %ld  %ld", current->pid, fetch->pos, fetch->next_fetch);
-	{
-		current->pid == current->group_leader->pid ? num_lost[0]++ : num_lost[1]++;
+
+	spin_lock_irqsave(&next_fetches_lock, flags);
+
+	for (i = 0; i < atomic_read(&thread_pos); i++) {
+		//TODO:: use fetch->accesses-like thing
+		if (i != tsk->obl.tind &&
+		    (bufs[i][next_fetches[i]] & PAGE_ADDR_MASK) ==
+			    (address & PAGE_ADDR_MASK)) {
+			next_fetches[i] = bump_next_fetch(
+				next_fetches[i] + FOOTSTEPPING_JUMP, bufs[i],
+				counts[i] / sizeof(void *), tsk->mm);
+			//		printk(KERN_INFO "footstepping %d on %d in pos %lld, "
+			//				 "new next %lld",
+			//		       tsk->obl.tind, i, old, next_fetches[i]);
+		}
 	}
-	atomic_set(&global_pos, fetch->pos);
-*/
 
 	/* first condition is relevant in the very beginning
-	 * second condition uses the above syncing to follow the tape
+	 *TODO:: [next line is out of date] remove ->pos from fetch
+	 * --second condition uses the above syncing to follow the tape--
 	 * third condition uses address comparison to stay in sync
 	 *
 	 * in single core prefetching the second condition is not needed
@@ -247,6 +279,8 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	*/
 	if (fetch->next_fetch == 0 || fetch->pos >= fetch->next_fetch ||
 	    (fetch->accesses[fetch->next_fetch] & PAGE_ADDR_MASK) ==
+		    (address & PAGE_ADDR_MASK) ||
+	    (fetch->accesses[next_fetches[tsk->obl.tind]] & PAGE_ADDR_MASK) ==
 		    (address & PAGE_ADDR_MASK)) {
 		if (memtrace_getflag(OFFLOAD_FETCH))
 			queue_work_on(FETCH_OFFLOAD_CPU, system_highpri_wq,
@@ -254,6 +288,8 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 		else
 			prefetch_work_func(&tsk->obl.fetch.prefetch_work);
 	}
+
+	spin_unlock_irqrestore(&next_fetches_lock, flags);
 }
 
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
