@@ -12,7 +12,17 @@
 #include <linux/kallsyms.h>
 
 #define MAX_PRINT_LEN 768
+#define MAX_NUM_THREADS 20
+static const int FOOTSTEPPING_JUMP = 10;
 static const int SYNC_THRESHHOLD = 10;
+
+// TODO:: vmalloc() these for group leader thread
+static DEFINE_SPINLOCK(next_fetches_lock);
+unsigned long long int next_fetches[MAX_NUM_THREADS];
+static atomic_long_t map_intent[MAX_NUM_THREADS] = {ATOMIC_INIT(0)};
+static unsigned long *bufs[MAX_NUM_THREADS];
+static size_t counts[MAX_NUM_THREADS];
+static atomic_t thread_pos = ATOMIC_INIT(0);
 
 // todo:: this should be same as the eviction CPU once eviction work chunks
 // are properly broken down to avoid head of line blocking for prefetching
@@ -22,20 +32,9 @@ static const int SYNC_THRESHHOLD = 10;
 // it is better to use a separate CPU for fetching
 static const int FETCH_OFFLOAD_CPU = 6;
 
-#define MAX_NUM_THREADS 20
-static const int FOOTSTEPPING_JUMP = 10;
-
-// TODO:: move to obl struct
-static DEFINE_SPINLOCK(next_fetches_lock);
-unsigned long long int next_fetches[MAX_NUM_THREADS];
-
 // exported from mm/memory.c mm/internal.h function
 int do_swap_page(struct vm_fault *vmf);
 static int (*do_swap_page_p)(struct vm_fault *vmf);
-//todo::
-// dangerous!! probably need to protect by locks/atomics? but seems to work for now..
-char fetch_print_buf[MAX_PRINT_LEN];
-char *fetch_buf_end = fetch_print_buf;
 
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
 			  struct vm_fault *vmf);
@@ -44,7 +43,6 @@ static unsigned long bump_next_fetch(unsigned long next_fetch,
 				     unsigned long *buf, unsigned long len,
 				     struct mm_struct *mm)
 {
-
 	while (likely(next_fetch < len)) {
 		pte_t *pte = addr2pte(buf[next_fetch], mm);
 		if (unlikely(pte && !pte_none(*pte) && pte_present(*pte))) {
@@ -52,6 +50,19 @@ static unsigned long bump_next_fetch(unsigned long next_fetch,
 			next_fetch++;
 			//fetch->already_present++;
 		} else {
+			int i = 0;
+			for (i = 0; i < atomic_read(&thread_pos); i++) {
+				if (atomic_long_read(&map_intent[i]) ==
+					buf[next_fetch] &&
+				    next_fetch != 0) {
+					printk(KERN_INFO
+					       "MAP INTENT INVARIANT TRIGGERED "
+					       "tind %d",
+					       i);
+					next_fetch++;
+					continue;
+				}
+			}
 			break;
 		}
 	}
@@ -77,7 +88,7 @@ static void prefetch_work_func(struct work_struct *work)
 
 	unsigned long fetch_start = fetch->next_fetch;
 	if (fetch_start != next_fetches[obl->tind]) {
-		printk(KERN_INFO "RECOVERED FROM FOOTSTEPPING");
+		// TODO:: add footstepping counter
 		fetch_start = fetch->next_fetch = next_fetches[obl->tind];
 	}
 
@@ -108,26 +119,20 @@ static void prefetch_work_func(struct work_struct *work)
 	//up_read(&mm->mmap_sem);
 }
 
-// todo:: move to task_struct_oblivious on next kernel recompile
-static unsigned long *bufs[10];
-static size_t counts[10];
-static atomic_t thread_pos = ATOMIC_INIT(0);
-
-void fetch_init_atomic(struct task_struct *tsk, unsigned long flags)
-{
+void fetch_init_atomic(struct task_struct *tsk, unsigned long flags) {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
 
-	int id = atomic_inc_return(&thread_pos) - 1;
+	BUG_ON(fetch->accesses != NULL);
 
-	fetch_fini(tsk);
-	memset(fetch, 0, sizeof(struct prefetching_state));
-	tsk->obl.tind = id;
+	tsk->obl.tind = atomic_inc_return(&thread_pos) - 1;
 	tsk->obl.flags = flags;
-	fetch->num_accesses = counts[id] / sizeof(void *);
-	printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n",
-	       counts[id], fetch->num_accesses);
 
-	fetch->accesses = bufs[id];
+	memset(fetch, 0, sizeof(struct prefetching_state));
+	fetch->num_accesses = counts[tsk->obl.tind] / sizeof(void *);
+	printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n",
+	       counts[tsk->obl.tind], fetch->num_accesses);
+
+	fetch->accesses = bufs[tsk->obl.tind];
 
 	INIT_WORK(&fetch->prefetch_work, prefetch_work_func);
 	fetch->prefetch_start = true; // can be used to pause and resume
@@ -250,6 +255,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	fetch->num_fault++;
 
 	spin_lock_irqsave(&next_fetches_lock, flags);
+	atomic_long_set(&map_intent[tsk->obl.tind], address & PAGE_ADDR_MASK);
 
 	for (i = 0; i < atomic_read(&thread_pos); i++) {
 		//TODO:: use fetch->accesses-like thing
@@ -259,9 +265,6 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 			next_fetches[i] = bump_next_fetch(
 				next_fetches[i] + FOOTSTEPPING_JUMP, bufs[i],
 				counts[i] / sizeof(void *), tsk->mm);
-			//		printk(KERN_INFO "footstepping %d on %d in pos %lld, "
-			//				 "new next %lld",
-			//		       tsk->obl.tind, i, old, next_fetches[i]);
 		}
 	}
 
@@ -345,11 +348,6 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
 	if (memtrace_getflag(MARK_UNEVICTABLE))
 		SetPageUnevictable(page);
 
-	// todo:: old artifact from explicit eviction and pfn lifetime tracking experiments..
-	// remove after sorting out evictions!!
-	if (false && fetch_buf_end < fetch_print_buf + sizeof(fetch_print_buf))
-		fetch_buf_end += snprintf(fetch_buf_end, 10, "%lx,",
-					  (unsigned long)page_to_pfn(page));
 	put_page(page); //= page_cache_release
 
 	vmf->address = addr;

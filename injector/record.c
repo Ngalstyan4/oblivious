@@ -33,9 +33,10 @@ void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
 
 	BUG_ON(record_initialized(tsk));
 
-	memset(record, 0, sizeof(struct trace_recording_state));
+	tsk->obl.tind = atomic_inc_return(&num_active_threads) - 1;
 	tsk->obl.flags = flags;
 
+	memset(record, 0, sizeof(struct trace_recording_state));
 	record->accesses = vmalloc(TRACE_ARRAY_SIZE);
 	if (record->accesses == NULL) {
 		printk(KERN_ERR "Unable to allocate memory for tracing\n");
@@ -55,8 +56,6 @@ void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
 	}
 	memset(record->microset, 0x00,
 	       record->microset_size * sizeof(unsigned long));
-
-	atomic_inc(&num_active_threads);
 }
 
 static void drain_microset();
@@ -82,21 +81,16 @@ void record_fini(struct task_struct *tsk)
 
 	if (record_initialized(tsk)) {
 		char trace_filepath[FILEPATH_LEN];
-		int thread_ind = tsk->pid - tsk->group_leader->pid;
 		int num_threads_left = atomic_dec_return(&num_active_threads);
-		printk(KERN_INFO "finishing %d", thread_ind);
+		printk(KERN_INFO "finishing %d", tsk->obl.tind);
 		if (memtrace_getflag(ONE_TAPE)) {
 			if (num_threads_left != 0)
 				return;
 			record->pos = global_pos;
-
-			// in case of a single tape, allways name the file
-			// as if it is from thread 0
-			thread_ind = 0;
 		}
 
 		snprintf(trace_filepath, FILEPATH_LEN, RECORD_FILE_FMT,
-			 tsk->comm, thread_ind);
+			 tsk->comm, tsk->obl.tind);
 
 		// in case path is too long, truncate;
 		trace_filepath[FILEPATH_LEN - 1] = '\0';
