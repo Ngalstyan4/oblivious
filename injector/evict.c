@@ -129,17 +129,6 @@ static void high_work_func_30(struct work_struct *work,
 		schedule_work_on(7, &memcg->high_work);
 }
 
-static void swap_writepage_32(struct page *page, struct writeback_control *wbc,
-			      bool *skip) {
-	*skip = true;
-	if(frontswap_store_async(page) == 0) {
-		set_page_writeback(page);
-		unlock_page(page);
-		//end_page_writeback(page);
-	}
-
-}
-
 void evict_init()
 {
 	printk(KERN_INFO "init evict injections\n");
@@ -148,7 +137,6 @@ void evict_init()
 
 	atomic_set(&metronome, 0);
 	debugfs_create_atomic_t("metronome", 0400, debugfs_root, &metronome);
-	set_pointer(32, swap_writepage_32);
 }
 
 void evict_fini()
@@ -159,5 +147,4 @@ void evict_fini()
 			 "pages reclaimed: %ld\n",
 	       evict.high_work_call_cnt, evict.reclaim_cnt, evict.nr_reclaimed);
 	set_pointer(30, kernel_noop);
-	set_pointer(32, kernel_noop);
 }
