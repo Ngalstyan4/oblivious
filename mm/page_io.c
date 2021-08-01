@@ -239,9 +239,7 @@ int swap_writepage_sync(struct page *page, struct writeback_control *wbc);
 int swap_writepage(struct page *page, struct writeback_control *wbc)
 {
 	int ret = 0;
-	bool skip = false;
 
-	(*pointers[32])(page, wbc, &skip);
 	if (unlikely(memtrace_getflag(FASTSWAP_ASYNCWRITES) == 0))
 		return swap_writepage_sync(page, wbc);
 
@@ -249,7 +247,7 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 		unlock_page(page);
 		goto out;
 	}
-	if (skip) goto out;
+
 	if (frontswap_store_async(page) == 0) {
 		//todo:: I do not understand set_page_writeback/end_page_writeback
 		//and the kernel docs warn that getting this wrong can lead to data loss
@@ -278,7 +276,7 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 		// look for a reason.
 		set_page_writeback(page);
 		unlock_page(page);
-		end_page_writeback(page);
+		//end_page_writeback(page); -- this is done from inside fastswap driver
 		goto out;
 	}
 

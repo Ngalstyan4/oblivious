@@ -71,7 +71,6 @@ static void mem_pattern_trace_end(int flags)
 	current->obl.flags = 0;
 	// all _fini functions check whether they have been initialized
 	// before performing any free-ing so no need to do it here
-	//evict_fini();
 	fetch_fini(current);
 	record_fini(current);
 }
@@ -255,7 +254,6 @@ static int __init mem_pattern_trace_init(void)
 	set_pointer(40, copy_process_40);
 	set_pointer(41, do_exit_41);
 
-	evict_init();
 	// assuming the application has no unevictable pages so if we an
 	// unevictable-barked page, we remove the marking
 	set_pointer(50, do_swap_page_50);
