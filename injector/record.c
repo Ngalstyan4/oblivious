@@ -22,7 +22,7 @@ static atomic_t num_active_threads = ATOMIC_INIT(0);
 //N.B. not atomic, use proper critical section primitives.
 static unsigned long global_pos;
 
-#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 1ULL
+#define TRACE_ARRAY_SIZE 1024 * 1024 * 1024 * 2ULL
 #define TRACE_MAX_LEN (TRACE_ARRAY_SIZE / sizeof(void *))
 
 void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
@@ -209,6 +209,12 @@ void record_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 				return;
 			}
 		}
+
+		/*if (!(maybe_stack->vm_start <= current->mm->brk &&
+		      maybe_stack->vm_end >= current->mm->start_brk)) {
+			return;
+		}*/
+		if (maybe_stack->vm_file) return;
 
 		down_read(&current->mm->mmap_sem);
 
