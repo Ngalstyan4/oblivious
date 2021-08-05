@@ -163,6 +163,10 @@ void fetch_init(struct task_struct *tsk, int flags)
 		}
 
 		filesize = file_size(trace_filepath);
+		if (filesize == 0) {
+			printk(KERN_WARNING "fetch: read empty at %s", trace_filepath);
+			return;
+		}
 
 		buf = vmalloc(filesize);
 		if (buf == NULL) {

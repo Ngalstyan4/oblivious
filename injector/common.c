@@ -149,8 +149,9 @@ void write_trace(const char *filepath, const char *buf, long len)
 	// todo::mkdir before open
 	f = filp_open(filepath, O_CREAT | O_WRONLY | O_LARGEFILE, 0644);
 	if (IS_ERR(f)) {
-		printk(KERN_ERR "unable to create/open file. ERR code: %pe\n",
-		       f);
+		printk(KERN_ERR
+		       "unable to create/open file %s. ERR code: %pe\n",
+		       filepath, f);
 		return;
 	}
 
