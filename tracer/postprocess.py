@@ -12,7 +12,9 @@ if __name__ == "__main__":
     parser.add_argument('input_trace_prefix')
     parser.add_argument('rss', help='workload resident set size *in pages*', type=int)
     parser.add_argument('batch_size', type=int)
-    parser.add_argument('ratios', nargs='*', default=ALL_RATIOS, type=int)
+    parser.add_argument('postprocess_percent', type=int)
+
+    #parser.add_argument('ratios', nargs='*', default=ALL_RATIOS, type=int)
     args = parser.parse_args()
 
     path = os.path.normpath(args.input_trace_prefix)
@@ -25,12 +27,15 @@ if __name__ == "__main__":
         if file.startswith(input_file_prefix):
             input_files.append(file)
 
-    inputs = [(f, r, args.batch_size) for f in input_files for r in args.ratios]
+    inputs = [(f, r, args.batch_size) for f in input_files for r in ALL_RATIOS]
+
+    args.rss *= (args.postprocess_percent/100)
 
     print("Postprocessing raw trace at %s.*", args.input_trace_prefix)
     print("RSS: %d pages, %.2f MB" %(args.rss, args.rss * 4096 / 1024 / 1024))
-    print("For local memory ratios %s (in percent)", args.ratios)
-    cache_sizes = [r * args.rss / 100 for r in args.ratios]
+    print("For local memory ratios %s (in percent)", ALL_RATIOS)
+    print("Postprocessing factor:", args.postprocess_percent)
+    cache_sizes = [r * args.rss / 100 for r in ALL_RATIOS]
     print("For local memory sizes %s (in pages)", cache_sizes)
     print("For local memory sizes %s (in MB)", [c * 4096 / 1024 / 1024 for c in cache_sizes])
     print("For local per-thread memory sizes %s (in MB)", [c * 4096 / 1024 / 1024 / len(input_files) for c in cache_sizes])
