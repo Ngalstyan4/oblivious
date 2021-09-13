@@ -170,6 +170,8 @@ void write_trace(const char *filepath, const char *buf, long len)
 			       count, left_to_write);
 			break;
 		}
+
+		f->f_pos += count;
 		left_to_write -= count;
 		buf += count;
 	}
