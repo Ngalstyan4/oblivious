@@ -248,6 +248,10 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 		goto out;
 	}
 
+	// N.B. : the page needs to be under writeback *before* the page is submitted
+	// to RDMA.
+	set_page_writeback(page);
+
 	if (frontswap_store_async(page) == 0) {
 		//todo:: I do not understand set_page_writeback/end_page_writeback
 		//and the kernel docs warn that getting this wrong can lead to data loss
@@ -274,10 +278,17 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 		// the page while the page goes through the NIC. So it seems this has worked
 		// for Fastswap before but if things beak weirdly, this is a good place to
 		// look for a reason.
-		set_page_writeback(page);
+
+		// ^^ the comment should hopefully be addressed by now.
+		// when it was first written, both set_page_writeback and
+		// end_page_writeback were called from inside this if block
+
 		unlock_page(page);
 		//end_page_writeback(page); -- this is done from inside fastswap driver
 		goto out;
+	} else {
+		printk(KERN_ERR "ERROR: frontswap async failed");
+		end_page_writeback(page);
 	}
 
 	ret = __swap_writepage(page, wbc, end_swap_bio_write);
