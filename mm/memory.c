@@ -2674,6 +2674,16 @@ void unmap_mapping_range(struct address_space *mapping,
 EXPORT_SYMBOL(unmap_mapping_range);
 
 /*
+ * Ftraceable version of lock_page_or_retry so that we can measure the time for
+ * delayed hits with minor page faults.
+ */
+static noinline int lock_page_or_retry_minor_page_fault(struct page *page, struct mm_struct *mm,
+				     unsigned int flags)
+{
+	return lock_page_or_retry(page, mm, flags);
+}
+
+/*
  * We enter with non-exclusive mmap_sem (to exclude vma changes,
  * but allow concurrent faults), and pte mapped but not yet locked.
  * We return with pte unmapped and unlocked.
@@ -2744,7 +2754,7 @@ int do_swap_page(struct vm_fault *vmf)
 	}
 
 	swapcache = page;
-	locked = lock_page_or_retry(page, vma->vm_mm, vmf->flags);
+	locked = lock_page_or_retry_minor_page_fault(page, vma->vm_mm, vmf->flags);
 
 	delayacct_clear_flag(DELAYACCT_PF_SWAPIN);
 	if (!locked) {
