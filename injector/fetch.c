@@ -17,12 +17,12 @@ static const int FOOTSTEPPING_JUMP = 10;
 static const int SYNC_THRESHHOLD = 10;
 
 // TODO:: vmalloc() these for group leader thread
-static DEFINE_SPINLOCK(next_fetches_lock);
-unsigned long long int next_fetches[MAX_NUM_THREADS];
+static DEFINE_SPINLOCK(key_page_indices_lock);
+unsigned long long int key_page_indices[MAX_NUM_THREADS];
 static atomic_long_t map_intent[MAX_NUM_THREADS] = {ATOMIC_INIT(0)};
 static unsigned long *bufs[MAX_NUM_THREADS];
 static size_t counts[MAX_NUM_THREADS];
-static atomic_t thread_pos = ATOMIC_INIT(0);
+static atomic_t num_threads = ATOMIC_INIT(0);
 
 // todo:: this should be same as the eviction CPU once eviction work chunks
 // are properly broken down to avoid head of line blocking for prefetching
@@ -31,6 +31,12 @@ static atomic_t thread_pos = ATOMIC_INIT(0);
 // things will get rid of this down the line and as a temporary measure think
 // it is better to use a separate CPU for fetching
 static const int FETCH_OFFLOAD_CPU = 6;
+
+// the number of pages ahead of our current tape position to start prefetching
+#define GAP 200
+
+// the length of tape over which we look for pages to prefetch
+#define BATCH_LENGTH 100
 
 // exported from mm/memory.c mm/internal.h function
 int do_swap_page(struct vm_fault *vmf);
@@ -51,7 +57,7 @@ static unsigned long bump_next_fetch(unsigned long next_fetch,
 			//fetch->already_present++;
 		} else {
 			int i = 0;
-			for (i = 0; i < atomic_read(&thread_pos); i++) {
+			for (i = 0; i < atomic_read(&num_threads); i++) {
 				if (atomic_long_read(&map_intent[i]) ==
 					buf[next_fetch] &&
 				    next_fetch != 0) {
@@ -78,72 +84,65 @@ static void prefetch_work_func(struct work_struct *work)
 		container_of(fetch, struct task_struct_oblivious, fetch);
 	struct task_struct *tsk = container_of(obl, struct task_struct, obl);
 
-	int i = 0;
-	int num_prefetch = 0;
-	struct mm_struct *mm = tsk->mm;
+	unsigned long current_pos_idx;
 	struct vm_fault vmf;
 	unsigned long paddr;
-	//q:: what is down_read? is it not necessary here?
-	//down_read(&mm->mmap_sem);
 
-	unsigned long fetch_start = fetch->next_fetch;
-	if (fetch_start != next_fetches[obl->tind]) {
-		// TODO:: add footstepping counter
-		fetch_start = fetch->next_fetch = next_fetches[obl->tind];
-	}
+	//q:: what is down_read? is it not necessary here?
+	//down_read(&tsk->mm->mmap_sem);
 
 	if (unlikely(!memtrace_getflag(TAPE_FETCH)))
 		return;
-	for (i = 0; i < 100 && num_prefetch < 50; i++) {
-		if (unlikely(fetch_start + i >= fetch->num_accesses)) {
-			i--;
-			break;
-		}
-		paddr = fetch->accesses[fetch_start + i];
 
-		if (prefetch_addr(paddr, mm, &vmf) == true) {
-			num_prefetch++;
-			//do_swap_page_p(&vmf);
+	current_pos_idx = key_page_indices[obl->tind];
+	if (fetch->prefetch_next_idx < current_pos_idx) {
+		fetch->prefetch_next_idx = current_pos_idx;
+	}
+
+	for (; fetch->prefetch_next_idx < (current_pos_idx + GAP + BATCH_LENGTH) &&
+	        fetch->prefetch_next_idx < fetch->tape_length;
+	        fetch->prefetch_next_idx++) {
+		paddr = fetch->tape[fetch->prefetch_next_idx];
+
+		if (prefetch_addr(paddr, tsk->mm, &vmf)) {
+			fetch->found_counter++;
 		} else {
 			fetch->already_present++;
 		}
 	}
 
-	fetch->found_counter += num_prefetch;
-	//lru_add_drain();// <Q::todo:: what does this do?.. Push any new pages onto the LRU now
-	fetch->next_fetch += i;
+	// TODO: Pre-fault from current_pos_idx to current_pos_idx + BATCH_LENGTH.
 
-	fetch->next_fetch = bump_next_fetch(fetch->next_fetch, fetch->accesses,
-					    fetch->num_accesses, mm);
-	next_fetches[tsk->obl.tind] = fetch->next_fetch;
-	//up_read(&mm->mmap_sem);
+	key_page_indices[tsk->obl.tind] = bump_next_fetch(current_pos_idx + BATCH_LENGTH, fetch->tape, fetch->tape_length, tsk->mm);
+	fetch->key_page_idx = key_page_indices[tsk->obl.tind]; // for debugging
+
+	//up_read(&tsk->mm->mmap_sem);
 }
 
 void fetch_init_atomic(struct task_struct *tsk, unsigned long flags) {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
 
-	BUG_ON(fetch->accesses != NULL);
+	BUG_ON(fetch->tape != NULL);
 
-	tsk->obl.tind = atomic_inc_return(&thread_pos) - 1;
+	tsk->obl.tind = atomic_inc_return(&num_threads) - 1;
 	tsk->obl.flags = flags;
 
 	memset(fetch, 0, sizeof(struct prefetching_state));
-	fetch->num_accesses = counts[tsk->obl.tind] / sizeof(void *);
+	fetch->tape_length = counts[tsk->obl.tind] / sizeof(void *);
 	printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n",
-	       counts[tsk->obl.tind], fetch->num_accesses);
+	       counts[tsk->obl.tind], fetch->tape_length);
 
-	fetch->accesses = bufs[tsk->obl.tind];
+	fetch->tape = bufs[tsk->obl.tind];
 
 	INIT_WORK(&fetch->prefetch_work, prefetch_work_func);
-	fetch->prefetch_start = true; // can be used to pause and resume
 }
 
 void fetch_init(struct task_struct *tsk, int flags)
 {
 	int thread_ind = 0;
 	do_swap_page_p = (void *)kallsyms_lookup_name("do_swap_page");
-	atomic_set(&thread_pos, 0);
-	memset(next_fetches, 0, sizeof(next_fetches));
+	atomic_set(&num_threads, 0);
+	memset(key_page_indices, 0, sizeof(key_page_indices));
 	for (;; thread_ind++) {
 		char trace_filepath[FILEPATH_LEN];
 		size_t filesize = 0;
@@ -175,7 +174,7 @@ void fetch_init(struct task_struct *tsk, int flags)
 			return;
 		}
 
-		count = read_trace(trace_filepath, (char *)buf, filesize);
+		count = read_tape(trace_filepath, (char *)buf, filesize);
 
 		if (filesize == 0 || count == 0) {
 			printk(KERN_ERR "unable to initialize fetching\n");
@@ -196,7 +195,7 @@ void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 	if (memtrace_getflag(ONE_TAPE)) {
 		//todo:: do something with this var
 		p->obl = current->obl;
-		p->obl.tind = atomic_inc_return(&thread_pos) - 1;
+		p->obl.tind = atomic_inc_return(&num_threads) - 1;
 	} else {
 		// p->obl.tind is set by the function below
 		fetch_init_atomic(p, current->obl.flags);
@@ -206,10 +205,10 @@ void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 void fetch_fini(struct task_struct *tsk)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
-	if (fetch->accesses != NULL) {
-		int num_threads_left = atomic_dec_return(&thread_pos);
+	if (fetch->tape != NULL) {
+		int num_threads_left = atomic_dec_return(&num_threads);
 		struct vm_area_struct *last_vma =
-			find_vma(tsk->mm, fetch->accesses[fetch->next_fetch]);
+			find_vma(tsk->mm, fetch->tape[fetch->key_page_idx]);
 
 		cancel_work_sync(&fetch->prefetch_work);
 		printk(KERN_INFO
@@ -221,20 +220,20 @@ void fetch_fini(struct task_struct *tsk)
 		       tsk->obl.tind, fetch->found_counter, fetch->num_fault,
 		       current->min_flt, current->maj_flt,
 		       fetch->already_present,
-		       fetch->num_accesses - fetch->next_fetch <
+		       fetch->tape_length - fetch->key_page_idx <
 				       SYNC_THRESHHOLD ?
 			       "SYNC" :
 			       "!!LOST!!",
-		       fetch->next_fetch, fetch->accesses[fetch->next_fetch],
+		       fetch->key_page_idx, fetch->tape[fetch->key_page_idx],
 		       last_vma->vm_start, last_vma->vm_end,
-		       fetch->num_accesses);
+		       fetch->tape_length);
 
 		if (memtrace_getflag(ONE_TAPE)) {
 			if (num_threads_left != 0)
 				return;
 		}
-		vfree(fetch->accesses);
-		fetch->accesses = NULL; // todo:: should not need once in kernel
+		vfree(fetch->tape);
+		fetch->tape = NULL; // todo:: should not need once in kernel
 	}
 }
 
@@ -247,7 +246,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	unsigned long flags;
 	int i;
 
-	if (unlikely(fetch->accesses == NULL)) {
+	if (unlikely(fetch->tape == NULL)) {
 		printk(KERN_ERR "fetch trace not initialized\n");
 		return;
 	}
@@ -258,24 +257,22 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	}
 	fetch->num_fault++;
 
-	spin_lock_irqsave(&next_fetches_lock, flags);
+	spin_lock_irqsave(&key_page_indices_lock, flags);
 	atomic_long_set(&map_intent[tsk->obl.tind], address & PAGE_ADDR_MASK);
 
-	for (i = 0; i < atomic_read(&thread_pos); i++) {
-		//TODO:: use fetch->accesses-like thing
+	for (i = 0; i < atomic_read(&num_threads); i++) {
+		//TODO:: use fetch->tape-like thing
 		if (i != tsk->obl.tind &&
-		    (bufs[i][next_fetches[i]] & PAGE_ADDR_MASK) ==
+		    (bufs[i][key_page_indices[i]] & PAGE_ADDR_MASK) ==
 			    (address & PAGE_ADDR_MASK)) {
-			next_fetches[i] = bump_next_fetch(
-				next_fetches[i] + FOOTSTEPPING_JUMP, bufs[i],
+			key_page_indices[i] = bump_next_fetch(
+				key_page_indices[i] + FOOTSTEPPING_JUMP, bufs[i],
 				counts[i] / sizeof(void *), tsk->mm);
 		}
 	}
 
 	/* first condition is relevant in the very beginning
-	 *TODO:: [next line is out of date] remove ->pos from fetch
-	 * --second condition uses the above syncing to follow the tape--
-	 * third condition uses address comparison to stay in sync
+	 * second condition uses address comparison to stay in sync
 	 *
 	 * in single core prefetching the second condition is not needed
 	 * and direct addr comparision is enough to stay in sync
@@ -284,19 +281,17 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	 * on direct addr comparision clues is not reliable and the third condition
 	 * is usually never satisfied
 	*/
-	if (fetch->next_fetch == 0 || fetch->pos >= fetch->next_fetch ||
-	    (fetch->accesses[fetch->next_fetch] & PAGE_ADDR_MASK) ==
-		    (address & PAGE_ADDR_MASK) ||
-	    (fetch->accesses[next_fetches[tsk->obl.tind]] & PAGE_ADDR_MASK) ==
+	if (fetch->key_page_idx == 0 ||
+	    (fetch->tape[key_page_indices[tsk->obl.tind]] & PAGE_ADDR_MASK) ==
 		    (address & PAGE_ADDR_MASK)) {
 		if (memtrace_getflag(OFFLOAD_FETCH))
 			queue_work_on(FETCH_OFFLOAD_CPU, system_highpri_wq,
 				      &fetch->prefetch_work);
 		else
-			prefetch_work_func(&tsk->obl.fetch.prefetch_work);
+			prefetch_work_func(&fetch->prefetch_work);
 	}
 
-	spin_unlock_irqrestore(&next_fetches_lock, flags);
+	spin_unlock_irqrestore(&key_page_indices_lock, flags);
 }
 
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,

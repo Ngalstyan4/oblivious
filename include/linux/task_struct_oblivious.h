@@ -24,17 +24,29 @@ struct trace_recording_state {
 };
 
 struct prefetching_state {
+	/* Statistics on how prefetching is going. */
 	int counter;
 	int found_counter;
 	int already_present;
 	int num_fault;
+
+	/* Used to schedule prefetching work asynchronously. */
 	struct work_struct prefetch_work;
-	unsigned long *accesses;
-	unsigned long num_accesses;
-	unsigned long pos;
-	unsigned long next_fetch;
-	// controls whether swapin_readahead will use tape to prefetch or not
-	bool prefetch_start;
+
+	/* The tape, buffered in memory. */
+	unsigned long *tape;
+
+	/* The length of the tape. */
+	unsigned long tape_length;
+
+	/* Index of the key page. */
+	unsigned long key_page_idx;
+
+	/*
+	* Index of the next page to prefetch, without changes from other threads
+	* (used only for debugging).
+	*/
+	unsigned long prefetch_next_idx;
 };
 
 struct task_struct_oblivious {

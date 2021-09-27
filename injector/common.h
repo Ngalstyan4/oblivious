@@ -57,7 +57,7 @@ size_t file_size(const char *filepath);
 
 // does not return anything since we cannot take any action on fail
 void write_trace(const char *filepath, const char *buf, long len);
-size_t read_trace(const char *filepath, char *buf, long max_len);
+size_t read_tape(const char *filepath, char *buf, long max_len);
 
 void log_pfault(struct pt_regs *regs, unsigned long error_code,
 		unsigned long address, unsigned long pte_val);

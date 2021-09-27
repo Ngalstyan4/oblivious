@@ -117,7 +117,7 @@ size_t file_size(const char *filepath)
 	return trace_stat.size;
 }
 
-size_t read_trace(const char *filepath, char *buf, long max_len)
+size_t read_tape(const char *filepath, char *buf, long max_len)
 {
 	struct file *f;
 	size_t count = 0;
