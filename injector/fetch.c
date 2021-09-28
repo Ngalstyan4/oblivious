@@ -42,8 +42,7 @@ static const int FETCH_OFFLOAD_CPU = 6;
 int do_swap_page(struct vm_fault *vmf);
 static int (*do_swap_page_p)(struct vm_fault *vmf);
 
-static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
-			  struct vm_fault *vmf);
+static bool prefetch_addr(unsigned long addr, struct mm_struct *mm);
 
 static unsigned long bump_next_fetch(unsigned long next_fetch,
 				     unsigned long *buf, unsigned long len,
@@ -85,14 +84,11 @@ static void prefetch_work_func(struct work_struct *work)
 	struct task_struct *tsk = container_of(obl, struct task_struct, obl);
 
 	unsigned long current_pos_idx;
-	struct vm_fault vmf;
-	unsigned long paddr;
-
-	//q:: what is down_read? is it not necessary here?
-	//down_read(&tsk->mm->mmap_sem);
 
 	if (unlikely(!memtrace_getflag(TAPE_FETCH)))
 		return;
+
+	down_read(&tsk->mm->mmap_sem);
 
 	current_pos_idx = key_page_indices[obl->tind];
 	if (fetch->prefetch_next_idx < current_pos_idx) {
@@ -102,9 +98,9 @@ static void prefetch_work_func(struct work_struct *work)
 	for (; fetch->prefetch_next_idx < (current_pos_idx + GAP + BATCH_LENGTH) &&
 	        fetch->prefetch_next_idx < fetch->tape_length;
 	        fetch->prefetch_next_idx++) {
-		paddr = fetch->tape[fetch->prefetch_next_idx];
+		unsigned long paddr = fetch->tape[fetch->prefetch_next_idx];
 
-		if (prefetch_addr(paddr, tsk->mm, &vmf)) {
+		if (prefetch_addr(paddr, tsk->mm)) {
 			fetch->found_counter++;
 		} else {
 			fetch->already_present++;
@@ -116,7 +112,7 @@ static void prefetch_work_func(struct work_struct *work)
 	key_page_indices[tsk->obl.tind] = bump_next_fetch(current_pos_idx + BATCH_LENGTH, fetch->tape, fetch->tape_length, tsk->mm);
 	fetch->key_page_idx = key_page_indices[tsk->obl.tind]; // for debugging
 
-	//up_read(&tsk->mm->mmap_sem);
+	up_read(&tsk->mm->mmap_sem);
 }
 
 void fetch_init_atomic(struct task_struct *tsk, unsigned long flags) {
@@ -294,8 +290,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	spin_unlock_irqrestore(&key_page_indices_lock, flags);
 }
 
-static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
-			  struct vm_fault *vmf)
+static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
 {
 	struct page *page;
 	bool allocated = false;
@@ -348,14 +343,6 @@ static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
 		SetPageUnevictable(page);
 
 	put_page(page); //= page_cache_release
-
-	vmf->address = addr;
-	vmf->vma = vma;
-	vmf->pmd = pmd;
-	vmf->pte = pte;
-	vmf->orig_pte = pte_val;
-	vmf->ptl = pte_lockptr(mm, pmd);
-	vmf->flags = FAULT_FLAG_USER; // <-- todo::verify, improvising here
 
 	return true;
 }
