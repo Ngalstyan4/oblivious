@@ -304,6 +304,15 @@ static int __init mem_pattern_trace_init(void)
 			return 0;
 		}
 
+		if (*val == '0') {
+			printk(KERN_ERR
+			       "Synchronous Fastswap writes are not supported "
+			       "since"
+			       "RDMA writes switch to being interrupt based."
+			       "TODO:: bring back the option maybe?");
+			WARN_ON(true);
+			return 0;
+		}
 		*val == '1' ? memtrace_setflag(FASTSWAP_ASYNCWRITES) :
 			      memtrace_clearflag(FASTSWAP_ASYNCWRITES);
 	} else if (strcmp(cmd, "tape_fetch") == 0) {
