@@ -14,6 +14,9 @@
  * this file is included in sched.h as the structs are
  * embedded in task_struct.
  */
+
+#define OBL_MAX_NUM_THREADS 20
+
 struct trace_recording_state {
 	unsigned long *accesses;
 	unsigned long pos;
@@ -49,12 +52,22 @@ struct prefetching_state {
 	unsigned long prefetch_next_idx;
 };
 
+struct process_state {
+	spinlock_t key_page_indices_lock;
+	atomic_t num_threads;
+	unsigned long long int key_page_indices[OBL_MAX_NUM_THREADS];
+	atomic_long_t map_intent[OBL_MAX_NUM_THREADS];
+	unsigned long *bufs[OBL_MAX_NUM_THREADS];
+	size_t counts[OBL_MAX_NUM_THREADS];
+};
+
 struct task_struct_oblivious {
 	// thread index
 	int tind;
 	int flags;
 	struct trace_recording_state record;
 	struct prefetching_state fetch;
+	struct process_state *proc;
 };
 
 #endif /* TASK_STRUCT_OBLIVIOUS_H */

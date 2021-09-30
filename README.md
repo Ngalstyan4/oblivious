@@ -83,4 +83,5 @@ Most of the system is in [injector](./injector) folder even though it modifies f
 | [frontswap]( mm/frontswap.c)| Add fastswap async write functions|
 | [tracer](./tracer)| defines mem_pattern_trace syscall interface|
 
-
+### Notes
+- in The system currently supports a max of 20 threads per process. This is configurable in `include/linux/task_struct_oblivious.h`
