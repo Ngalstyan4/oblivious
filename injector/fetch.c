@@ -11,18 +11,9 @@
 
 #include <linux/kallsyms.h>
 
-#define MAX_PRINT_LEN 768
-#define MAX_NUM_THREADS 20
+#define OBL_MAX_PRINT_LEN 768
 static const int FOOTSTEPPING_JUMP = 10;
 static const int SYNC_THRESHHOLD = 10;
-
-// TODO:: vmalloc() these for group leader thread
-static DEFINE_SPINLOCK(key_page_indices_lock);
-unsigned long long int key_page_indices[MAX_NUM_THREADS];
-static atomic_long_t map_intent[MAX_NUM_THREADS] = {ATOMIC_INIT(0)};
-static unsigned long *bufs[MAX_NUM_THREADS];
-static size_t counts[MAX_NUM_THREADS];
-static atomic_t num_threads = ATOMIC_INIT(0);
 
 // todo:: this should be same as the eviction CPU once eviction work chunks
 // are properly broken down to avoid head of line blocking for prefetching
@@ -42,13 +33,51 @@ static const int FETCH_OFFLOAD_CPU = 6;
 int do_swap_page(struct vm_fault *vmf);
 static int (*do_swap_page_p)(struct vm_fault *vmf);
 
+static struct process_state *process_state_new() {
+	struct process_state *proc = (struct process_state *)vmalloc(sizeof(struct process_state));
+	int i;
+	if (proc == NULL) return NULL;
+	spin_lock_init(&proc->key_page_indices_lock);
+	atomic_set(&proc->num_threads, 0);
+	for (i = 0; i < OBL_MAX_NUM_THREADS; i++) {
+		proc->key_page_indices[i] = 0;
+		atomic_long_set(&proc->map_intent[i], 0);
+		proc->bufs[i] = NULL;
+		proc->counts[i] = 0;
+	}
+	return proc;
+}
+
+static void process_state_free(struct process_state *proc)
+{
+	int i;
+	for (i = 0; i < OBL_MAX_NUM_THREADS; i++)
+		if (proc->bufs[i] != NULL) {
+			// initially wanted to free the buffer as soon as the corresponding thread ends
+			// that would be the right hting todo. But hte way map_intents are implemented now,
+			// we would still look through all ever-allocated buffers for footstepping collisions
+			// and if we freed these buffers earlier, such footsteppig would result in use after free
+			// todo:: maybe implement smarted map_intent that marks threads as done and no longer checks
+			// them for footstepping? maybe not.
+
+			//printk(KERN_WARNING
+			//       "Unused memory buffer left on process state. "
+			//       "Freeing to avoid memory leak\n");
+			vfree(proc->bufs[i]);
+		}
+
+	vfree(proc);
+}
+
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm);
 
 static unsigned long bump_next_fetch(unsigned long next_fetch,
-				     unsigned long *buf, unsigned long len,
+				     unsigned long *buf, unsigned long buf_len,
+				     atomic_long_t *map_intents,
+				     unsigned long map_intents_len,
 				     struct mm_struct *mm)
 {
-	while (likely(next_fetch < len)) {
+	while (likely(next_fetch < buf_len)) {
 		pte_t *pte = addr2pte(buf[next_fetch], mm);
 		if (unlikely(pte && !pte_none(*pte) && pte_present(*pte))) {
 			// page already mapped in page table
@@ -56,8 +85,8 @@ static unsigned long bump_next_fetch(unsigned long next_fetch,
 			//fetch->already_present++;
 		} else {
 			int i = 0;
-			for (i = 0; i < atomic_read(&num_threads); i++) {
-				if (atomic_long_read(&map_intent[i]) ==
+			for (i = 0; i < map_intents_len; i++) {
+				if (atomic_long_read(&map_intents[i]) ==
 					buf[next_fetch] &&
 				    next_fetch != 0) {
 					printk(KERN_INFO
@@ -72,7 +101,7 @@ static unsigned long bump_next_fetch(unsigned long next_fetch,
 		}
 	}
 
-	return next_fetch < len ? next_fetch : len - 1;
+	return next_fetch < buf_len ? next_fetch : buf_len - 1;
 }
 
 static void prefetch_work_func(struct work_struct *work)
@@ -82,6 +111,7 @@ static void prefetch_work_func(struct work_struct *work)
 	struct task_struct_oblivious *obl =
 		container_of(fetch, struct task_struct_oblivious, fetch);
 	struct task_struct *tsk = container_of(obl, struct task_struct, obl);
+	struct process_state *proc = tsk->group_leader->obl.proc;
 
 	unsigned long current_pos_idx;
 
@@ -90,7 +120,7 @@ static void prefetch_work_func(struct work_struct *work)
 
 	down_read(&tsk->mm->mmap_sem);
 
-	current_pos_idx = key_page_indices[obl->tind];
+	current_pos_idx = proc->key_page_indices[obl->tind];
 	if (fetch->prefetch_next_idx < current_pos_idx) {
 		fetch->prefetch_next_idx = current_pos_idx;
 	}
@@ -109,36 +139,54 @@ static void prefetch_work_func(struct work_struct *work)
 
 	// TODO: Pre-fault from current_pos_idx to current_pos_idx + BATCH_LENGTH.
 
-	key_page_indices[tsk->obl.tind] = bump_next_fetch(current_pos_idx + BATCH_LENGTH, fetch->tape, fetch->tape_length, tsk->mm);
-	fetch->key_page_idx = key_page_indices[tsk->obl.tind]; // for debugging
+	proc->key_page_indices[tsk->obl.tind] =
+	    bump_next_fetch(current_pos_idx + BATCH_LENGTH, fetch->tape,
+			    fetch->tape_length, 
+			    proc->map_intent, atomic_read(&proc->num_threads),
+			    tsk->mm);
+	fetch->key_page_idx = proc->key_page_indices[tsk->obl.tind]; // for debugging
 
 	up_read(&tsk->mm->mmap_sem);
 }
 
 void fetch_init_atomic(struct task_struct *tsk, unsigned long flags) {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
+	struct process_state *proc = tsk->group_leader->obl.proc;
 
 	BUG_ON(fetch->tape != NULL);
 
-	tsk->obl.tind = atomic_inc_return(&num_threads) - 1;
+	tsk->obl.tind = atomic_inc_return(&proc->num_threads) - 1;
 	tsk->obl.flags = flags;
 
 	memset(fetch, 0, sizeof(struct prefetching_state));
-	fetch->tape_length = counts[tsk->obl.tind] / sizeof(void *);
+	fetch->tape_length = proc->counts[tsk->obl.tind] / sizeof(void *);
 	printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n",
-	       counts[tsk->obl.tind], fetch->tape_length);
+	       proc->counts[tsk->obl.tind], fetch->tape_length);
 
-	fetch->tape = bufs[tsk->obl.tind];
+	fetch->tape = proc->bufs[tsk->obl.tind];
 
 	INIT_WORK(&fetch->prefetch_work, prefetch_work_func);
 }
 
 void fetch_init(struct task_struct *tsk, int flags)
 {
+	// this function is called ONLY by the group leader in a multithreaded setting.
+	// the task struct corresponding to the group leader keeps per-process state
 	int thread_ind = 0;
+	struct process_state *proc = NULL;
+
 	do_swap_page_p = (void *)kallsyms_lookup_name("do_swap_page");
-	atomic_set(&num_threads, 0);
-	memset(key_page_indices, 0, sizeof(key_page_indices));
+
+	current->group_leader->obl.proc = process_state_new();
+	proc = current->group_leader->obl.proc;
+
+	if (proc == NULL) {
+		printk(
+		    KERN_ERR
+		    "Unable to allocate memory for additional process state\n");
+		return;
+	}
+
 	for (;; thread_ind++) {
 		char trace_filepath[FILEPATH_LEN];
 		size_t filesize = 0;
@@ -178,8 +226,8 @@ void fetch_init(struct task_struct *tsk, int flags)
 			return;
 		}
 
-		bufs[thread_ind] = buf;
-		counts[thread_ind] = count;
+		proc->bufs[thread_ind] = buf;
+		proc->counts[thread_ind] = count;
 	}
 
 	fetch_init_atomic(tsk, flags);
@@ -187,11 +235,13 @@ void fetch_init(struct task_struct *tsk, int flags)
 
 void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 {
+	// **note the group_leader**
+	struct process_state *proc = current->group_leader->obl.proc;
 
 	if (memtrace_getflag(ONE_TAPE)) {
 		//todo:: do something with this var
 		p->obl = current->obl;
-		p->obl.tind = atomic_inc_return(&num_threads) - 1;
+		p->obl.tind = atomic_inc_return(&proc->num_threads) - 1;
 	} else {
 		// p->obl.tind is set by the function below
 		fetch_init_atomic(p, current->obl.flags);
@@ -201,8 +251,9 @@ void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 void fetch_fini(struct task_struct *tsk)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
+	struct process_state *proc = tsk->group_leader->obl.proc;
 	if (fetch->tape != NULL) {
-		int num_threads_left = atomic_dec_return(&num_threads);
+		int num_threads_left = atomic_dec_return(&proc->num_threads);
 		struct vm_area_struct *last_vma =
 			find_vma(tsk->mm, fetch->tape[fetch->key_page_idx]);
 
@@ -228,8 +279,10 @@ void fetch_fini(struct task_struct *tsk)
 			if (num_threads_left != 0)
 				return;
 		}
-		vfree(fetch->tape);
-		fetch->tape = NULL; // todo:: should not need once in kernel
+
+		if (num_threads_left == 0) {
+			process_state_free(proc);
+		}
 	}
 }
 
@@ -239,6 +292,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 			      bool *return_early, int magic)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
+	struct process_state *proc = tsk->group_leader->obl.proc;
 	unsigned long flags;
 	int i;
 
@@ -253,17 +307,19 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	}
 	fetch->num_fault++;
 
-	spin_lock_irqsave(&key_page_indices_lock, flags);
-	atomic_long_set(&map_intent[tsk->obl.tind], address & PAGE_ADDR_MASK);
+	spin_lock_irqsave(&proc->key_page_indices_lock, flags);
+	atomic_long_set(&proc->map_intent[tsk->obl.tind], address & PAGE_ADDR_MASK);
 
-	for (i = 0; i < atomic_read(&num_threads); i++) {
+	for (i = 0; i < atomic_read(&proc->num_threads); i++) {
 		//TODO:: use fetch->tape-like thing
 		if (i != tsk->obl.tind &&
-		    (bufs[i][key_page_indices[i]] & PAGE_ADDR_MASK) ==
+		    (proc->bufs[i][proc->key_page_indices[i]] & PAGE_ADDR_MASK) ==
 			    (address & PAGE_ADDR_MASK)) {
-			key_page_indices[i] = bump_next_fetch(
-				key_page_indices[i] + FOOTSTEPPING_JUMP, bufs[i],
-				counts[i] / sizeof(void *), tsk->mm);
+			proc->key_page_indices[i] = bump_next_fetch(
+				proc->key_page_indices[i] + FOOTSTEPPING_JUMP, proc->bufs[i],
+				proc->counts[i] / sizeof(void *),
+				proc->map_intent, atomic_read(&proc->num_threads),//todo::look at me again! thread_pos->num_threads
+				tsk->mm);
 		}
 	}
 
@@ -278,7 +334,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	 * is usually never satisfied
 	*/
 	if (fetch->key_page_idx == 0 ||
-	    (fetch->tape[key_page_indices[tsk->obl.tind]] & PAGE_ADDR_MASK) ==
+	    (fetch->tape[proc->key_page_indices[tsk->obl.tind]] & PAGE_ADDR_MASK) ==
 		    (address & PAGE_ADDR_MASK)) {
 		if (memtrace_getflag(OFFLOAD_FETCH))
 			queue_work_on(FETCH_OFFLOAD_CPU, system_highpri_wq,
@@ -287,7 +343,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 			prefetch_work_func(&fetch->prefetch_work);
 	}
 
-	spin_unlock_irqrestore(&key_page_indices_lock, flags);
+	spin_unlock_irqrestore(&proc->key_page_indices_lock, flags);
 }
 
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
