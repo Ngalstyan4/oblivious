@@ -11,18 +11,9 @@
 
 #include <linux/kallsyms.h>
 
-#define MAX_PRINT_LEN 768
-#define MAX_NUM_THREADS 20
+#define OBL_MAX_PRINT_LEN 768
 static const int FOOTSTEPPING_JUMP = 10;
 static const int SYNC_THRESHHOLD = 10;
-
-// TODO:: vmalloc() these for group leader thread
-static DEFINE_SPINLOCK(next_fetches_lock);
-unsigned long long int next_fetches[MAX_NUM_THREADS];
-static atomic_long_t map_intent[MAX_NUM_THREADS] = {ATOMIC_INIT(0)};
-static unsigned long *bufs[MAX_NUM_THREADS];
-static size_t counts[MAX_NUM_THREADS];
-static atomic_t thread_pos = ATOMIC_INIT(0);
 
 // todo:: this should be same as the eviction CPU once eviction work chunks
 // are properly broken down to avoid head of line blocking for prefetching
@@ -32,18 +23,45 @@ static atomic_t thread_pos = ATOMIC_INIT(0);
 // it is better to use a separate CPU for fetching
 static const int FETCH_OFFLOAD_CPU = 6;
 
-// exported from mm/memory.c mm/internal.h function
-int do_swap_page(struct vm_fault *vmf);
-static int (*do_swap_page_p)(struct vm_fault *vmf);
+static struct process_state *process_state_new() {
+	struct process_state *proc = (struct process_state *)vmalloc(sizeof(struct process_state));
+	int i;
+	if (proc == NULL) return NULL;
+	spin_lock_init(&proc->next_fetches_lock);
+	atomic_set(&proc->thread_pos, 0);
+	for (i = 0; i < OBL_MAX_NUM_THREADS; i++) {
+		proc->next_fetches[i] = 0;
+		atomic_long_set(&proc->map_intent[i], 0);
+		proc->bufs[i] = NULL;
+		proc->counts[i] = 0;
+	}
+	return proc;
+}
+
+static void process_state_free(struct process_state *proc)
+{
+	int i;
+	for (i = 0; i < OBL_MAX_NUM_THREADS; i++)
+		if (proc->bufs[i] != NULL) {
+			//printk(KERN_WARNING
+			//       "Unused memory buffer left on process state. "
+			//       "Freeing to avoid memory leak\n");
+			vfree(proc->bufs[i]);
+		}
+
+	vfree(proc);
+}
 
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
 			  struct vm_fault *vmf);
 
 static unsigned long bump_next_fetch(unsigned long next_fetch,
-				     unsigned long *buf, unsigned long len,
+				     unsigned long *buf, unsigned long buf_len,
+				     atomic_long_t *map_intents,
+				     unsigned long map_intents_len,
 				     struct mm_struct *mm)
 {
-	while (likely(next_fetch < len)) {
+	while (likely(next_fetch < buf_len)) {
 		pte_t *pte = addr2pte(buf[next_fetch], mm);
 		if (unlikely(pte && !pte_none(*pte) && pte_present(*pte))) {
 			// page already mapped in page table
@@ -51,8 +69,8 @@ static unsigned long bump_next_fetch(unsigned long next_fetch,
 			//fetch->already_present++;
 		} else {
 			int i = 0;
-			for (i = 0; i < atomic_read(&thread_pos); i++) {
-				if (atomic_long_read(&map_intent[i]) ==
+			for (i = 0; i < map_intents_len; i++) {
+				if (atomic_long_read(&map_intents[i]) ==
 					buf[next_fetch] &&
 				    next_fetch != 0) {
 					printk(KERN_INFO
@@ -67,7 +85,7 @@ static unsigned long bump_next_fetch(unsigned long next_fetch,
 		}
 	}
 
-	return next_fetch < len ? next_fetch : len - 1;
+	return next_fetch < buf_len ? next_fetch : buf_len - 1;
 }
 
 static void prefetch_work_func(struct work_struct *work)
@@ -77,6 +95,7 @@ static void prefetch_work_func(struct work_struct *work)
 	struct task_struct_oblivious *obl =
 		container_of(fetch, struct task_struct_oblivious, fetch);
 	struct task_struct *tsk = container_of(obl, struct task_struct, obl);
+	struct process_state *proc = tsk->group_leader->obl.proc;
 
 	int i = 0;
 	int num_prefetch = 0;
@@ -87,9 +106,9 @@ static void prefetch_work_func(struct work_struct *work)
 	//down_read(&mm->mmap_sem);
 
 	unsigned long fetch_start = fetch->next_fetch;
-	if (fetch_start != next_fetches[obl->tind]) {
+	if (fetch_start != proc->next_fetches[obl->tind]) {
 		// TODO:: add footstepping counter
-		fetch_start = fetch->next_fetch = next_fetches[obl->tind];
+		fetch_start = fetch->next_fetch = proc->next_fetches[obl->tind];
 	}
 
 	if (unlikely(!memtrace_getflag(TAPE_FETCH)))
@@ -114,25 +133,28 @@ static void prefetch_work_func(struct work_struct *work)
 	fetch->next_fetch += i;
 
 	fetch->next_fetch = bump_next_fetch(fetch->next_fetch, fetch->accesses,
-					    fetch->num_accesses, mm);
-	next_fetches[tsk->obl.tind] = fetch->next_fetch;
+					    fetch->num_accesses,
+					    proc->map_intent, atomic_read(&proc->thread_pos),
+					    mm);
+	proc->next_fetches[tsk->obl.tind] = fetch->next_fetch;
 	//up_read(&mm->mmap_sem);
 }
 
 void fetch_init_atomic(struct task_struct *tsk, unsigned long flags) {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
+	struct process_state *proc = tsk->group_leader->obl.proc;
 
 	BUG_ON(fetch->accesses != NULL);
 
-	tsk->obl.tind = atomic_inc_return(&thread_pos) - 1;
+	tsk->obl.tind = atomic_inc_return(&proc->thread_pos) - 1;
 	tsk->obl.flags = flags;
 
 	memset(fetch, 0, sizeof(struct prefetching_state));
-	fetch->num_accesses = counts[tsk->obl.tind] / sizeof(void *);
+	fetch->num_accesses = proc->counts[tsk->obl.tind] / sizeof(void *);
 	printk(KERN_DEBUG "read %ld bytes which means %ld accesses\n",
-	       counts[tsk->obl.tind], fetch->num_accesses);
+	       proc->counts[tsk->obl.tind], fetch->num_accesses);
 
-	fetch->accesses = bufs[tsk->obl.tind];
+	fetch->accesses = proc->bufs[tsk->obl.tind];
 
 	INIT_WORK(&fetch->prefetch_work, prefetch_work_func);
 	fetch->prefetch_start = true; // can be used to pause and resume
@@ -140,10 +162,20 @@ void fetch_init_atomic(struct task_struct *tsk, unsigned long flags) {
 
 void fetch_init(struct task_struct *tsk, int flags)
 {
+	// this function is called ONLY by the group leader in a multithreaded setting.
+	// the task struct corresponding to the group leader keeps per-process state
 	int thread_ind = 0;
-	do_swap_page_p = (void *)kallsyms_lookup_name("do_swap_page");
-	atomic_set(&thread_pos, 0);
-	memset(next_fetches, 0, sizeof(next_fetches));
+	struct process_state *proc = NULL;
+	current->group_leader->obl.proc = process_state_new();
+	proc = current->group_leader->obl.proc;
+
+	if (proc == NULL) {
+		printk(
+		    KERN_ERR
+		    "Unable to allocate memory for additional process state\n");
+		return;
+	}
+
 	for (;; thread_ind++) {
 		char trace_filepath[FILEPATH_LEN];
 		size_t filesize = 0;
@@ -183,8 +215,8 @@ void fetch_init(struct task_struct *tsk, int flags)
 			return;
 		}
 
-		bufs[thread_ind] = buf;
-		counts[thread_ind] = count;
+		proc->bufs[thread_ind] = buf;
+		proc->counts[thread_ind] = count;
 	}
 
 	fetch_init_atomic(tsk, flags);
@@ -192,11 +224,13 @@ void fetch_init(struct task_struct *tsk, int flags)
 
 void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 {
+	// **note the group_leader**
+	struct process_state *proc = current->group_leader->obl.proc;
 
 	if (memtrace_getflag(ONE_TAPE)) {
 		//todo:: do something with this var
 		p->obl = current->obl;
-		p->obl.tind = atomic_inc_return(&thread_pos) - 1;
+		p->obl.tind = atomic_inc_return(&proc->thread_pos) - 1;
 	} else {
 		// p->obl.tind is set by the function below
 		fetch_init_atomic(p, current->obl.flags);
@@ -206,8 +240,10 @@ void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 void fetch_fini(struct task_struct *tsk)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
+	struct process_state *proc = tsk->group_leader->obl.proc;
+
 	if (fetch->accesses != NULL) {
-		int num_threads_left = atomic_dec_return(&thread_pos);
+		int num_threads_left = atomic_dec_return(&proc->thread_pos);
 		struct vm_area_struct *last_vma =
 			find_vma(tsk->mm, fetch->accesses[fetch->next_fetch]);
 
@@ -233,8 +269,10 @@ void fetch_fini(struct task_struct *tsk)
 			if (num_threads_left != 0)
 				return;
 		}
-		vfree(fetch->accesses);
-		fetch->accesses = NULL; // todo:: should not need once in kernel
+
+		if (num_threads_left == 0) {
+			process_state_free(proc);
+		}
 	}
 }
 
@@ -244,6 +282,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 			      bool *return_early, int magic)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
+	struct process_state *proc = tsk->group_leader->obl.proc;
 	unsigned long flags;
 	int i;
 
@@ -258,17 +297,19 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	}
 	fetch->num_fault++;
 
-	spin_lock_irqsave(&next_fetches_lock, flags);
-	atomic_long_set(&map_intent[tsk->obl.tind], address & PAGE_ADDR_MASK);
+	spin_lock_irqsave(&proc->next_fetches_lock, flags);
+	atomic_long_set(&proc->map_intent[tsk->obl.tind], address & PAGE_ADDR_MASK);
 
-	for (i = 0; i < atomic_read(&thread_pos); i++) {
+	for (i = 0; i < atomic_read(&proc->thread_pos); i++) {
 		//TODO:: use fetch->accesses-like thing
 		if (i != tsk->obl.tind &&
-		    (bufs[i][next_fetches[i]] & PAGE_ADDR_MASK) ==
+		    (proc->bufs[i][proc->next_fetches[i]] & PAGE_ADDR_MASK) ==
 			    (address & PAGE_ADDR_MASK)) {
-			next_fetches[i] = bump_next_fetch(
-				next_fetches[i] + FOOTSTEPPING_JUMP, bufs[i],
-				counts[i] / sizeof(void *), tsk->mm);
+			proc->next_fetches[i] = bump_next_fetch(
+				proc->next_fetches[i] + FOOTSTEPPING_JUMP, proc->bufs[i],
+				proc->counts[i] / sizeof(void *),
+			    	proc->map_intent, atomic_read(&proc->thread_pos),
+				tsk->mm);
 		}
 	}
 
@@ -287,7 +328,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	if (fetch->next_fetch == 0 || fetch->pos >= fetch->next_fetch ||
 	    (fetch->accesses[fetch->next_fetch] & PAGE_ADDR_MASK) ==
 		    (address & PAGE_ADDR_MASK) ||
-	    (fetch->accesses[next_fetches[tsk->obl.tind]] & PAGE_ADDR_MASK) ==
+	    (fetch->accesses[proc->next_fetches[tsk->obl.tind]] & PAGE_ADDR_MASK) ==
 		    (address & PAGE_ADDR_MASK)) {
 		if (memtrace_getflag(OFFLOAD_FETCH))
 			queue_work_on(FETCH_OFFLOAD_CPU, system_highpri_wq,
@@ -296,7 +337,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 			prefetch_work_func(&tsk->obl.fetch.prefetch_work);
 	}
 
-	spin_unlock_irqrestore(&next_fetches_lock, flags);
+	spin_unlock_irqrestore(&proc->next_fetches_lock, flags);
 }
 
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm,
