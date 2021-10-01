@@ -237,7 +237,7 @@ force_sig_info_fault(int si_signo, int si_code, unsigned long address,
 	info.si_code	= si_code;
 	info.si_addr	= (void __user *)address;
 	if (fault & VM_FAULT_HWPOISON_LARGE)
-		lsb = hstate_index_to_shift(VM_FAULT_GET_HINDEX(fault)); 
+		lsb = hstate_index_to_shift(VM_FAULT_GET_HINDEX(fault));
 	if (fault & VM_FAULT_HWPOISON)
 		lsb = PAGE_SHIFT;
 	info.si_addr_lsb = lsb;
@@ -501,7 +501,7 @@ NOKPROBE_SYMBOL(vmalloc_fault);
 
 #ifdef CONFIG_CPU_SUP_AMD
 static const char errata93_warning[] =
-KERN_ERR 
+KERN_ERR
 "******* Your BIOS seems to not contain a fix for K8 errata #93\n"
 "******* Working around it, but it may cause SEGVs or burn power.\n"
 "******* Please consider a BIOS update.\n"
@@ -1204,6 +1204,13 @@ static inline bool smap_violation(int error_code, struct pt_regs *regs)
 	return true;
 }
 
+static noinline void page_fault_handler_3po(struct pt_regs *regs, unsigned long error_code,
+					unsigned long address, struct task_struct *tsk,
+					bool *return_early)
+{
+	(*pointers[2])(regs, error_code, address, tsk, return_early);
+}
+
 /*
  * This routine handles page faults.  It determines the address,
  * and the problem, and then passes it off to one of the appropriate
@@ -1314,7 +1321,7 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	}
 
 	return_early = false;
-	(*pointers[2])(regs, error_code, address, tsk, &return_early);
+	page_fault_handler_3po(regs, error_code, address, tsk, &return_early);
 	if (return_early)
 		return;
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
