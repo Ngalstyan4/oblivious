@@ -220,7 +220,7 @@ void fetch_init(struct task_struct *tsk, int flags)
 
 		count = read_tape(trace_filepath, (char *)buf, filesize);
 
-		if (filesize == 0 || count == 0) {
+		if (filesize != count) {
 			printk(KERN_ERR "unable to initialize fetching\n");
 			vfree(buf);
 			return;
