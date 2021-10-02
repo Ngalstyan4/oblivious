@@ -24,7 +24,7 @@ static const int SYNC_THRESHHOLD = 10;
 static const int FETCH_OFFLOAD_CPU = 6;
 
 // the number of pages ahead of our current tape position to start prefetching
-#define GAP 200
+#define LOOKAHEAD 200
 
 // the length of tape over which we look for pages to prefetch
 #define BATCH_LENGTH 100
@@ -125,7 +125,7 @@ static void prefetch_work_func(struct work_struct *work)
 		fetch->prefetch_next_idx = current_pos_idx;
 	}
 
-	for (; fetch->prefetch_next_idx < (current_pos_idx + GAP + BATCH_LENGTH) &&
+	for (; fetch->prefetch_next_idx < (current_pos_idx + LOOKAHEAD + BATCH_LENGTH) &&
 	        fetch->prefetch_next_idx < fetch->tape_length;
 	        fetch->prefetch_next_idx++) {
 		unsigned long paddr = fetch->tape[fetch->prefetch_next_idx];
