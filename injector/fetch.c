@@ -111,7 +111,7 @@ static void prefetch_work_func(struct work_struct *work)
 	struct task_struct_oblivious *obl =
 		container_of(fetch, struct task_struct_oblivious, fetch);
 	struct task_struct *tsk = container_of(obl, struct task_struct, obl);
-	struct process_state *proc = tsk->group_leader->obl.proc;
+	struct process_state *proc = tsk->obl.proc;
 
 	unsigned long current_pos_idx;
 
@@ -149,9 +149,20 @@ static void prefetch_work_func(struct work_struct *work)
 	up_read(&tsk->mm->mmap_sem);
 }
 
-void fetch_init_atomic(struct task_struct *tsk, unsigned long flags) {
+void fetch_init_atomic(struct task_struct *tsk, struct process_state *proc, unsigned long flags) {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
-	struct process_state *proc = tsk->group_leader->obl.proc;
+
+	/*
+	 * samkumar: There might be a race condition here. What if, before we
+	 * increment the reference count, the other thread gets to run and it
+	 * exits decrementing the reference count and then freeing the structure?
+	 *
+	 * A better solution would be to have the parent thread increment the
+	 * reference count, so there's no chance for it to be freed before the
+	 * child thread runs. Or, block the parent until the child has
+	 * incremented the reference count.
+	 */
+	tsk->obl.proc = proc;
 
 	BUG_ON(fetch->tape != NULL);
 
@@ -170,15 +181,10 @@ void fetch_init_atomic(struct task_struct *tsk, unsigned long flags) {
 
 void fetch_init(struct task_struct *tsk, int flags)
 {
-	// this function is called ONLY by the group leader in a multithreaded setting.
-	// the task struct corresponding to the group leader keeps per-process state
+	// this function is called ONLY by the first thread in a multithreaded setting.
+	// its task struct keeps per-process state
 	int thread_ind = 0;
-	struct process_state *proc = NULL;
-
-	do_swap_page_p = (void *)kallsyms_lookup_name("do_swap_page");
-
-	current->group_leader->obl.proc = process_state_new();
-	proc = current->group_leader->obl.proc;
+	struct process_state *proc = process_state_new();
 
 	if (proc == NULL) {
 		printk(
@@ -186,6 +192,8 @@ void fetch_init(struct task_struct *tsk, int flags)
 		    "Unable to allocate memory for additional process state\n");
 		return;
 	}
+
+	do_swap_page_p = (void *)kallsyms_lookup_name("do_swap_page");
 
 	for (;; thread_ind++) {
 		char trace_filepath[FILEPATH_LEN];
@@ -230,13 +238,12 @@ void fetch_init(struct task_struct *tsk, int flags)
 		proc->counts[thread_ind] = count;
 	}
 
-	fetch_init_atomic(tsk, flags);
+	fetch_init_atomic(tsk, proc, flags);
 }
 
 void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 {
-	// **note the group_leader**
-	struct process_state *proc = current->group_leader->obl.proc;
+	struct process_state *proc = current->obl.proc;
 
 	if (memtrace_getflag(ONE_TAPE)) {
 		//todo:: do something with this var
@@ -244,14 +251,14 @@ void fetch_clone(struct task_struct *p, unsigned long clone_flags)
 		p->obl.tind = atomic_inc_return(&proc->num_threads) - 1;
 	} else {
 		// p->obl.tind is set by the function below
-		fetch_init_atomic(p, current->obl.flags);
+		fetch_init_atomic(p, proc, current->obl.flags);
 	}
 }
 
 void fetch_fini(struct task_struct *tsk)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
-	struct process_state *proc = tsk->group_leader->obl.proc;
+	struct process_state *proc = tsk->obl.proc;
 	if (fetch->tape != NULL) {
 		int num_threads_left = atomic_dec_return(&proc->num_threads);
 		struct vm_area_struct *last_vma =
@@ -292,7 +299,7 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 			      bool *return_early, int magic)
 {
 	struct prefetching_state *fetch = &tsk->obl.fetch;
-	struct process_state *proc = tsk->group_leader->obl.proc;
+	struct process_state *proc = tsk->obl.proc;
 	unsigned long flags;
 	int i;
 
