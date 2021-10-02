@@ -15,6 +15,8 @@
 static const int FOOTSTEPPING_JUMP = 10;
 static const int SYNC_THRESHHOLD = 10;
 
+#define COLLECT_STATS 0
+
 // todo:: this should be same as the eviction CPU once eviction work chunks
 // are properly broken down to avoid head of line blocking for prefetching
 // it seems even now using eviction CPU for fetching would be acceptable
@@ -24,7 +26,7 @@ static const int SYNC_THRESHHOLD = 10;
 static const int FETCH_OFFLOAD_CPU = 6;
 
 // the number of pages ahead of our current tape position to start prefetching
-#define LOOKAHEAD 200
+#define LOOKAHEAD 400
 
 // the length of tape over which we look for pages to prefetch
 #define BATCH_LENGTH 100
@@ -141,12 +143,34 @@ static void prefetch_work_func(struct work_struct *work)
 
 	proc->key_page_indices[tsk->obl.tind] =
 	    bump_next_fetch(current_pos_idx + BATCH_LENGTH, fetch->tape,
-			    fetch->tape_length, 
+			    fetch->tape_length,
 			    proc->map_intent, atomic_read(&proc->num_threads),
 			    tsk->mm);
 	fetch->key_page_idx = proc->key_page_indices[tsk->obl.tind]; // for debugging
 
 	up_read(&tsk->mm->mmap_sem);
+
+	#if COLLECT_STATS
+	{
+		u64 last_key_page_num_fetched = fetch->last_key_page_num_fetched;
+		u64 last_key_page_time = fetch->last_key_page_time;
+		u64 curr_key_page_num_fetched = fetch->found_counter - fetch->last_key_page_total_fetched;
+		u64 curr_key_page_time = ktime_get_real_ns();
+
+		fetch->last_key_page_num_fetched = curr_key_page_num_fetched;
+		fetch->last_key_page_time = curr_key_page_time;
+		fetch->last_key_page_total_fetched = fetch->found_counter;
+
+		if (likely(last_key_page_time != 0)) {
+			u64 elapsed = curr_key_page_time - last_key_page_time;
+			u64 pages_per_sec = 1000000000ull * last_key_page_num_fetched / elapsed;
+
+			stats_event(&tsk->obl.fetch.timing_stats, elapsed);
+			stats_event(&tsk->obl.fetch.batch_stats, curr_key_page_num_fetched);
+			stats_event(&tsk->obl.fetch.bandwidth_stats, pages_per_sec);
+		}
+	}
+	#endif
 }
 
 void fetch_init_atomic(struct task_struct *tsk, struct process_state *proc, unsigned long flags) {
@@ -281,6 +305,12 @@ void fetch_fini(struct task_struct *tsk)
 		       fetch->key_page_idx, fetch->tape[fetch->key_page_idx],
 		       last_vma->vm_start, last_vma->vm_end,
 		       fetch->tape_length);
+
+#if COLLECT_STATS
+		stats_tell(&fetch->timing_stats, "KEY_PAGE_INTVL");
+		stats_tell(&fetch->batch_stats, "FETCHED_PER_BATCH");
+		stats_tell(&fetch->bandwidth_stats, "PAGES_PER_SEC");
+#endif
 
 		if (memtrace_getflag(ONE_TAPE)) {
 			if (num_threads_left != 0)

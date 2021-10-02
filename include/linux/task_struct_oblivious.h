@@ -1,6 +1,7 @@
 #ifndef TASK_STRUCT_OBLIVIOUS_H
 #define TASK_STRUCT_OBLIVIOUS_H
 #include <linux/workqueue.h>
+#include <linux/ktime.h> // Needed for stats
 /*
  * task_struct_oblivious is embedded in struct task_struct as ->obl
  * This ties oblivious-system state to each linux thread thereby allowing
@@ -17,6 +18,40 @@
 
 #define OBL_MAX_NUM_THREADS 20
 
+/* Based on https://github.com/ucbrise/mage/blob/main/src/util/stats.hpp */
+struct stream_stats {
+	u64 stat_max;
+	u64 stat_sum;
+	u64 stat_min;
+	u64 stat_count;
+};
+
+static inline void stats_event(struct stream_stats *s, u64 stat) {
+	if (unlikely(s->stat_count == 0)) {
+		s->stat_max = stat;
+		s->stat_sum = stat;
+		s->stat_min = stat;
+		s->stat_count = 1;
+	} else {
+		if (unlikely(stat > s->stat_max)) {
+			s->stat_max = stat;
+		}
+		s->stat_sum += stat;
+		if (unlikely(stat < s->stat_min)) {
+			s->stat_min = stat;
+		}
+		s->stat_count++;
+	}
+}
+
+static inline void stats_tell(struct stream_stats *s, const char *label) {
+	printk("%s: ( min = %llu, avg = %llu, max = %llu, count = %llu, sum = %llu )",
+	    label, (unsigned long long) s->stat_min,
+	    (unsigned long long) (s->stat_count == 0 ? 0 : (s->stat_sum / s->stat_count)),
+	    (unsigned long long) s->stat_max, (unsigned long long) s->stat_count,
+	    (unsigned long long) s->stat_sum);
+}
+
 struct trace_recording_state {
 	unsigned long *accesses;
 	unsigned long pos;
@@ -32,6 +67,14 @@ struct prefetching_state {
 	int found_counter;
 	int already_present;
 	int num_fault;
+
+	/* Measure statistics for the work done on each batch. */
+	struct stream_stats timing_stats;
+	struct stream_stats batch_stats;
+	struct stream_stats bandwidth_stats;
+	u64 last_key_page_total_fetched;
+	u64 last_key_page_num_fetched;
+	u64 last_key_page_time;
 
 	/* Used to schedule prefetching work asynchronously. */
 	struct work_struct prefetch_work;
