@@ -125,13 +125,35 @@ size_t read_tape(const char *filepath, char *buf, long max_len)
 	set_fs(get_ds()); // KERNEL_DS
 	f = filp_open(filepath, O_RDONLY | O_LARGEFILE, 0);
 	if (f == NULL) {
-		printk(KERN_ERR "unable to read/open file\n");
-		set_fs(old_fs);
-		return 0;
+		printk(KERN_ERR "unable to open %s for reading", filepath);
+		goto fail;
 	}
 
-	count = vfs_read(f, buf, max_len, &f->f_pos);
-	filp_close(f, NULL);
+	while (count < max_len) {
+		ssize_t rv = vfs_read(f, &buf[count], max_len - count, &f->f_pos);
+		if (rv == 0) {
+			goto success;
+		} else if (rv < 0) {
+			printk(KERN_ERR "unable to read file %s: %d", filepath, (int) rv);
+			goto fail;
+		}
+		count += rv;
+	}
+
+	{
+		char scratch;
+		ssize_t rv = vfs_read(f, &scratch, 1, &f->f_pos);
+		if (likely(rv == 0)) {
+			goto success;
+		} else {
+			printk(KERN_ERR "could not read the entire tape: read only %llu bytes", (unsigned long long int) count);
+		}
+	}
+
+fail:
+	count = 0;
+
+success:
 	set_fs(old_fs);
 	return count;
 }
