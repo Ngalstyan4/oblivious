@@ -32,8 +32,7 @@ static const int FETCH_OFFLOAD_CPU = 6;
 #define BATCH_LENGTH 100
 
 // exported from mm/memory.c mm/internal.h function
-int do_swap_page(struct vm_fault *vmf);
-static int (*do_swap_page_p)(struct vm_fault *vmf);
+int do_swap_page_prefault_3po(struct vm_fault *vmf);
 
 static struct process_state *process_state_new() {
 	struct process_state *proc = (struct process_state *)vmalloc(sizeof(struct process_state));
@@ -72,6 +71,7 @@ static void process_state_free(struct process_state *proc)
 }
 
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm);
+static bool prefault_addr(unsigned long addr, struct mm_struct *mm);
 
 static unsigned long bump_next_fetch(unsigned long next_fetch,
 				     unsigned long *buf, unsigned long buf_len,
@@ -116,6 +116,8 @@ static void prefetch_work_func(struct work_struct *work)
 	struct process_state *proc = tsk->obl.proc;
 
 	unsigned long current_pos_idx;
+	unsigned long i;
+	unsigned long start_ahead;
 
 	if (unlikely(!memtrace_getflag(TAPE_FETCH)))
 		return;
@@ -126,7 +128,12 @@ static void prefetch_work_func(struct work_struct *work)
 	if (fetch->prefetch_next_idx < current_pos_idx) {
 		fetch->prefetch_next_idx = current_pos_idx;
 	}
+	start_ahead = fetch->prefetch_next_idx - current_pos_idx;
 
+	/*
+	 * Prefetch from where we left off until current_pos_idx + LOOKAHEAD +
+	 * BATCH_LENGTH. We probably left off around current_pos_idx + LOOKAHEAD,
+	 */
 	for (; fetch->prefetch_next_idx < (current_pos_idx + LOOKAHEAD + BATCH_LENGTH) &&
 	        fetch->prefetch_next_idx < fetch->tape_length;
 	        fetch->prefetch_next_idx++) {
@@ -139,7 +146,11 @@ static void prefetch_work_func(struct work_struct *work)
 		}
 	}
 
-	// TODO: Pre-fault from current_pos_idx to current_pos_idx + BATCH_LENGTH.
+	/* Pre-fault from current_pos_idx + 1 to current_pos_idx + BATCH_LENGTH. */
+	for (i = 1; i < BATCH_LENGTH && i < start_ahead; i++) {
+		unsigned long addr = fetch->tape[current_pos_idx + i];
+		prefault_addr(addr, tsk->mm);
+	}
 
 	proc->key_page_indices[tsk->obl.tind] =
 	    bump_next_fetch(current_pos_idx + BATCH_LENGTH, fetch->tape,
@@ -216,8 +227,6 @@ void fetch_init(struct task_struct *tsk, int flags)
 		    "Unable to allocate memory for additional process state\n");
 		return;
 	}
-
-	do_swap_page_p = (void *)kallsyms_lookup_name("do_swap_page");
 
 	for (;; thread_ind++) {
 		char trace_filepath[FILEPATH_LEN];
@@ -381,6 +390,44 @@ void fetch_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 	}
 
 	spin_unlock_irqrestore(&proc->key_page_indices_lock, flags);
+}
+
+static bool prefault_addr(unsigned long addr, struct mm_struct *mm)
+{
+	/* Create a "fake" page fault on this address, then call do_swap_page. */
+	struct vm_fault vmf;
+	int rv;
+	pmd_t *pmd;
+	pte_t *pte = addr2ptepmd(addr, mm, &pmd);
+
+	/* PTE should exist, since swap cache key is stored in the PTE. */
+	if (unlikely(pte == NULL)) {
+		return false;
+	}
+
+	/* If PTE is already present, then there's nothing to do. */
+	if (pte_present(*pte)) {
+		return false;
+	}
+
+	/*
+	 * Initialize vmf, similar to how __handle_mm_fault and handle_pte_fault
+	 * would, focusing on those fields used by do_swap_page. The fields used
+	 * by do_swap_page are vma, pmd, pte, orig_pte, address, and flags. It
+	 * also uses ptl, but doesn't require that to be initialized going into
+	 * this function; it sets it via pte_offset_map_lock.
+	 */
+
+	memset(&vmf, 0x00, sizeof(struct vm_fault));
+	vmf.address = addr;
+	vmf.vma = find_vma(mm, addr);
+	vmf.pmd = pmd;
+	vmf.pte = pte;
+	vmf.orig_pte = *pte;
+	vmf.flags = FAULT_FLAG_USER | FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_RETRY_NOWAIT; // any other flags?
+
+	rv = do_swap_page_prefault_3po(&vmf);
+	return (rv & (VM_FAULT_OOM | VM_FAULT_SIGBUS | VM_FAULT_RETRY | VM_FAULT_MAJOR | VM_FAULT_HWPOISON)) == 0;
 }
 
 static bool prefetch_addr(unsigned long addr, struct mm_struct *mm)
