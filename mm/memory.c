@@ -2884,6 +2884,179 @@ out_release:
 }
 
 /*
+ * Modified version of do_swap_page used to prefault pages in 3PO. This is
+ * duplicated to avoid accidentally messing up the ftraced
+ * lock_page_or_retry_minor_page_fault function.
+ */
+int do_swap_page_prefault_3po(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct page *page, *swapcache;
+	struct mem_cgroup *memcg;
+	swp_entry_t entry;
+	pte_t pte;
+	int locked;
+	int exclusive = 0;
+	int ret = 0;
+
+	if (!pte_unmap_same(vma->vm_mm, vmf->pmd, vmf->pte, vmf->orig_pte))
+		goto out;
+
+	entry = pte_to_swp_entry(vmf->orig_pte);
+	if (unlikely(non_swap_entry(entry))) {
+		if (is_migration_entry(entry)) {
+			migration_entry_wait(vma->vm_mm, vmf->pmd,
+					     vmf->address);
+		} else if (is_hwpoison_entry(entry)) {
+			ret = VM_FAULT_HWPOISON;
+		} else {
+			print_bad_pte(vma, vmf->address, vmf->orig_pte, NULL);
+			ret = VM_FAULT_SIGBUS;
+		}
+		goto out;
+	}
+
+	page = lookup_swap_cache(entry);
+
+	/* Don't bother with major page fault handling or hardware poisoning. */
+	if (unlikely(page == NULL)) {
+		ret = VM_FAULT_MAJOR;
+		goto out;
+	} else if (unlikely(PageHWPoison(page))) {
+		ret = VM_FAULT_HWPOISON;
+		swapcache = page;
+		goto out_release;
+	}
+
+	swapcache = page;
+
+	/*
+	 * If you want this to act as "trylock_page", set FAULT_FLAG_ALLOW_RETRY
+	 * and FAULT_FLAG_RETRY_NOWAIT to get the same behavior.
+	 */
+	locked = lock_page_or_retry(page, vma->vm_mm, vmf->flags);
+
+	if (!locked) {
+		ret |= VM_FAULT_RETRY;
+		goto out_release;
+	}
+
+	/*
+	 * Make sure try_to_free_swap or reuse_swap_page or swapoff did not
+	 * release the swapcache from under us.  The page pin, and pte_same
+	 * test below, are not enough to exclude that.  Even if it is still
+	 * swapcache, we need to check that the page's swap has not changed.
+	 */
+	if (unlikely(!PageSwapCache(page) || page_private(page) != entry.val))
+		goto out_page;
+
+	page = ksm_might_need_to_copy(page, vma, vmf->address);
+	if (unlikely(!page)) {
+		ret = VM_FAULT_OOM;
+		page = swapcache;
+		goto out_page;
+	}
+
+	if (mem_cgroup_try_charge(page, vma->vm_mm, GFP_KERNEL,
+				&memcg, false)) {
+		ret = VM_FAULT_OOM;
+		goto out_page;
+	}
+
+	/*
+	 * Back out if somebody else already faulted in this pte.
+	 */
+	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address,
+			&vmf->ptl);
+	if (unlikely(!pte_same(*vmf->pte, vmf->orig_pte)))
+		goto out_nomap;
+
+	if (unlikely(!PageUptodate(page))) {
+		ret = VM_FAULT_SIGBUS;
+		goto out_nomap;
+	}
+
+	/*
+	 * The page isn't present yet, go ahead with the fault.
+	 *
+	 * Be careful about the sequence of operations here.
+	 * To get its accounting right, reuse_swap_page() must be called
+	 * while the page is counted on swap but not yet in mapcount i.e.
+	 * before page_add_anon_rmap() and swap_free(); try_to_free_swap()
+	 * must be called after the swap_free(), or it will never succeed.
+	 */
+
+	inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
+	dec_mm_counter_fast(vma->vm_mm, MM_SWAPENTS);
+	pte = mk_pte(page, vma->vm_page_prot);
+	if ((vmf->flags & FAULT_FLAG_WRITE) && reuse_swap_page(page, NULL)) {
+		pte = maybe_mkwrite(pte_mkdirty(pte), vma);
+		vmf->flags &= ~FAULT_FLAG_WRITE;
+		ret |= VM_FAULT_WRITE;
+		exclusive = RMAP_EXCLUSIVE;
+	}
+	flush_icache_page(vma, page);
+	if (pte_swp_soft_dirty(vmf->orig_pte))
+		pte = pte_mksoft_dirty(pte);
+	set_pte_at(vma->vm_mm, vmf->address, vmf->pte, pte);
+	vmf->orig_pte = pte;
+	if (page == swapcache) {
+		do_page_add_anon_rmap(page, vma, vmf->address, exclusive);
+		mem_cgroup_commit_charge(page, memcg, true, false);
+		activate_page(page);
+	} else { /* ksm created a completely new copy */
+		page_add_new_anon_rmap(page, vma, vmf->address, false);
+		mem_cgroup_commit_charge(page, memcg, false, false);
+		lru_cache_add_active_or_unevictable(page, vma);
+	}
+
+	swap_free(entry);
+	if (mem_cgroup_swap_full(page) ||
+	    (vma->vm_flags & VM_LOCKED) || PageMlocked(page))
+		try_to_free_swap(page);
+	unlock_page(page);
+	if (page != swapcache) {
+		/*
+		 * Hold the lock to avoid the swap entry to be reused
+		 * until we take the PT lock for the pte_same() check
+		 * (to avoid false positives from pte_same). For
+		 * further safety release the lock after the swap_free
+		 * so that the swap count won't change under a
+		 * parallel locked swapcache.
+		 */
+		unlock_page(swapcache);
+		put_page(swapcache);
+	}
+
+	if (vmf->flags & FAULT_FLAG_WRITE) {
+		ret |= do_wp_page(vmf);
+		if (ret & VM_FAULT_ERROR)
+			ret &= VM_FAULT_ERROR;
+		goto out;
+	}
+
+	/* No need to invalidate - it was non-present before */
+	update_mmu_cache(vma, vmf->address, vmf->pte);
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+out:
+	return ret;
+out_nomap:
+	mem_cgroup_cancel_charge(page, memcg, false);
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+out_page:
+	unlock_page(page);
+out_release:
+	put_page(page);
+	if (page != swapcache) {
+		unlock_page(swapcache);
+		put_page(swapcache);
+	}
+	return ret;
+}
+
+EXPORT_SYMBOL(do_swap_page_prefault_3po);
+
+/*
  * This is like a special single-page "expand_{down|up}wards()",
  * except we must first make sure that 'address{-|+}PAGE_SIZE'
  * doesn't hit another vma.
