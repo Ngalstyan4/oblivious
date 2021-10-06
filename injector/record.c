@@ -28,6 +28,7 @@ static unsigned long global_pos;
 void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
 {
 	struct trace_recording_state *record = &tsk->obl.record;
+	char trace_filepath[FILEPATH_LEN];
 
 	flush_tlb_all_p = (void *)kallsyms_lookup_name("flush_tlb_all");
 
@@ -42,6 +43,11 @@ void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
 		printk(KERN_ERR "Unable to allocate memory for tracing\n");
 		return;
 	}
+
+	snprintf(trace_filepath, FILEPATH_LEN, RECORD_FILE_FMT,
+		 tsk->comm, tsk->obl.tind);
+	trace_filepath[FILEPATH_LEN - 1] = '\0';
+	record->f = open_trace(trace_filepath);
 
 	record->microset_size = microset_size;
 	record->microset_pos = 0;
@@ -80,7 +86,6 @@ void record_fini(struct task_struct *tsk)
 	struct trace_recording_state *record = &tsk->obl.record;
 
 	if (record_initialized(tsk)) {
-		char trace_filepath[FILEPATH_LEN];
 		int num_threads_left = atomic_dec_return(&num_active_threads);
 		printk(KERN_INFO "finishing %d", tsk->obl.tind);
 		if (memtrace_getflag(ONE_TAPE)) {
@@ -89,23 +94,20 @@ void record_fini(struct task_struct *tsk)
 			record->pos = global_pos;
 		}
 
-		snprintf(trace_filepath, FILEPATH_LEN, RECORD_FILE_FMT,
-			 tsk->comm, tsk->obl.tind);
-
-		// in case path is too long, truncate;
-		trace_filepath[FILEPATH_LEN - 1] = '\0';
 		down_read(&tsk->mm->mmap_sem);
 		drain_microset();
 		up_read(&tsk->mm->mmap_sem);
-		if (record->pos >= TRACE_MAX_LEN) {
+		if (unlikely(record->pos >= TRACE_MAX_LEN)) {
 			printk(KERN_ERR "Ran out of buffer space");
 			printk(KERN_ERR "Proc mem pattern not fully recorded\n"
 					"please increase buffer "
 					"size(TRACE_ARRAY_SIZE) and rerun\n");
 		}
 
-		write_trace(trace_filepath, (const char *)record->accesses,
+		write_buffered_trace_to_file(record->f, (const char *)record->accesses,
 			    record->pos * sizeof(void *));
+		close_trace(record->f);
+		record->f = NULL;
 
 		vfree(record->microset);
 		vfree(record->accesses);
@@ -153,6 +155,13 @@ static void drain_microset()
 {
 	struct trace_recording_state *record = &current->obl.record;
 	unsigned long i;
+
+	if (unlikely(record->pos + record->microset_size > TRACE_MAX_LEN)) {
+		write_buffered_trace_to_file(record->f, (const char *)record->accesses,
+			    record->pos * sizeof(void *));
+		record->pos = 0;
+	}
+
 	get_cpu();
 	if (memtrace_getflag(ONE_TAPE))
 		record->pos = global_pos;
@@ -179,6 +188,7 @@ void record_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 {
 
 	struct trace_recording_state *record = &current->obl.record;
+	struct vm_area_struct *maybe_stack;
 
 	BUG_ON(tsk != current);
 	*return_early = false;
@@ -188,65 +198,61 @@ void record_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 		return;
 	}
 
-	if (record->pos < TRACE_MAX_LEN) {
-
-		struct vm_area_struct *maybe_stack =
-			find_vma(current->mm, address);
-		if (unlikely(0x800000 ==
-			     maybe_stack->vm_end - maybe_stack->vm_start)) {
-			struct vm_area_struct *prot_page = maybe_stack->vm_prev;
-			/*
-			 * Each mprotect() call explicitly passes r/w/x permissions.
-			 * If a permission is not passed to mprotect(), it must be
-			 * cleared from the VMA.
+	maybe_stack = find_vma(current->mm, address);
+	if (unlikely(0x800000 ==
+		     maybe_stack->vm_end - maybe_stack->vm_start)) {
+		struct vm_area_struct *prot_page = maybe_stack->vm_prev;
+		/*
+		 * Each mprotect() call explicitly passes r/w/x permissions.
+		 * If a permission is not passed to mprotect(), it must be
+		 * cleared from the VMA.
+		 */
+		if (0x1000 == prot_page->vm_end - prot_page->vm_start &&
+		    !(prot_page->vm_flags &
+		      (VM_READ | VM_WRITE | VM_EXEC))) {
+			/* ok, we found a 8MB vm area that has a single unmapped page at
+			 * the beginning. Let's assume it is a stack page
 			 */
-			if (0x1000 == prot_page->vm_end - prot_page->vm_start &&
-			    !(prot_page->vm_flags &
-			      (VM_READ | VM_WRITE | VM_EXEC))) {
-				/* ok, we found a 8MB vm area that has a single unmapped page at
-				 * the beginning. Let's assume it is a stack page
-				 */
-				return;
-			}
-		}
-
-		/*if (!(maybe_stack->vm_start <= current->mm->brk &&
-		      maybe_stack->vm_end >= current->mm->start_brk)) {
 			return;
-		}*/
-		if (maybe_stack->vm_file) return;
-
-		down_read(&current->mm->mmap_sem);
-
-		if (memtrace_getflag(ONE_TAPE))
-			record->microset_pos = atomic_read(&microset_pos);
-
-		if (record->microset_pos == record->microset_size) {
-			/* The microset is full. Start a new microset. */
-			drain_microset();
 		}
-
-		BUG_ON(record->microset_pos >= record->microset_size);
-		record->microset[record->microset_pos] =
-			address & PAGE_ADDR_MASK;
-		if (memtrace_getflag(ONE_TAPE))
-			atomic_inc(&microset_pos);
-		else
-			record->microset_pos++;
-
-		//todo:: optimze later, to return here and maybe avoid tlb flush?
-		trace_maybe_set_pte(addr2pte(address, current->mm),
-				    return_early);
-
-		// the following, if used correctly, can trace TLB count.
-		// trace_tlb_flush(TLB_LOCAL_SHOOTDOWN, TLB_FLUSH_ALL);
-		//count_vm_tlb_event(NR_TLB_LOCAL_FLUSH_ALL);
-		get_cpu();
-		//flush_tlb_all_p();
-		local_flush_tlb();
-		put_cpu();
-
-		up_read(&current->mm->mmap_sem);
 	}
+
+	/*if (!(maybe_stack->vm_start <= current->mm->brk &&
+	      maybe_stack->vm_end >= current->mm->start_brk)) {
+		return;
+	}*/
+	if (maybe_stack->vm_file) return;
+
+	down_read(&current->mm->mmap_sem);
+
+	if (memtrace_getflag(ONE_TAPE))
+		record->microset_pos = atomic_read(&microset_pos);
+
+	if (record->microset_pos == record->microset_size) {
+		/* The microset is full. Start a new microset. */
+		drain_microset();
+	}
+
+	BUG_ON(record->microset_pos >= record->microset_size);
+	record->microset[record->microset_pos] =
+		address & PAGE_ADDR_MASK;
+	if (memtrace_getflag(ONE_TAPE))
+		atomic_inc(&microset_pos);
+	else
+		record->microset_pos++;
+
+	//todo:: optimze later, to return here and maybe avoid tlb flush?
+	trace_maybe_set_pte(addr2pte(address, current->mm),
+			    return_early);
+
+	// the following, if used correctly, can trace TLB count.
+	// trace_tlb_flush(TLB_LOCAL_SHOOTDOWN, TLB_FLUSH_ALL);
+	//count_vm_tlb_event(NR_TLB_LOCAL_FLUSH_ALL);
+	get_cpu();
+	//flush_tlb_all_p();
+	local_flush_tlb();
+	put_cpu();
+
+	up_read(&current->mm->mmap_sem);
 }
 /************************** TRACE RECORDING FOR MEMORY PREFETCHING END ********************************/

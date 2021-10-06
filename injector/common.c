@@ -154,15 +154,13 @@ fail:
 	count = 0;
 
 success:
+	filp_close(f, NULL);
 	set_fs(old_fs);
 	return count;
 }
-void write_trace(const char *filepath, const char *buf, long len)
+
+struct file *open_trace(const char *filepath)
 {
-	long left_to_write = len;
-	// Write recorded trace to file
-	// docs ` https://www.howtoforge.com/reading-files-from-the-linux-kernel-space-module-driver-fedora-14
-	// https://www.linuxjournal.com/article/8110
 	struct file *f;
 
 	mm_segment_t old_fs = get_fs();
@@ -174,11 +172,33 @@ void write_trace(const char *filepath, const char *buf, long len)
 		printk(KERN_ERR
 		       "unable to create/open file %s. ERR code: %pe\n",
 		       filepath, f);
-		return;
+		f = NULL;
 	}
+
+	set_fs(old_fs);
+	return f;
+}
+
+void close_trace(struct file *f)
+{
+	mm_segment_t old_fs = get_fs();
+	set_fs(get_ds()); // KERNEL_DS
+
+	filp_close(f, NULL);
+
+	set_fs(old_fs);
+}
+
+void write_buffered_trace_to_file(struct file *f, const char *buf, long len)
+{
+	long left_to_write = len;
+
+	mm_segment_t old_fs = get_fs();
+	set_fs(get_ds()); // KERNEL_DS
 
 	printk(KERN_DEBUG "Writing recorded trace (num accesses=%ld)",
 	       len / sizeof(void *));
+
 	while (left_to_write > 0) {
 		// cannot write more than 2g at a time from kernel
 		// fixed in newer kernels, I guess just upgrade?
@@ -204,7 +224,6 @@ void write_trace(const char *filepath, const char *buf, long len)
 		       left_to_write, len);
 	}
 
-	filp_close(f, NULL);
 	set_fs(old_fs);
 }
 
