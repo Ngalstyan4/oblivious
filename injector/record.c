@@ -28,7 +28,6 @@ static unsigned long global_pos;
 void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
 {
 	struct trace_recording_state *record = &tsk->obl.record;
-	char trace_filepath[FILEPATH_LEN];
 
 	flush_tlb_all_p = (void *)kallsyms_lookup_name("flush_tlb_all");
 
@@ -43,11 +42,6 @@ void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
 		printk(KERN_ERR "Unable to allocate memory for tracing\n");
 		return;
 	}
-
-	snprintf(trace_filepath, FILEPATH_LEN, RECORD_FILE_FMT,
-		 tsk->comm, tsk->obl.tind);
-	trace_filepath[FILEPATH_LEN - 1] = '\0';
-	record->f = open_trace(trace_filepath);
 
 	record->microset_size = microset_size;
 	record->microset_pos = 0;
@@ -65,6 +59,19 @@ void record_init(struct task_struct *tsk, int flags, unsigned int microset_size)
 }
 
 static void drain_microset();
+
+static void open_trace_file(struct task_struct *tsk) {
+	struct trace_recording_state *record = &tsk->obl.record;
+	char trace_filepath[FILEPATH_LEN];
+
+	BUG_ON(record->f != NULL);
+
+	snprintf(trace_filepath, FILEPATH_LEN, RECORD_FILE_FMT,
+			 tsk->comm, tsk->obl.tind);
+
+	trace_filepath[FILEPATH_LEN - 1] = '\0';
+	record->f = open_trace(trace_filepath);
+}
 
 bool record_initialized(struct task_struct *tsk)
 {
@@ -104,6 +111,9 @@ void record_fini(struct task_struct *tsk)
 					"size(TRACE_ARRAY_SIZE) and rerun\n");
 		}
 
+		if (record->f == NULL) {
+			open_trace_file(tsk);
+		}
 		write_buffered_trace_to_file(record->f, (const char *)record->accesses,
 			    record->pos * sizeof(void *));
 		close_trace(record->f);
@@ -157,6 +167,9 @@ static void drain_microset()
 	unsigned long i;
 
 	if (unlikely(record->pos + record->microset_size > TRACE_MAX_LEN)) {
+		if (unlikely(record->f == NULL)) {
+			open_trace_file(current);
+		}
 		write_buffered_trace_to_file(record->f, (const char *)record->accesses,
 			    record->pos * sizeof(void *));
 		record->pos = 0;
@@ -186,7 +199,6 @@ void record_page_fault_handler(struct pt_regs *regs, unsigned long error_code,
 			       unsigned long address, struct task_struct *tsk,
 			       bool *return_early, int magic)
 {
-
 	struct trace_recording_state *record = &current->obl.record;
 	struct vm_area_struct *maybe_stack;
 
