@@ -1,7 +1,3 @@
-[submodule "syncswap"]
-	path = syncswap
-	url = git@github.com:amaro/syncswap.git
-	branch = oblivious
 [submodule "experiments"]
 	path = experiments
 	url = git@github.com:Ngalstyan4/oblivious-experiments.git
