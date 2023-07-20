@@ -1,3 +1,7 @@
 [submodule "experiments"]
 	path = experiments
 	url = git@github.com:Ngalstyan4/oblivious-experiments.git
+[submodule "fastswap"]
+	path = fastswap
+	url = git@github.com:clusterfarmem/fastswap.git
+	branch = async_writes
